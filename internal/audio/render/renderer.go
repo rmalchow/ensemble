@@ -421,8 +421,15 @@ func (r *Renderer) drain(ctx context.Context) {
 	p := r.params()
 	outCh := p.Channels
 	buf := make([]float32, drainFrames*outCh)
-	wrote := false
-	for {
+	// Per-pass cap: ~100 ms of audio. Plenty of throughput headroom against the
+	// 20 ms tick cadence — while guaranteeing the CONTROL LAW keeps running: a
+	// follower's producer is fed by the live receiver and never lets the ring
+	// empty, so an unbounded drain-until-empty loop would never return and
+	// tick() (sync detection, drift, reseek) would never run — the renderer
+	// then plays uncontrolled forever with HaveSync stuck false.
+	maxPass := p.Rate / 10 * outCh
+	wrote := 0
+	for wrote < maxPass {
 		select {
 		case <-ctx.Done():
 			return
@@ -430,7 +437,7 @@ func (r *Renderer) drain(ctx context.Context) {
 		}
 		got := r.ring.Read(buf)
 		if got == 0 {
-			if !wrote {
+			if wrote == 0 {
 				// Nothing buffered at all this pass: the producer fell behind. The
 				// next tick sees playedContent lag past HardErrSamp and reseeks.
 				r.underruns++
@@ -451,7 +458,7 @@ func (r *Renderer) drain(ctx context.Context) {
 			}
 			return
 		}
-		wrote = true
+		wrote += n
 		r.framesWritten += int64(n / outCh)
 		r.lastWriteAt = time.Now()
 	}

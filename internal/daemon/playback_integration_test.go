@@ -277,6 +277,19 @@ func TestTwoNodeSyncedPlayback(t *testing.T) {
 		return ok && playing && bGen == aGen
 	})
 
+	// B's renderer must reach REAL sync (HaveSync from the follower timeline) —
+	// not just uncontrolled producer flow-through: the generation gate must
+	// follow the receiver's adopted streamGen.
+	waitFor(t, 30*time.Second, "B's renderer to report sync", func() bool {
+		hsB := nodeB.hooksFor()
+		if hsB == nil {
+			return false
+		}
+		hsB.mu.Lock()
+		defer hsB.mu.Unlock()
+		return hsB.lastTick.HaveSync
+	})
+
 	// B RENDERS the tone: its capturing sink receives a sustained loud segment
 	// (≥250 ms of contiguous 10 ms RMS-loud windows) whose zero-crossing
 	// frequency matches the 1 kHz source within tolerance — i.e. the decoded

@@ -403,6 +403,22 @@ type hookState struct {
 	recv *receiverPlane
 	rend *renderPlane
 
+	// ftl is the live follower timeline (when rendering as a follower); its
+	// streamGen GATE must follow the receiver's adopted generation — left at
+	// the zero value it rejects every chunk and the follower NEVER reports
+	// sync (render holds at want=0 forever). Synced in syncTransport.
+	ftl *group.FollowerTimeline
+
+	// lastLane tracks the applied per-node lane facts (channel/gain/hwDelay) so
+	// a doc-level change is logged once in verbose mode (the renderer applies
+	// them silently every tick).
+	lastLane struct {
+		channel string
+		gainDB  float64
+		delayUs int
+		init    bool
+	}
+
 	// lastClockAddr is the master clock endpoint the running follower pings.
 	// The resolution can CHANGE underneath it (doc-addr fallback before gossip
 	// meta lands → the live observed endpoint after), so syncTransport re-points
@@ -546,6 +562,25 @@ func (h *hookState) syncTransport(d group.Decision, in group.Inputs) {
 			_ = h.startRender()
 		}
 	}
+	// Follower timeline generation gate: track the receiver's adopted streamGen
+	// (the master re-keys on play/stop/seek/failover) so the projection keeps
+	// reporting sync across generation bumps.
+	if h.ftl != nil && h.recv != nil {
+		h.ftl.SetStreamGen(h.recv.r.StreamGen())
+	}
+	// Verbose: surface per-node lane changes (channel/gain/hwDelay) once — the
+	// renderer applies them silently every tick.
+	if nr := nodeRecord(h.cfg(), h.n.options.NodeID); nr != nil {
+		if !h.lastLane.init || nr.Channel != h.lastLane.channel ||
+			nr.GainDB != h.lastLane.gainDB || nr.HWDelayUs != h.lastLane.delayUs {
+			if h.lastLane.init {
+				logf(h.n.options.Log, "render: lane changed channel=%q gain=%+.1fdB hwDelay=%dµs",
+					nr.Channel, nr.GainDB, nr.HWDelayUs)
+			}
+			h.lastLane.channel, h.lastLane.gainDB, h.lastLane.delayUs = nr.Channel, nr.GainDB, nr.HWDelayUs
+			h.lastLane.init = true
+		}
+	}
 	// Clock-follower re-point: the master's clock endpoint resolution improves
 	// over time (doc-addr fallback before gossip meta lands → the live observed
 	// endpoint after). A follower stuck pinging a stale/unreachable address
@@ -601,14 +636,17 @@ func (h *hookState) startClockServer(_ string) error {
 		srv, err = clock.Listen(h.ap.clockAddr)
 	}
 	if err != nil {
+		logf(h.n.options.Log, "clock: server bind %s FAILED: %v", h.ap.clockAddr, err)
 		return err
 	}
+	logf(h.n.options.Log, "clock: server listening on %s (gated=%t)", h.ap.clockAddr, h.allow != nil)
 	h.srv = srv
 	return nil
 }
 
 func (h *hookState) stopClockServer() {
 	if h.srv != nil {
+		logf(h.n.options.Log, "clock: server stopped")
 		_ = h.srv.Close()
 		h.srv = nil
 	}
@@ -627,8 +665,10 @@ func (h *hookState) startOrigin(groupID string, streamGen uint64) error {
 	if media == "" {
 		return nil // nothing selected yet; origin starts when play selects media
 	}
+	logf(h.n.options.Log, "origin: opening media %q (gen=%d)", h.n.mediaPath(media), streamGen)
 	src, err := source.Open(h.n.mediaPath(media), h.ap.rate, h.ap.channels)
 	if err != nil {
+		logf(h.n.options.Log, "origin: open media %q FAILED: %v", media, err)
 		return err
 	}
 	c, err := codec.New(codec.PCM)
@@ -655,15 +695,21 @@ func (h *hookState) startOrigin(groupID string, streamGen uint64) error {
 	ctx, cancel := context.WithCancel(h.n.roleCtxNow())
 	h.orig = &originPlane{o: o, cancel: cancel}
 	h.lastMedia = media
+	logf(h.n.options.Log, "origin: streaming %q gen=%d listeners=%d (decode+send started)",
+		media, streamGen, o.Listeners())
 	go func() {
 		defer src.Close()
-		_ = o.Run(ctx)
+		err := o.Run(ctx)
+		if err != nil && ctx.Err() == nil {
+			logf(h.n.options.Log, "origin: stopped with error: %v", err)
+		}
 	}()
 	return nil
 }
 
 func (h *hookState) stopOrigin() {
 	if h.orig != nil {
+		logf(h.n.options.Log, "origin: stopped")
 		h.orig.cancel()
 		h.orig = nil
 	}
@@ -677,10 +723,11 @@ func (h *hookState) originResumeAt(sampleIndex int64, playing bool) {
 		h.tl.Seed(sampleIndex, playing)
 	}
 	if h.orig != nil {
-		h.orig.o.ResumeAt(sampleIndex, playing)
+		gen := h.orig.o.ResumeAt(sampleIndex, playing)
 		// The bump re-keys the stream; drop the prior generation's local PCM so
 		// the master's own render re-primes cleanly (the R11 analog).
 		h.loopRing.Reset()
+		logf(h.n.options.Log, "origin: resume at sample=%d playing=%t (gen→%d)", sampleIndex, playing, gen)
 	}
 	h.lastPlaying = playing
 }
@@ -702,6 +749,7 @@ func (h *hookState) startClockFollower(_, masterAddr string) error {
 	ctx, cancel := context.WithCancel(h.n.roleCtxNow())
 	h.fol = &folPlane{f: fol, cancel: cancel}
 	h.lastClockAddr = masterAddr
+	logf(h.n.options.Log, "clock: follower pinging master at %s", masterAddr)
 	go func() { _ = fol.Run(ctx, masterAddr) }()
 	return nil
 }
@@ -747,6 +795,7 @@ func (h *hookState) startReceiver(groupID string) error {
 			return err
 		}
 		h.recv = &receiverPlane{r: rcv, rng: rng, closer: ln, cancel: cancel}
+		logf(h.n.options.Log, "receiver: listening on %s/tcp (ring=%d samples)", h.ap.audioAddr, rng.Cap())
 		go func() {
 			defer ln.Close()
 			_ = rcv.RunTCP(ctx, ln)
@@ -761,10 +810,12 @@ func (h *hookState) startReceiver(groupID string) error {
 	}
 	conn, err := net.ListenUDP("udp", uaddr)
 	if err != nil {
+		logf(h.n.options.Log, "receiver: bind %s/udp FAILED: %v", h.ap.audioAddr, err)
 		cancel()
 		return err
 	}
 	h.recv = &receiverPlane{r: rcv, rng: rng, closer: conn, cancel: cancel}
+	logf(h.n.options.Log, "receiver: listening on %s/udp (ring=%d samples)", h.ap.audioAddr, rng.Cap())
 	go func() {
 		defer conn.Close()
 		_ = rcv.Run(ctx, conn)
@@ -774,6 +825,7 @@ func (h *hookState) startReceiver(groupID string) error {
 
 func (h *hookState) stopReceiver() {
 	if h.recv != nil {
+		logf(h.n.options.Log, "receiver: stopped")
 		h.recv.cancel()
 		h.recv = nil
 	}
@@ -826,6 +878,11 @@ func (h *hookState) startRender() error {
 		h.lastTick = ti
 		h.mu.Unlock()
 	})
+	mode := "follower (chasing master timeline via recv)"
+	if h.recv == nil {
+		mode = "master loopback (origin PCM tee)"
+	}
+	logf(h.n.options.Log, "render: started — %s", mode)
 	ctx, cancel := context.WithCancel(h.n.roleCtxNow())
 	h.rend = &renderPlane{rd: rd, cancel: cancel}
 	go func() { _ = rd.Run(ctx) }()
@@ -834,6 +891,7 @@ func (h *hookState) startRender() error {
 
 func (h *hookState) stopRender() {
 	if h.rend != nil {
+		logf(h.n.options.Log, "render: stopped")
 		h.rend.cancel()
 		h.rend = nil
 	}
@@ -844,13 +902,19 @@ func (h *hookState) stopRender() {
 // receiver chunk meta + clock follower.
 func (h *hookState) renderTimeline() group.Timeline {
 	if h.orig != nil || h.recv == nil {
+		h.ftl = nil
 		return h.tl // master/solo loopback
 	}
 	clk := group.OrphanClock()
 	if h.fol != nil {
 		clk = group.FollowerClock(h.fol.f)
 	}
-	return group.NewFollowerTimeline(chunkMetaAdapter{h.recv.r}, clk, h.ap.rate)
+	ftl := group.NewFollowerTimeline(chunkMetaAdapter{h.recv.r}, clk, h.ap.rate)
+	// Seed the generation gate from the receiver's CURRENT adopted gen and keep
+	// it following in syncTransport — an unsynced gate rejects every chunk.
+	ftl.SetStreamGen(h.recv.r.StreamGen())
+	h.ftl = ftl
+	return ftl
 }
 
 // renderSource returns the renderer's FrameReader: the receiver ring on a
@@ -907,7 +971,11 @@ func (h *hookState) addListeners(o *origin.Origin, doc state.ConfigDoc, groupID 
 		if err != nil {
 			continue
 		}
+		before := o.Listeners()
 		_ = o.AddListener(id, addr)
+		if o.Listeners() > before {
+			logf(h.n.options.Log, "origin: listener added %s -> %s", shortID(id), hostPort)
+		}
 	}
 }
 

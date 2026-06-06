@@ -804,9 +804,11 @@ func (rs *roleState) apply(master string, gen uint64) {
 	rs.roleCancel = rcancel
 	rs.roleCtx = rctx
 	if master == rs.self {
+		logf(rs.node.options.Log, "role: MASTER (gen=%d)", gen)
 		rs.node.setRole("master")
 		rs.node.runMaster(rctx, gen)
 	} else {
+		logf(rs.node.options.Log, "role: follower of %s (gen=%d)", shortID(master), gen)
 		rs.node.setRole("follower")
 		rs.node.runFollower(rctx, gen, master)
 	}
