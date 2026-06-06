@@ -19,6 +19,8 @@ frontend:
   artifacts:
     paths: [internal/web/dist]
     expire_in: 1 day
+  tags:
+    - shared
 
 # 2) Vet + unit tests + a cross-build smoke (no toolchain needed).
 test:
@@ -32,6 +34,8 @@ test:
     - go vet ./...
     - go test ./...
     - GOOS=linux GOARCH=arm64 go build ./...   # proves the arm64 cross-build stays clean
+  tags:
+    - shared
 
 # 3) Cross-compile every target in parallel → downloadable artifacts.
 build:
@@ -53,6 +57,8 @@ build:
     name: "ensemble-${CI_COMMIT_REF_SLUG}"
     paths: [bin/]
     expire_in: 4 weeks
+  tags:
+    - shared
 
 # 4) On a tag, publish a GitLab Release that links the per-arch binaries.
 release:
@@ -74,3 +80,5 @@ release:
           url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/bin/ensemble-linux-arm64?job=build"
         - name: "ensemble-linux-armv7"
           url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/bin/ensemble-linux-armv7?job=build"
+  tags:
+    - shared

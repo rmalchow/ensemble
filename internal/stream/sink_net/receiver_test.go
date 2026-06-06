@@ -244,11 +244,18 @@ func TestFlushAndReprime(t *testing.T) {
 // TestLatestChunkMeta: the receiver exposes the newest accepted chunk's anchor for
 // the FollowerTimeline.
 func TestLatestChunkMeta(t *testing.T) {
-	r, _ := newTestReceiver(t, allowingSet("127.0.0.1"), canonCfg())
+	// LeadMs=0→default 300; one chunk is below the prime lead, so to exercise the
+	// meta-anchor projection (not the prime gate) use a 1-frame lead so the first
+	// chunk both anchors and primes. The prime gate itself is covered in
+	// reprime_test.go.
+	cfg := canonCfg()
+	cfg.LeadMs = 0 // defaults to 300 ms; override the prime target after construction
+	r, _ := newTestReceiver(t, allowingSet("127.0.0.1"), cfg)
+	r.primeTarget = 1 // one chunk fills the lead so playout enables immediately
 	r.handle(buildPacket(4, 0, 1000, tFrames, tChannels, 0.5), loopbackAddr)
 	idx, mono, gen, playing, ok := r.LatestChunkMeta()
 	if !ok {
-		t.Fatal("LatestChunkMeta not ok after a chunk")
+		t.Fatal("LatestChunkMeta not ok after a chunk + prime")
 	}
 	if idx != 1000 || gen != 4 || !playing {
 		t.Errorf("meta=(idx %d, gen %d, playing %v) want (1000, 4, true)", idx, gen, playing)

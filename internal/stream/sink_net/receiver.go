@@ -161,36 +161,28 @@ func New(c codec.Codec, f fec.FEC, r *ring.Ring, allow *allowlist.Set, cfg Confi
 		chunkFrames: chunkFrames,
 		win:         newWindow(cfg.WindowPackets),
 		push:        rp,
-		readBuf:     make([]byte, maxDatagram),
+		gate:        streamgen.NewGate(),
+		awaitKeyframe: true, // a fresh receiver primes from its first keyframe
+		primeTarget:   int64(cfg.LeadMs) * int64(cfg.Rate) / 1000,
+		readBuf:       make([]byte, maxDatagram),
 	}
 }
 
-// LatestChunkMeta returns the newest accepted chunk's anchor and whether one has
-// been seen. It is the ChunkMetaSource the group's FollowerTimeline consumes (05
+// LatestChunkMeta returns the newest accepted chunk's anchor and whether playout
+// is enabled. It is the ChunkMetaSource the group's FollowerTimeline consumes (05
 // §6.2 / A.2); the receiver never computes the sample index, it reads it from the
-// header (05 §5.1).
+// header (05 §5.1). ok is false until BOTH a chunk has been accepted AND the prime
+// lead is filled (05 §5.6.4): the prime gate withholds playout through the
+// FollowerTimeline ok=false until one buffer lead of keyframe-anchored audio has
+// accumulated, so render holds (orphan/silence) rather than playing a half-empty
+// buffer on a late join / (re)prime.
 func (r *Receiver) LatestChunkMeta() (sampleIndex, masterMono int64, gen uint64, playing, ok bool) {
 	m := r.latest
-	return m.SampleIndex, m.MasterMono, m.StreamGen, m.Playing, r.haveChunk
+	return m.SampleIndex, m.MasterMono, m.StreamGen, m.Playing, r.haveChunk && r.primed
 }
 
 // StreamGen reports the currently accepted generation (status snapshot).
-func (r *Receiver) StreamGen() uint64 { return r.gen }
-
-// FlushAndReprime drops the reorder window + FEC state and the stale ring tail
-// (A.14.4 / R11), used by the group engine on (re)start as a follower. The next
-// stream re-primes cleanly from its first packet.
-func (r *Receiver) FlushAndReprime() {
-	r.win.reset()
-	r.fec = resetFEC(r.fec)
-	r.ring.Reset()
-	if rp, ok := r.push.(*ringPusher); ok {
-		rp.haveCursor = false
-		rp.playCursor = 0
-	}
-	r.haveChunk = false
-	r.latest = chunkMeta{}
-}
+func (r *Receiver) StreamGen() uint64 { return r.gate.Current() }
 
 // Run reads datagrams from conn and drives allowlist→unwrap→Recover→reorder/dedupe→
 // decode→ring.PushAt until ctx is cancelled (05 §5.6.2). conn is bound by the group
@@ -231,19 +223,25 @@ func (r *Receiver) handle(buf []byte, src netip.Addr) {
 	if err != nil {
 		return // bad packet — dropped without panic
 	}
-	// 4. generation gate (05 §5.8).
-	switch {
-	case hdr.StreamGen > r.gen:
-		// Higher gen: flush window+FEC+stale ring tail, adopt, resume from here.
-		r.win.reset()
-		r.fec = resetFEC(r.fec)
-		r.ring.Reset()
-		if rp, ok := r.push.(*ringPusher); ok {
-			rp.haveCursor = false
-		}
-		r.gen = hdr.StreamGen
-	case hdr.StreamGen < r.gen:
+	// 4. generation gate (05 §5.8) — delegated to streamgen.Gate.
+	switch r.gate.Accept(hdr.StreamGen) {
+	case streamgen.Adopt:
+		// Higher gen: flush window+FEC+stale ring tail and re-enter the prime state
+		// (keyframe-first, no playout until the lead refills) BEFORE decoding this
+		// (keyframe) packet. The gate has already advanced to hdr.StreamGen.
+		r.flushAndReprime()
+	case streamgen.Drop:
 		return // stale prior-generation straggler — DROP
+	}
+
+	// Keyframe-first (05 §5.6.4): after a (re)prime, hold non-keyframe chunks until
+	// the first keyframe of the (new) generation lands so an inter-frame decoder
+	// starts cold. PCM chunks are always keyframes, so this never bites PCM.
+	if r.awaitKeyframe {
+		if !hdr.Flags.Keyframe() {
+			return // pre-keyframe chunk of a freshly-(re)primed gen — not decodable cold
+		}
+		r.awaitKeyframe = false
 	}
 
 	// 5–6. FEC.Recover ingests the packet, returning newly-decodable source packets.
@@ -257,8 +255,10 @@ func (r *Receiver) handle(buf []byte, src netip.Addr) {
 		}
 		released, gaps := r.win.insert(sp.Clone(), r.chunkFrames)
 		for _, g := range gaps {
-			// Unrecoverable missing chunk: conceal at its sampleIndex (05 §5.6.3).
+			// Unrecoverable missing chunk: conceal at its sampleIndex (05 §5.6.3). A
+			// concealed chunk still advances the prime lead (it keeps the cadence).
 			r.push.PushAt(g.sampleIndex, concealChunk(r.cfg.FramesPerChunk, r.cfg.Channels))
+			r.advancePrime()
 		}
 		for _, rp := range released {
 			r.deliver(rp)
@@ -283,6 +283,20 @@ func (r *Receiver) deliver(p wire.Packet) {
 		Playing:     true, // master transport state; PCM keyframe carries play=true
 	}
 	r.haveChunk = true
+	r.advancePrime()
+}
+
+// advancePrime accumulates one chunk toward the prime lead and flips primed once
+// the lead is filled (05 §5.6.4 / §5.7). Until primed, LatestChunkMeta reports
+// ok=false so the FollowerTimeline holds playout.
+func (r *Receiver) advancePrime() {
+	if r.primed {
+		return
+	}
+	r.primeFrames += r.chunkFrames
+	if r.primeFrames >= r.primeTarget {
+		r.primed = true
+	}
 }
 
 // resetFEC returns a fresh FEC of the same id so a generation change / flush starts
