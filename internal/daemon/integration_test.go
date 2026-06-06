@@ -157,8 +157,15 @@ func TestEndToEndGenesisRestartAdopt(t *testing.T) {
 		t.Fatalf("browser cert fingerprint changed across restart: %q -> %q (want stable, persisted cert)",
 			fingerBefore, nodeA2.bootstrapFinger)
 	}
-	if v := nodeA2.configVersion(); v != 1 {
-		t.Fatalf("restarted node A config version = %d, want 1", v)
+	// The version is ≥1 (genesis) but not pinned exactly: the role loop's
+	// background self-syncs (probed audio devices; the no-sink render fallback
+	// in CI containers) legitimately bump it right after genesis. What MUST
+	// survive the restart is the genesis content itself.
+	if v := nodeA2.configVersion(); v < 1 {
+		t.Fatalf("restarted node A config version = %d, want >= 1", v)
+	}
+	if got := nodeA2.store.Get().Cluster.Name; got != "home" {
+		t.Fatalf("restarted node A cluster name = %q, want home (genesis content lost)", got)
 	}
 	baseA2, clientA2, stopA2 := serveNode(t, nodeA2)
 	defer stopA2()
