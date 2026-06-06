@@ -3,7 +3,6 @@ stages: [frontend, test, build, release]
 variables:
   CGO_ENABLED: "0"
   GOMODCACHE: "$CI_PROJECT_DIR/.gomodcache"
-  GIT_DEPTH: "0"            # full history so `git describe` sees tags
 
 # 1) Build the embedded UI; pass internal/web/dist to later stages as an artifact.
 frontend:
@@ -48,7 +47,7 @@ build:
       - { GOOS: linux, GOARCH: amd64 }
       - { GOOS: linux, GOARCH: arm64 }
   script:
-    - VER="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+    - VER="$CI_COMMIT_SHORT_SHA"   # version IS the commit hash (no tags)
     - SUFFIX="${GOOS}-${GOARCH}${GOARM:+v$GOARM}"
     - go build -trimpath -ldflags "-s -w -X main.version=$VER"
         -o "bin/ensemble-$SUFFIX" ./cmd/ensemble
@@ -59,22 +58,28 @@ build:
   tags:
     - shared
 
-# 4) On a tag, publish a GitLab Release that links the per-arch binaries.
+# 4) Publish a GitLab Release identified by the COMMIT HASH (no manual tag):
+# every default-branch commit releases as v-<short-sha>. A GitLab release needs
+# a tag *ref* under the hood, so release-cli auto-creates one pinned to the
+# commit — the operator never tags by hand. Artifact links resolve by the
+# commit SHA, so they point at exactly this build.
 release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
   needs: [build]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script: [ 'echo "Releasing $CI_COMMIT_SHORT_SHA"' ]
   release:
-    tag_name: "$CI_COMMIT_TAG"
-    name: "Ensemble $CI_COMMIT_TAG"
-    description: "Static pure-Go binaries for linux/amd64, arm64, armv7."
+    tag_name: "v-$CI_COMMIT_SHORT_SHA"
+    ref: "$CI_COMMIT_SHA"
+    name: "Ensemble $CI_COMMIT_SHORT_SHA"
+    description: "Static pure-Go binaries for linux/amd64 and arm64 (commit $CI_COMMIT_SHA)."
     assets:
       links:
         - name: "ensemble-linux-amd64"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/bin/ensemble-linux-amd64?job=build"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_SHA/raw/bin/ensemble-linux-amd64?job=build"
         - name: "ensemble-linux-arm64"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/bin/ensemble-linux-arm64?job=build"
-        - name: "ensemble-linux-armv7"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/bin/ensemble-linux-armv7?job=build"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_SHA/raw/bin/ensemble-linux-arm64?job=build"
   tags:
     - shared
