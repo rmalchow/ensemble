@@ -1,93 +1,98 @@
-# ensemble
+# Ensemble
 
+**Sample-accurate multiroom audio that organizes itself.** Power on a player, it's
+discovered and adopted into your cluster, and it plays in lock-step with every other
+speaker in its group — no controller box, no cloud, no config files.
 
+> **Status:** design complete, implementation starting. The full architecture,
+> protocols, interfaces, API, UI, security model, and build pipeline are specified in
+> **[`doc/`](./doc/README.md)** — start with [`doc/README.md`](./doc/README.md). Code
+> lands phase by phase (see [`doc/10-roadmap-and-dumb-nodes.md`](./doc/10-roadmap-and-dumb-nodes.md)).
 
-## Getting started
+---
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## Why Ensemble
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+- **Truly synchronized.** A per-group master decodes audio once and unicasts timestamped
+  chunks; every player locks to a shared clock and continuously micro-resamples to hold
+  **sub-millisecond** alignment — tight enough for a real stereo image split across two
+  speakers on WiFi.
+- **Self-organizing.** Zero-config LAN discovery, gossip-replicated cluster state, and
+  automatic per-group master election with seamless failover. Any node's web UI operates
+  the *whole* cluster — adopt, configure, and play from anywhere.
+- **Grouped however you like.** Any number of independent groups, each with its own clock,
+  its own media, and its own membership. A node is a group of one, or one of many.
+- **One static binary, no dependencies.** Pure Go — no `libasound`, no cgo, no ffmpeg.
+  Precise audio comes from talking to the kernel directly; if a box can't do precise, it
+  gracefully falls back. Cross-compiles to a Raspberry Pi with **zero toolchain**.
+- **Secure by design.** All control traffic is mutually authenticated (mTLS); realtime
+  traffic is accepted only from known cluster addresses. Nodes join via a PIN-gated
+  certificate exchange.
+- **Runs on cheap hardware.** A 512 MB quad-core Pi (3 A+ / Zero 2 W) is a comfortable
+  full node. Headless media-only nodes (e.g. a NAS container) can drive a group without
+  any audio output of their own.
 
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## How it works
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.rand0m.me/ruben/go/ensemble.git
-git branch -M main
-git push -uf origin main
+        ┌── group "Living Room" ──────────────┐     ┌── group "Kitchen" ──┐
+ mp3/   │  master: decode → chunk → unicast ──┼──►  │  master + listener  │
+ FLAC/  │  + shared clock                     │     └─────────────────────┘
+ HTTP   │     └─► player (left)  player (right)│
+        └─────────────────────────────────────┘
+  one cluster · one CA · gossip-replicated config · mTLS control plane
 ```
 
-## Integrate with your tools
+Each player maps the group's stream timeline to its own sound hardware, correcting for
+its DAC's clock drift and a one-time per-speaker delay trim — so the room stays in phase.
 
-* [Set up project integrations](https://gitlab.rand0m.me/ruben/go/ensemble/-/settings/integrations)
+## Quick start
 
-## Collaborate with your team
+> Buildable once the implementation lands; the pipeline and prerequisites are specified
+> now in [`doc/11-build-ci-and-release.md`](./doc/11-build-ci-and-release.md).
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+```bash
+# build (pure Go; Node only to bundle the web UI)
+cd web && npm ci && npm run build && cd ..
+CGO_ENABLED=0 go build -o bin/ensemble ./cmd/ensemble
 
-## Test and Deploy
+# cross-compile for a Raspberry Pi — no C toolchain needed
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/ensemble-arm64 ./cmd/ensemble
 
-Use the built-in continuous integration in GitLab.
+# run a node (first one creates the cluster via the setup wizard)
+./bin/ensemble
+```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Prebuilt binaries for `linux/amd64`, `arm64`, and `armv7` are published as GitLab CI
+artifacts and on the project's **Releases** page (see the build doc).
 
-***
+## Hardware
 
-# Editing this README
+- **Player node:** any Linux box; a 512 MB quad-A53 Pi is plenty. An I2S DAC HAT or HDMI
+  audio is recommended over the noisy analog jack.
+- **Network:** wired or WiFi (prefer 5 GHz; the buffer + FEC absorb jitter). For large
+  groups, prefer a wired master.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+## Documentation
 
-## Suggestions for a good README
+The complete specification lives in **[`doc/`](./doc/README.md)**:
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+| | |
+|---|---|
+| [Spine / decisions / contracts](./doc/README.md) | [Architecture](./doc/01-architecture-and-packages.md) |
+| [Cluster & discovery](./doc/02-cluster-discovery-membership.md) | [Security & adoption](./doc/03-adoption-takeover-security-pki.md) |
+| [Clock & groups](./doc/04-clock-and-groups.md) | [Streaming protocol](./doc/05-audio-streaming-protocol.md) |
+| [Audio output & sync](./doc/06-audio-output-scheduling.md) | [Config & replication](./doc/07-config-and-replication.md) |
+| [HTTP API](./doc/08-http-api-reference.md) | [UI screens](./doc/09-ui-screens.md) |
+| [Roadmap & dumb nodes](./doc/10-roadmap-and-dumb-nodes.md) | [Build, CI & release](./doc/11-build-ci-and-release.md) |
+| [Appendix: algorithms, pinned deps, parameters](./doc/A-appendix-algorithms-and-pinned-choices.md) | |
 
-## Name
-Choose a self-explaining name for your project.
+## Clone
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+```bash
+git clone https://gitlab.rand0m.me/ruben/go/ensemble.git
+```
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+_TBD._
