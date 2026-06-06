@@ -1,0 +1,148 @@
+{
+  "version": 87,
+  "cluster": {
+    "name": "Home",
+    "caCertPem": "-----BEGIN CERTIFICATE-----\nMIIB...clusterCApublic...AB\n-----END CERTIFICATE-----\n",
+    "created": "2026-01-12T09:14:03Z",
+    "fingerprint": "f3a1c9e2b7d40518a6c2e9f1772b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d"
+  },
+  "secrets": {
+    "caKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAw...clusterCAprivate-PLAINTEXT-no-sealing-D18...Fg==\n-----END PRIVATE KEY-----\n",
+    "sharedSecret": "c2hhcmVkLWNsdXN0ZXItcm9vdC1zZWVkLWJhc2U2NA=="
+  },
+  "auth": {
+    "adminHash": "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQxMjM0NQ$Xk9...adminhash...Q=",
+    "argon": { "memKiB": 65536, "time": 3, "threads": 4, "keyLen": 32, "saltLen": 16 },
+    "apiKeys": [
+      {
+        "id": "ak_7Qm2",
+        "name": "kitchen-tablet",
+        "hash": "$argon2id$v=19$m=65536,t=3,p=4$a2V5c2FsdEFBQkND$Lm3...keyhash...8=",
+        "created": "2026-02-01T18:22:10Z",
+        "lastUsed": "2026-06-05T07:41:00Z"
+      }
+    ],
+    "pinHash": "$argon2id$v=19$m=65536,t=3,p=4$cGluc2FsdHh4eHh4$Pn7...pinhash...A="
+  },
+  "nodes": [
+    {
+      "id": "node-living-room-8f2a",
+      "name": "living-room",
+      "certPem": "-----BEGIN CERTIFICATE-----\nMIIB...livingroom...==\n-----END CERTIFICATE-----\n",
+      "addrs": ["192.168.1.21", "fe80::21"],
+      "hwDelayUs": 4200,
+      "channel": "left",
+      "gainDb": 0.0,
+      "caps": {
+        "render": true,
+        "sinks": ["alsa", "exec:aplay"],
+        "encode": ["pcm", "opus"],
+        "decode": ["pcm", "opus"],
+        "fec": ["none", "xorParity", "duplicate"],
+        "maxRate": 48000
+      },
+      "lastSeen": "2026-06-05T07:40:58Z"
+    },
+    {
+      "id": "node-kitchen-3c7b",
+      "name": "kitchen",
+      "certPem": "-----BEGIN CERTIFICATE-----\nMIIB...kitchen...==\n-----END CERTIFICATE-----\n",
+      "addrs": ["192.168.1.22"],
+      "hwDelayUs": 5100,
+      "channel": "right",
+      "gainDb": -1.5,
+      "caps": {
+        "render": true,
+        "sinks": ["exec:aplay"],
+        "encode": ["pcm"],
+        "decode": ["pcm"],
+        "fec": ["none", "xorParity"],
+        "maxRate": 48000
+      },
+      "lastSeen": "2026-06-05T07:40:59Z"
+    },
+    {
+      "id": "node-bedroom-9d4e",
+      "name": "bedroom",
+      "certPem": "-----BEGIN CERTIFICATE-----\nMIIB...bedroom...==\n-----END CERTIFICATE-----\n",
+      "addrs": ["192.168.1.23", "192.168.1.24"],
+      "hwDelayUs": 3000,
+      "channel": "stereo",
+      "gainDb": 0.0,
+      "caps": {
+        "render": true,
+        "sinks": ["alsa"],
+        "encode": ["pcm", "opus"],
+        "decode": ["pcm", "opus"],
+        "fec": ["none", "xorParity", "duplicate"],
+        "maxRate": 96000
+      },
+      "lastSeen": "2026-06-05T07:41:01Z"
+    },
+    {
+      "id": "node-nas-2b6f",
+      "name": "nas",
+      "certPem": "-----BEGIN CERTIFICATE-----\nMIIB...nas...==\n-----END CERTIFICATE-----\n",
+      "addrs": ["192.168.1.10"],
+      "hwDelayUs": 0,
+      "channel": "stereo",
+      "gainDb": 0.0,
+      "caps": {
+        "render": false,
+        "sinks": [],
+        "encode": ["pcm", "opus"],
+        "decode": [],
+        "fec": ["none", "xorParity", "duplicate"],
+        "maxRate": 48000
+      },
+      "lastSeen": "2026-06-05T07:41:00Z"
+    }
+  ],
+  "groups": [
+    {
+      "id": "grp-downstairs",
+      "name": "downstairs",
+      "memberNodeIds": ["node-living-room-8f2a", "node-kitchen-3c7b"],
+      "media": { "file": "calm-loop.mp3", "loop": true },
+      "playing": true,
+      "profile": {
+        "codec": "pcm",
+        "fec": "xorParity",
+        "rate": 48000,
+        "framesPerChunk": 480,
+        "fecK": 8,
+        "interleave": 4,
+        "transport": "udp"
+      },
+      "masterHint": "node-living-room-8f2a"
+    },
+    {
+      "id": "grp-upstairs",
+      "name": "upstairs",
+      "memberNodeIds": ["node-bedroom-9d4e"],
+      "media": { "file": "rain.mp3", "loop": true },
+      "playing": true,
+      "profile": {
+        "codec": "opus",
+        "fec": "none",
+        "rate": 48000,
+        "framesPerChunk": 480,
+        "fecK": 0,
+        "interleave": 0,
+        "transport": "udp"
+      }
+    }
+  ],
+  "revoked": {
+    "entries": [
+      {
+        "fingerprint": "aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899",
+        "nodeId": "node-guest-1a9c",
+        "reason": "forget",
+        "at": "2026-05-30T20:05:44Z"
+      }
+    ]
+  },
+  "updatedBy": "node-living-room-8f2a",
+  "updatedAt": "2026-06-05T07:38:12Z"
+}

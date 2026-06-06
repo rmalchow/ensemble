@@ -1,0 +1,20 @@
+/bin/
+# Node runtime state and operator-supplied media; keep config.yaml + media/.gitkeep.
+/data/
+data*/run/
+data*/node.json
+data*/cluster.yaml
+data*/media/*
+!data*/media/.gitkeep
+
+# Web: node deps and the Vite build output, but keep the committed placeholder
+# so `go build ./...` works without node.
+web/node_modules/
+web/dist/
+internal/web/dist/*
+!internal/web/dist/index.html
+
+# Dev-time calibration / sync test-clip artifacts (P4 aids; never runtime/build).
+*.wav
+*.flac
+synctest.*
