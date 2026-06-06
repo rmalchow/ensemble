@@ -202,6 +202,13 @@ type Node struct {
 	// startedAt is the process start time, for the StatusView uptime field.
 	startedAt time.Time
 
+	// claimEligibleSince/claimGrace debounce the master-hint claim (plane.go
+	// claimMasterHint): the claim eligibility must hold continuously for
+	// claimGrace before the doc write, so a freshly-booted node's empty
+	// membership view cannot steal the hint. Loop-goroutine-local.
+	claimEligibleSince time.Time
+	claimGrace         time.Duration
+
 	// webChanged is the coalesced state-change signal for the web layer's
 	// websocket hub (Deps.Changed → immediate snapshot push). The role loop
 	// signals it on every store/membership change; the store's own Changed
@@ -255,6 +262,7 @@ func New(opts Options) *Node {
 		fatal:      make(chan error, 1),
 		startedAt:  time.Now(),
 		webChanged: make(chan struct{}, 1),
+		claimGrace: 10 * time.Second,
 	}
 	n.activateHook = n.activate
 	n.persistHook = n.persistCluster

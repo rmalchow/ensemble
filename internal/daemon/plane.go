@@ -250,21 +250,44 @@ func (cp *clusterPlane) isAlive(nodeID string) bool {
 // master disappears; a lower-id node joining mid-stream can no longer steal
 // the role (which re-keyed the stream and permanently dropped sync). An ALIVE
 // hinted node is never contested — transient view skew resolves toward it on
-// the next recompute. Best-effort: a version conflict retries next tick.
+// the next recompute.
+//
+// The claim is GRACE-DEBOUNCED: the eligibility must hold continuously for
+// claimGrace before the write. A freshly-booted node's membership view briefly
+// contains only itself, making the true (hinted) master look dead — without
+// the grace a restarting FOLLOWER would steal the hint at boot and flap
+// mastership (observed in the field). Gossip converges within a couple of
+// seconds, the hinted master shows alive again, and the streak resets.
+// Best-effort: a version conflict retries next tick. Called only from the role
+// loop goroutine (claimEligibleSince needs no lock).
 func (n *Node) claimMasterHint(cp *clusterPlane, master string) {
-	if cp == nil || master == "" || master != n.options.NodeID {
+	eligible := false
+	if cp != nil && master != "" && master == n.options.NodeID {
+		doc := n.store.Get()
+		if i := indexGroup(doc.Groups, cp.groupID); i >= 0 && doc.Groups[i].MasterHint != master {
+			h := doc.Groups[i].MasterHint
+			eligible = h == "" || !cp.isAlive(h)
+		}
+	}
+	if !eligible {
+		n.claimEligibleSince = time.Time{}
 		return
 	}
+	if n.claimEligibleSince.IsZero() {
+		n.claimEligibleSince = time.Now()
+	}
+	if time.Since(n.claimEligibleSince) < n.claimGrace {
+		return // hold: membership may still be warming up
+	}
+
 	doc := n.store.Get()
 	i := indexGroup(doc.Groups, cp.groupID)
 	if i < 0 || doc.Groups[i].MasterHint == master {
 		return
 	}
-	if h := doc.Groups[i].MasterHint; h != "" && cp.isAlive(h) {
-		return // never contest a live hinted node
-	}
 	doc.Groups[i].MasterHint = master
 	if _, err := n.store.Apply(doc); err == nil {
+		n.claimEligibleSince = time.Time{}
 		logf(n.options.Log, "election: claimed master hint for group %q (anchor against id-steal)", cp.groupID)
 	}
 }
