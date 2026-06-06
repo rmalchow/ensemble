@@ -399,9 +399,17 @@ type hookState struct {
 	mu   sync.Mutex
 	srv  *clock.Server
 	orig *originPlane
-	fol  *clock.Follower
+	fol  *folPlane
 	recv *receiverPlane
 	rend *renderPlane
+
+	// lastClockAddr is the master clock endpoint the running follower pings.
+	// The resolution can CHANGE underneath it (doc-addr fallback before gossip
+	// meta lands → the live observed endpoint after), so syncTransport re-points
+	// the follower whenever the current resolution differs — without this a
+	// follower that started against a stale/unreachable address (docker bridge
+	// IP, wrong port) stays clock-unsynced FOREVER and never leaves orphan.
+	lastClockAddr string
 
 	// loopRing buffers the origin's PCM tee for the master's OWN render (the
 	// solo/master local playback path — without it a lone node plays silence
@@ -448,6 +456,13 @@ type receiverPlane struct {
 	r      *sinknet.Receiver
 	rng    *ring.Ring
 	closer io.Closer
+	cancel context.CancelFunc
+}
+
+// folPlane bundles a running clock follower + its own cancel (so a re-point
+// stops the old pinger instead of leaving two followers racing SetClockHealth).
+type folPlane struct {
+	f      *clock.Follower
 	cancel context.CancelFunc
 }
 
@@ -529,6 +544,18 @@ func (h *hookState) syncTransport(d group.Decision, in group.Inputs) {
 		if dev := h.deviceFor(); dev != h.lastDevice {
 			h.stopRender()
 			_ = h.startRender()
+		}
+	}
+	// Clock-follower re-point: the master's clock endpoint resolution improves
+	// over time (doc-addr fallback before gossip meta lands → the live observed
+	// endpoint after). A follower stuck pinging a stale/unreachable address
+	// never syncs and never leaves orphan — restart it at the new resolution.
+	if h.fol != nil && h.cp != nil && in.MasterID != "" && in.MasterID != h.n.options.NodeID {
+		if addr := h.cp.clockAddrOf(in.GroupID, in.MasterID); addr != h.lastClockAddr {
+			logf(h.n.options.Log, "clock: master endpoint moved %s -> %s (re-pointing follower)",
+				h.lastClockAddr, addr)
+			h.stopClockFollower()
+			_ = h.startClockFollower(in.GroupID, addr)
 		}
 	}
 	if !d.RunOrigin {
@@ -672,16 +699,18 @@ func (h *hookState) startClockFollower(_, masterAddr string) error {
 			h.engineSetClockHealth(md, true)
 		}
 	}))
-	h.fol = fol
-	ctx := h.n.roleCtxNow()
+	ctx, cancel := context.WithCancel(h.n.roleCtxNow())
+	h.fol = &folPlane{f: fol, cancel: cancel}
+	h.lastClockAddr = masterAddr
 	go func() { _ = fol.Run(ctx, masterAddr) }()
 	return nil
 }
 
 func (h *hookState) stopClockFollower() {
-	// The follower stops when its role ctx is cancelled by the role fence; we just
-	// drop the handle so a re-point builds a fresh one.
-	h.fol = nil
+	if h.fol != nil {
+		h.fol.cancel()
+		h.fol = nil
+	}
 }
 
 // startReceiver builds the follower-side receiver (recv→allowlist→FEC.Recover→
@@ -819,7 +848,7 @@ func (h *hookState) renderTimeline() group.Timeline {
 	}
 	clk := group.OrphanClock()
 	if h.fol != nil {
-		clk = group.FollowerClock(h.fol)
+		clk = group.FollowerClock(h.fol.f)
 	}
 	return group.NewFollowerTimeline(chunkMetaAdapter{h.recv.r}, clk, h.ap.rate)
 }
@@ -911,14 +940,14 @@ func (h *hookState) statusLine(role string, doc state.ConfigDoc, groupID string)
 			ti.HaveSync, ti.WantSample, ti.PlayedSample, ti.ErrorSamples, ti.RatioPPM, ti.Underruns)
 	}
 	if h.fol != nil {
-		if off, ok := h.fol.Offset(); ok {
+		if off, ok := h.fol.f.Offset(); ok {
 			fmt.Fprintf(&b, " clock{offset=%s", off)
-			if md, mok := h.fol.MinDelay(); mok {
+			if md, mok := h.fol.f.MinDelay(); mok {
 				fmt.Fprintf(&b, " mindelay=%s", md)
 			}
-			b.WriteString("}")
+			fmt.Fprintf(&b, " master=%s}", h.lastClockAddr)
 		} else {
-			b.WriteString(" clock{unsynced}")
+			fmt.Fprintf(&b, " clock{unsynced master=%s}", h.lastClockAddr)
 		}
 	}
 	return b.String()
