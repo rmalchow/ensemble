@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"gitlab.rand0m.me/ruben/go/ensemble/internal/cluster"
 	"gitlab.rand0m.me/ruben/go/ensemble/internal/config"
@@ -383,6 +384,7 @@ func TestSyncSelfRender(t *testing.T) {
 // honors a live hint over the lowest id).
 func TestClaimMasterHint(t *testing.T) {
 	n := New(Options{NodeID: "bbbb"})
+	n.claimGrace = 0 // unit test: claim immediately once eligible
 	seed := state.ConfigDoc{
 		Nodes:  []state.NodeRecord{{ID: "bbbb"}},
 		Groups: []state.GroupRecord{{ID: "default", MemberNodeIDs: []string{"bbbb"}}},
@@ -421,6 +423,24 @@ func TestClaimMasterHint(t *testing.T) {
 	n.claimMasterHint(cp, "bbbb")
 	if got := n.store.Get().Groups[0].MasterHint; got != "bbbb" {
 		t.Fatalf("hint = %q, want bbbb (claimed over dead predecessor)", got)
+	}
+
+	// Grace debounce: with a non-zero grace, a single eligible evaluation (the
+	// boot transient where the membership view is just-self) must NOT claim.
+	n2 := New(Options{NodeID: "cccc"})
+	n2.claimGrace = time.Hour
+	seed2 := state.ConfigDoc{
+		Nodes:  []state.NodeRecord{{ID: "cccc"}},
+		Groups: []state.GroupRecord{{ID: "default", MemberNodeIDs: []string{"cccc"}, MasterHint: "dead-master"}},
+	}
+	if _, err := n2.store.Apply(seed2); err != nil {
+		t.Fatal(err)
+	}
+	cp2 := newClusterPlane(n2, "default")
+	n2.claimMasterHint(cp2, "cccc")
+	n2.claimMasterHint(cp2, "cccc")
+	if got := n2.store.Get().Groups[0].MasterHint; got != "dead-master" {
+		t.Fatalf("hint = %q, want dead-master (grace must hold the boot-transient claim)", got)
 	}
 
 	// And the anchored hint WINS the election against a lower-id joiner: with
