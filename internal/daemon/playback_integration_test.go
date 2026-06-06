@@ -373,4 +373,24 @@ func TestSoloPlaybackRendersAudio(t *testing.T) {
 	if freq < 750 || freq > 1250 {
 		t.Errorf("solo rendered tone ≈ %.0f Hz, want ~1000 Hz", freq)
 	}
+
+	// Steady-state underrun budget: with the playout ring targeting a fraction
+	// of the lead (supply >= demand), the renderer must not starve every pass.
+	// Measure over 2s of real-time playback and allow a small residue.
+	readUnderruns := func() int64 {
+		hs := node.hooksFor()
+		if hs == nil {
+			return 0
+		}
+		hs.mu.Lock()
+		defer hs.mu.Unlock()
+		return hs.lastTick.Underruns
+	}
+	start := readUnderruns()
+	time.Sleep(2 * time.Second)
+	delta := readUnderruns() - start
+	t.Logf("solo steady-state underruns over 2s: %d", delta)
+	if delta > 5 {
+		t.Errorf("steady-state underruns = %d over 2s, want <= 5 (playout ring starving)", delta)
+	}
 }

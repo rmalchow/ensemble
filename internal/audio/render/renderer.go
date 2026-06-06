@@ -200,13 +200,25 @@ func ringCap(p RendererParams) int {
 	return 2 * p.Rate * p.Channels * lead / 1000
 }
 
-// leadSamples is the per-channel*channels fill target the producer keeps the ring at.
+// leadSamples is the fill target (interleaved samples) the producer keeps the
+// ring at: ONE THIRD of LeadMs (~100 ms at the canonical 300), floored at two
+// drain chunks. The full LeadMs is the TOTAL ahead-supply in the pipeline
+// (origin lead), shared between the receive ring, this playout ring and the
+// device buffer — a producer that targets the whole lead here starves the
+// upstream share, the ring oscillates near empty, and every drain pass logs an
+// underrun (with audible gaps when the device buffer drains during the empty
+// windows). A third keeps the device fed between control passes while leaving
+// the rest of the lead as upstream slack.
 func leadSamples(p RendererParams) int {
 	lead := p.LeadMs
 	if lead <= 0 {
 		lead = 300
 	}
-	return p.Rate * p.Channels * lead / 1000
+	target := p.Rate * p.Channels * lead / 3 / 1000
+	if min := 2 * drainFrames * p.Channels; target < min {
+		target = min
+	}
+	return target
 }
 
 // SetOnTick registers a per-tick status callback (UI/logging).
