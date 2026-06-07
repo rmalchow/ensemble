@@ -25,6 +25,9 @@ agents before implementation).
 - `internal/netx`: `BindTCPUDP(base int, tries int) (tcpLn, udpConn, port, err)`
   bind-or-increment (all-or-nothing per port), `BindTCP` for HTTP,
   `InterfaceCIDRs() []string`.
+- `internal/dl`: runtime shared-library probe via purego (D32) —
+  `Open(sonames, symbols)` with dlsym-verify-all-before-register,
+  `ErrUnavailable`, `Lib.Func`. Consumed by D (opus) and E (alsa).
 - Interface types consumed across pieces (defined where they're consumed,
   Go-style, but pinned in arch docs): output backend, frame sink, state store.
 
@@ -54,14 +57,18 @@ In-memory only; this node's own record fields set via setters
 semantics), created by a scheme-keyed factory (spec §6.1, D26): `file`
 (decoders wav/mp3/flac, mono→stereo, linear resample to 48k), `http(s)`
 (same decoders over a response body; live-paced, never EOF), `input`
-(exec-capture via pw-record/arecord, mirroring E's exec playback). Unit tests
-with generated WAV fixtures, an httptest server, and a fake capture command.
+(exec-capture via pw-record/arecord, mirroring E's exec playback). Also the
+**opus codec module** (D33): encoder/decoder bound to runtime-loaded libopus
+via internal/dl, `ErrUnavailable` without it. Unit tests with generated WAV
+fixtures, an httptest server, a fake capture command, and opus round-trip
+tests that t.Skip when libopus isn't loadable.
 
 ### E — sink & playout
-`internal/sink/*`. Output backends as a **named registry** (D27): `exec`
-(`pw-play`/`pw-cat -p`/`aplay`/`paplay` pipe, auto-pick), `null` (timed
-discard), `file` (debug); `alsa` slot reserved behind a build tag (v1.1) —
-v1 ships the registry and the optional `DelayReporter` seam. Jitter buffer
+`internal/sink/*`. Output backends as a **named registry** (D27/D34):
+`alsa` (runtime-loaded libasound via internal/dl, implements `DelayReporter`
+for exact servo measurement, registered only when the probe succeeds; first
+in `auto` order), `exec` (`pw-play`/`pw-cat -p`/`aplay`/`paplay` pipe,
+auto-pick), `null` (timed discard), `file` (debug). Jitter buffer
 keyed by seq, playout loop translating pts via the `Clock` contract, silence
 insertion, late-drop counters, generation gating, and the **continuous rate
 servo** (D25): skew estimator → PI controller (±500 ppm clamp, slewed) →
@@ -114,8 +121,9 @@ browser, join/leave/make-master/play/stop/rename actions. `npm run build` →
 
 ### K — main & e2e
 `cmd/ensemble/main.go` wiring (S→A→B/C→F/G→E→H→I lifecycle, four port binds,
-graceful shutdown), `scripts/dev2.sh` (two nodes, tmp data dirs, null sink env
-var `ENSEMBLE_OUTPUT=null`), e2e smoke test script asserting: discovery,
+capability probing at startup — PATH scan + internal/dl dlopen probes per
+D3/D32, graceful shutdown), `scripts/dev2.sh` (two nodes, tmp data dirs, null
+sink env var `ENSEMBLE_OUTPUT=null`), e2e smoke test script asserting: discovery,
 cluster doc convergence, follow, derived group id = xor, takeover,
 play→both sinks subscribe and receive frames in sync (/api/status sink
 stats), late join gets burst-primed, RESTART recovers a lost subscriber,
@@ -144,5 +152,6 @@ After each wave: `go build ./... && go vet ./... && go test ./...` must pass.
   fixtures, fake clocks).
 - Standard library first; allowed deps: echo v4, memberlist,
   grandcat/zeroconf, gorilla/websocket, hajimehoshi/go-mp3, mewkiz/flac,
-  go-audio/wav (or hand-rolled wav).
+  go-audio/wav (or hand-rolled wav), ebitengine/purego (via internal/dl
+  only). No cgo, no build tags — optional libs are runtime-probed (D32).
 - Log with `log/slog`, component-scoped (`slog.With("comp", "cluster")`).

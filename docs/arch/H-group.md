@@ -214,6 +214,17 @@ type SourceServer interface {
 // RESTART, §8.7) and delivers received frames to the local sink. H points it at
 // the current master and generation; G owns the keepalive/RESTART/recovery
 // internals and the actual sink.Push wiring (set up by main, K).
+//
+// Opus decode hook (D33, §8.3): the sink always consumes canonical PCM, so when
+// the tracked session's codec is opus the deliver path must decode each received
+// payload (an opus packet) back to a 3840 B PCM frame before Sink.Push. This
+// decode wrapper sits in the same deliver→sink seam that K wires (between the
+// subscriber's deliver callback and Sink.Push), using the audio package's
+// audio.NewOpusDecoder(); for pcm the payload reaches the sink unchanged. A lost
+// opus frame is silence, same as pcm (no PLC, §8.5/D33). The decoder is selected
+// off the session gen's codec (the replicated group settings the subscriber
+// re-reads on RECONFIG, §8.7); H points the subscriber at the master/gen, the
+// decode wrapper keys off that gen's codec.
 type Subscriber interface {
 	// SubscribeTo points the client at master `src` (the master's SOURCE_PORT,
 	// already resolved by H via DialCandidates) for session `gen`, with the
@@ -483,6 +494,24 @@ func (s *session) halt()
 3. Validate `codec` against `Caps` (opus gating, §8.3) using the **current** group
    settings (`Cluster.GroupSettings(groupID)`); reject `ErrNoOpus` if needed —
    *before* consuming a generation.
+3a. **Per-member opus capability validation (D33, §8.3).** When `codec == "opus"`,
+   check that **every** current group member reports the `opus` codec capability:
+   for each member ID in `mv.group.Members`, find its `NodeView` in `snap.Nodes`
+   and require `"opus"` ∈ `NodeView.Capabilities.Codecs`. If any member lacks it,
+   reject with `ErrNoOpus` whose message **names the lacking nodes** (their
+   `NodeView.Name`s) — *before* consuming a generation. (Step 3's `Caps` check
+   covers this node; this step covers the rest of the group, so an opus session
+   only starts when the whole group can decode.)
+3b. **Opus encode hook (D33, §8.3).** When `codec == "opus"`, wrap the freshly
+   opened `src` with the audio package's encoder — `enc, err :=
+   audio.NewOpusEncoder()`; on `dl.ErrUnavailable` (libopus not loadable on this
+   master) close `src` and **reject play** (no gen consumed). The wrapper encodes
+   each canonical 20 ms PCM frame returned by `src.ReadFrame` into one Opus packet,
+   so the payload the session hands to the source server is the **opus packet, not
+   the 3840 B PCM frame** (the master encodes once for all subscribers, §8.3). For
+   `codec == "pcm"` the PCM frame passes through unchanged. The wrapped source
+   satisfies the same `MediaSource` seam (`ReadFrame`/`Live`/`Close`, the latter
+   closing both encoder and underlying source), so steps 4–10 are codec-agnostic.
 4. Clock readiness: need `Clock.LocalToMaster(now)` ok to stamp `startMaster`.
    The master runs a follower against localhost and syncs within ~1 s; if not yet
    ok, retry-wait up to ~2 s; still not ok → close src, return a transient error
@@ -738,9 +767,11 @@ playout, and the 30-day purge / next master cleans the record). Idempotent via
   `ClockCtl.SetMaster(newClk,…)`, `Sink.Reset(gen)`. The subscriber BYEs the old
   master and HELLO-primes the new one; the follower discards clock samples and
   resyncs (F). No audio-side coordination beyond these three local calls.
-- **Opus without capability (§8.3)**: `validateSettings`/`Play` reject
-  `codec:opus` when `Caps.Codecs` lacks `"opus"` → `ErrNoOpus`. Default build
-  never lists opus.
+- **Opus without capability (§8.3/D33)**: `validateSettings`/`Play` reject
+  `codec:opus` when `Caps.Codecs` lacks `"opus"` → `ErrNoOpus`; `Play` also
+  rejects when **any other** current member lacks the opus capability, naming the
+  lacking nodes (per-member check, §2.4 step 3a). A node lists `"opus"` only when
+  the runtime libopus dlopen probe succeeds (D32/D33) — no build tag, one build.
 - **Unsynced master clock (§7)**: `Play` needs `Clock.LocalToMaster(now).ok` to
   stamp `startMaster`. The master runs a follower against localhost (synced ~1 s).
   `Play` retry-waits up to ~2 s; still unsynced → `ErrNotSynced` (transient), no

@@ -51,6 +51,9 @@ internal/audio/mp3.go          go-mp3 adapter: wraps *mp3.Decoder. ~40 lines.
 internal/audio/flac.go         mewkiz/flac adapter: wraps *flac.Stream. ~60 lines.
 internal/audio/resample.go     linear-interpolation resampler (any rate → 48000),
                                stereo-interleaved fixed-point int math. ~80 lines.
+internal/audio/opus.go         opus codec over internal/dl: NewOpusEncoder /
+                               NewOpusDecoder (ErrUnavailable when libopus won't
+                               load), Encode/Decode, OpusAvailable() probe. ~140 lines.
 
 internal/audio/source_test.go    scheme dispatch, Open errors, capability list,
                                  EOF contract (D9) end-to-end, live no-stall.
@@ -65,6 +68,9 @@ internal/audio/decode_test.go    framing/mono-dup/EOF over synthesized samples.
 internal/audio/resample_test.go  ratio/length/passthrough/interpolation checks.
 internal/audio/fixtures_test.go  helpers: writeWAV*, genTone, fake-capture exe,
                                  maybeFixture (gate mp3/flac on testdata).
+internal/audio/opus_test.go      round-trip (encode 1 s sine → decode → similar
+                                 energy) with t.Skip when libopus isn't loadable;
+                                 ErrUnavailable via a bogus soname through dl.
 ```
 
 `stream.FrameBytes`/`FrameSamples`/`SampleRate`/`Channels`/`FrameDuration`
@@ -262,6 +268,112 @@ units, step `= (inRate << 32) / 48000` per output frame. For each output frame,
 `i = pos>>32`, `frac = pos & 0xffffffff`, linearly blend input frames `i` and
 `i+1`; emit while `i+1` is in the available input (carry the boundary frame to
 the next call). All integer math; no float, no cgo.
+
+### 2.4 Opus codec (`opus.go`) — runtime-loaded libopus (D32/D33)
+
+The codec module lives in this package (D33). It carries libopus support in
+the one and only build and loads it at runtime through `internal/dl` (D32) —
+no cgo, no build tag, no `hraban/opus`. `NewOpusEncoder` / `NewOpusDecoder`
+each `dl.Open` libopus and return `dl.ErrUnavailable` when neither soname
+loads, so H/E can fall back to PCM (§8.3) without a panic. The constants are
+canonical-PCM fixed: 48 kHz, 2 channels, **960 samples per call** = one 20 ms
+canonical frame = `stream.FrameBytes` (3840 B) of s16le.
+
+```go
+// Opus session constants — tied to canonical PCM (§8.1) and the 20 ms frame.
+const (
+	opusSampleRate = 48000 // Hz; libopus full-band
+	opusChannels   = 2     // stereo
+	opusFrameSize  = 960   // samples/channel per 20 ms call (3840 B s16le)
+	opusBitrate    = 128000 // 128 kbps (§8.3, set via CTL)
+	opusMaxPacket  = 1500  // encode output bound (one frame fits easily)
+)
+
+// OpusEncoder wraps a C-side OpusEncoder* obtained via internal/dl. It is owned
+// by exactly one goroutine — H's per-session release/encode ticker (D33). Not
+// safe for concurrent use.
+type OpusEncoder struct {
+	st  uintptr  // C OpusEncoder* (opaque)
+	buf []byte   // reused opusMaxPacket scratch for Encode output
+	// bound libopus functions captured at construction (no per-call lookup)
+}
+
+// NewOpusEncoder loads libopus (libopus.so.0 → libopus.so), creates an encoder
+// for 48 kHz / 2 ch / OPUS_APPLICATION_AUDIO, and sets the bitrate to 128 kbps
+// via opus_encoder_ctl(OPUS_SET_BITRATE, 128000). Returns dl.ErrUnavailable
+// when libopus (or any bound symbol) is missing, or ErrBadMedia wrapping a
+// non-zero libopus status from create. The returned encoder owns C state that
+// MUST be released (Close or finalizer).
+func NewOpusEncoder() (*OpusEncoder, error)
+
+// Encode compresses exactly one canonical frame: pcm must be stream.FrameBytes
+// (3840 B, 960 stereo s16le samples). It returns the opus packet bytes —
+// variable length, ≤ opusMaxPacket — valid until the next Encode call (the
+// slice aliases the encoder's reused buffer; the caller copies before fan-out).
+// A negative libopus return is wrapped in ErrBadMedia.
+func (e *OpusEncoder) Encode(pcm []byte) ([]byte, error)
+
+// Close destroys the C encoder (opus_encoder_destroy) once; idempotent.
+func (e *OpusEncoder) Close() error
+
+// OpusDecoder mirrors OpusEncoder for the receive path. It is owned by exactly
+// one goroutine — the subscriber's deliver callback (D33). Not concurrent-safe.
+type OpusDecoder struct {
+	st  uintptr // C OpusDecoder*
+	buf []byte  // reused stream.FrameBytes scratch for Decode output
+}
+
+// NewOpusDecoder loads libopus and creates a 48 kHz / 2 ch decoder. Same
+// ErrUnavailable / ErrBadMedia contract as NewOpusEncoder.
+func NewOpusDecoder() (*OpusDecoder, error)
+
+// Decode expands one opus packet back to exactly one canonical frame:
+// stream.FrameBytes (3840 B) of 48 kHz stereo s16le, valid until the next
+// Decode call. There is NO packet-loss concealment (D33, §8.5): a lost frame is
+// handled upstream as silence, same as pcm — Decode is only called with a real
+// packet. A short (<960-sample) or negative libopus return is ErrBadMedia.
+func (d *OpusDecoder) Decode(packet []byte) ([]byte, error)
+
+// Close destroys the C decoder (opus_decoder_destroy) once; idempotent.
+func (d *OpusDecoder) Close() error
+```
+
+**Bound functions (exactly D33's set).** Each constructor `dl.Open`s the
+soname list `{"libopus.so.0", "libopus.so"}` and binds via `Lib.Func`:
+`opus_encoder_create`, `opus_encoder_ctl` (variadic — bound for the single
+`OPUS_SET_BITRATE` int request, 128000), `opus_encode`, `opus_encoder_destroy`
+on the encoder; `opus_decoder_create`, `opus_decode`, `opus_decoder_destroy`
+on the decoder. `dl` dlsym-verifies every symbol before any registration, so a
+libopus too old to expose one of them yields `ErrUnavailable`, not a crash.
+
+**C-side lifetime.** The encoder/decoder hold an opaque `uintptr` to
+libopus-allocated state. Each gets an explicit `Close` (the normal path — H/E
+close the codec when a session ends) **and** a `runtime.SetFinalizer` that
+calls the same destroy as a backstop, so a dropped codec never leaks C memory.
+Close is guarded (idempotent) and clears the finalizer.
+
+**Single-goroutine contract.** libopus encoder/decoder state is not
+thread-safe and these wrappers add no locking: an `OpusEncoder` is owned by the
+session ticker that calls `Encode` between `Source.ReadFrame` and the source
+fan-out (D33), and an `OpusDecoder` is owned by the deliver path that calls
+`Decode` before `Sink.Push`. One codec instance, one goroutine.
+
+### 2.5 Opus capability probe — `OpusAvailable()` (D3)
+
+```go
+// OpusAvailable reports whether libopus can be loaded on this host, for K's
+// capability assembly (D3): a true result adds "opus" to capabilities.codecs.
+// The probe (a throwaway dl.Open of the libopus sonames + symbol set) runs at
+// most once; the result is cached behind a sync.Once. It is independent of any
+// live encoder/decoder and has no C-side state of its own.
+func OpusAvailable() bool
+```
+
+K calls `OpusAvailable()` exactly like it PATH-probes the exec tools and
+dlopen-probes libasound (D3), assembling `codecs:["pcm"]` (+ `"opus"` when the
+probe succeeds). The probe and the constructors share the same soname/symbol
+list, so a host that advertises `opus` is one where `NewOpusEncoder` /
+`NewOpusDecoder` will not return `ErrUnavailable`.
 
 ---
 
@@ -560,6 +672,23 @@ is present (IMPLEMENTATION.md D).
 - `TestResampleEOFFlush` / `TestResampleConstantSignal` — tail flush; DC stays
   DC (no overshoot).
 
+`internal/audio/opus_test.go` (libopus-gated)
+- `TestOpusRoundTrip` — encode 1 s of a 48 k stereo sine (50 canonical frames)
+  with `NewOpusEncoder`, decode each packet with `NewOpusDecoder`; assert each
+  packet is non-empty and ≤ `opusMaxPacket`, each decode yields exactly
+  `stream.FrameBytes`, and the decoded per-frame energy is within a tolerance of
+  the input (lossy codec — compare RMS, not bytes). `t.Skip` when
+  `NewOpusEncoder` returns `dl.ErrUnavailable` (no libopus on the host).
+- `TestOpusUnavailable` — exercise the `ErrUnavailable` path deterministically
+  by probing a bogus soname through `internal/dl` (the same dl.Open shape the
+  constructors use, with a name like `libopus-nope.so.0`); assert it returns
+  `dl.ErrUnavailable` without panic. Covers the soft-fail contract even on a
+  host that *does* have libopus.
+- `TestOpusAvailableMatchesConstructor` — `OpusAvailable()` agrees with whether
+  `NewOpusEncoder` returns `ErrUnavailable` (no skip: both just probe).
+- `TestOpusCloseIdempotent` — double `Close` on encoder and decoder is safe;
+  runs only when libopus loads.
+
 `internal/audio/fixtures_test.go` (helpers)
 - `writeWAVs16/u8/float32(t, rate, ch, samples)` — minimal RIFF/WAVE fixtures.
 - `genTone(rate, ch, freq, dur)` — deterministic int16 tone.
@@ -590,6 +719,14 @@ faked capture command — no root, no audio hardware, no network egress.
   D3) and calls `Schemes()` for the source schemes. `file`/`http` are always
   present; `input` is host-probed. `capabilities.formats` (`wav/mp3/flac`)
   stays a static list owned by the config/node layer — D just decodes all three.
+- **Opus capability (D3, D32/D33)**: `audio.OpusAvailable()` (cached libopus
+  probe) is the source of the `opus` entry in `capabilities.codecs`; K calls it
+  alongside the exec/libasound probes. The codec itself (`NewOpusEncoder` /
+  `NewOpusDecoder`) is wired *outside* D — H places the encoder between
+  `Source.ReadFrame` and the source fan-out (master encodes once) and the
+  decoder between the subscriber deliver callback and `Sink.Push` (each member
+  decodes); D only supplies the runtime-loaded codec and its probe. There is
+  one build, no cgo, no build tag (D32).
 - **D imports `internal/stream` only for the PCM constants** (DECISIONS.md
   "Confirmed as designed") — never the wire `Header`/`Mux`. D emits raw 3840 B
   PCM payloads; G prepends the header.

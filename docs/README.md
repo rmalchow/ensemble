@@ -18,12 +18,16 @@ no database, no PKI. State is replicated via gossip; everything heals itself.
   start, persisted to `DATA_DIR/node.json`, **immutable** forever after.
 - **Node name**: display name, initially the first 8 chars of the node ID.
   Changeable at runtime via API/UI; persisted in `node.json` and replicated.
-- **Capabilities**: reported in the replicated node record:
+- **Capabilities**: reported in the replicated node record. All of these are
+  **probed at runtime on each start** — a `$PATH` scan for exec tools plus
+  `dlopen` probes for optional shared libraries (`libopus.so.0`,
+  `libasound.so.2`, via purego — no cgo, no build variants; see §8.3/§8.5).
+  One universal binary; a host without a library simply reports the
+  capability off:
   - `playback`: whether a real PCM output backend is available (§8.5)
-  - `codecs`: codecs this build can encode/decode for streaming (`["pcm"]`;
-    `"opus"` only if built with opus support — see §8.3)
-  - `backends`: sink backends available in this build/host (§8.5),
-    e.g. `["exec","null","file"]` (+ `"alsa"` in an alsa-tagged build)
+  - `codecs`: streaming codecs (`["pcm"]`, + `"opus"` when libopus loads)
+  - `backends`: sink backends usable on this host (§8.5),
+    e.g. `["alsa","exec","null","file"]` (alsa only when libasound loads)
   - `sources`: media-source schemes this node can serve (§6.1),
     e.g. `["file","http","input"]`
   - `formats`: local media formats it can decode (`["wav","mp3","flac"]`)
@@ -55,8 +59,8 @@ Configuration is via flags with env-var fallbacks:
 `--media` / `ENSEMBLE_MEDIA_DIR` (default `DATA_DIR/media`), `--name` (initial
 node name, only applied on first start).
 Additionally: `ENSEMBLE_OUTPUT` (env only) selects the PCM output backend by
-name (§8.5; `auto` default | `exec` | `null` | `file:<path>` | `alsa` where
-built), and `--join` / `ENSEMBLE_JOIN` (dev only) seeds gossip with a
+name (§8.5; `auto` default | `alsa` where loadable | `exec` | `null` |
+`file:<path>`), and `--join` / `ENSEMBLE_JOIN` (dev only) seeds gossip with a
 comma-separated `host:gossipPort` list for multicast-less environments (tests).
 
 ## 3. Discovery
@@ -260,11 +264,15 @@ On `play`, the master starts an **audio source server** on its `SOURCE_PORT`:
 ### 8.3 Codec — group setting `codec: pcm | opus` (default `pcm`)
 
 - `pcm`: raw frame payload (3840 B).
-- `opus`: 20 ms Opus at 128 kbps. Requires cgo + libopus (`hraban/opus`),
-  behind build tag `opus`. A node without opus support rejects
-  `play` with codec `opus` (clear API error) and reports it in capabilities.
-  **The default build has no opus**; the setting exists, the wire format
-  reserves it, and a `pcm` cluster works everywhere.
+- `opus`: 20 ms Opus at 128 kbps. No cgo, no build variant: **libopus is
+  loaded at runtime** (`dlopen` via purego, `libopus.so.0`); if it isn't
+  loadable on a host, that node simply reports no `opus` capability and
+  everything else works. The **master encodes** (after `ReadFrame`, before
+  fan-out — one encode for all subscribers); **every member decodes**
+  (between receive and the sink, which always consumes canonical PCM).
+  Starting playback with `codec: opus` requires every current group member to
+  report the opus capability; otherwise `play` is rejected with a clear error
+  naming the nodes that lack it. A `pcm` cluster works everywhere, always.
 
 ### 8.4 Transport — group setting `transport: udp | tcp` (default `udp`)
 
@@ -323,22 +331,26 @@ times to prevent drift. Real underruns are handled by silence insertion and,
 if starvation persists, the RESTART path (§8.6).
 
 **Output backends** are named, interchangeable implementations behind one
-interface (`Write(frame)`, `Close`), selected by `ENSEMBLE_OUTPUT`:
+interface (`Write(frame)`, `Close`), selected by `ENSEMBLE_OUTPUT`
+(`auto` picks the best available: **alsa → exec → null**):
 
+- `alsa` — raw device access via **runtime-loaded** libasound
+  (`dlopen("libasound.so.2")` via purego — no cgo, no build variant, no dev
+  headers; gracefully absent on hosts without the library). Uses the simple
+  ALSA API (`snd_pcm_open/set_params/writei/recover/close`).
 - `exec` — the basic fallback: pipe raw s16le 48k stereo into the first of
   `pw-play`, `pw-cat -p`, `aplay`, `paplay` found on `$PATH`. Zero cgo.
 - `null` — timed discard; tests and playback-less nodes.
 - `file:<path>` — raw PCM append; debugging.
-- `alsa` — raw device access via libalsa, behind build tag `alsa` (analogous
-  to `opus`); not in the default build.
 
 A backend **may** additionally implement `DeviceDelay() (nanos, ok)` — the
 exact amount of audio queued between a `Write` and the speaker. The servo
-type-asserts for it: with it (alsa: `snd_pcm_delay`) skew measurement is
-exact; without it (exec pipes) the servo falls back to backpressure
-inference, and per-device constant offsets limit absolute inter-room accuracy
-to roughly ±10–20 ms. Available backends are reported in capabilities (§1);
-`playback` is true when a real (non-null) backend is usable.
+type-asserts for it: alsa implements it (`snd_pcm_delay`) and skew
+measurement is exact; without it (exec pipes) the servo falls back to
+backpressure inference, and per-device constant offsets limit absolute
+inter-room accuracy to roughly ±10–20 ms. Available backends are reported in
+capabilities (§1); `playback` is true when a real (non-null) backend is
+usable.
 
 ### 8.6 Stop / end / getting lost
 
@@ -431,9 +443,7 @@ Screens (single page, sections):
 ## 11. Out of scope (v1)
 
 Volume control, pause/seek, auth/TLS, internet-facing operation, playlists,
-album art/metadata, multiple simultaneous streams per group, Opus in the
-default build, the `alsa` backend implementation (the interface and registry
-ship in v1; the backend itself is v1.1).
+album art/metadata, multiple simultaneous streams per group.
 
 ## 12. Repository layout
 
@@ -441,6 +451,8 @@ ship in v1; the backend itself is v1.1).
 cmd/ensemble/        main: flag parsing, wiring, lifecycle
 internal/id/         node/group IDs (gen, parse, XOR)
 internal/config/     flags/env, data dir, node.json persistence
+internal/dl/         runtime shared-library loading (purego dlopen/dlsym
+                     probe; soft-fails to "capability off")
 internal/netx/       bind-or-increment listeners, CIDR interface scan
 internal/discovery/  mDNS register + browse
 internal/cluster/    memberlist wrapper, replicated state (LWW), observed IPs
@@ -451,7 +463,8 @@ internal/source/     audio source server: subscriber registry, ring buffer,
 internal/stream/     frame wire codec, member-side UDP mux, subscriber client
                      (HELLO/keepalive/RESTART), UDP+FEC / TCP reception
 internal/audio/      media sources: scheme registry, decoders (wav/mp3/flac),
-                     http stream source, exec-capture input, resampler
+                     http stream source, exec-capture input, resampler,
+                     opus encoder/decoder (runtime-loaded libopus)
 internal/sink/       jitter buffer, playout scheduler, rate servo + 4-tap
                      resampler, output backend registry (exec/null/file[/alsa])
 internal/api/        Echo server: REST, WebSocket, proxy, SPA embed

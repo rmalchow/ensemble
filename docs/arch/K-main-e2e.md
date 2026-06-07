@@ -3,7 +3,7 @@
 Source of truth: [docs/README.md](../README.md) (§2 four ports, §6 sources, §8
 audio pipeline, §9 API). Contracts: [S-skeleton.md](S-skeleton.md). Integrator
 decisions: [DECISIONS.md](DECISIONS.md) — this piece is governed by **D2, D3,
-D6, D8, D16, D19, D20, D22, D23, D24, D25, D26, D27, D28**.
+D6, D8, D16, D19, D20, D22, D23, D24, D25, D26, D27, D28, D32, D33, D34**.
 
 This piece owns process lifecycle (`cmd/ensemble/main.go`) and the two scripts
 (`scripts/dev2.sh`, `scripts/e2e.sh`). It writes **no** package code under
@@ -108,7 +108,7 @@ type options struct {
 
 func main()                                            // parse → run(ctx) → exit code
 func parseOptions(args []string, env func(string) string) (options, error)
-func capabilities(opt options) contracts.Capabilities  // D3: PATH probe + build tags
+func capabilities(opt options) contracts.Capabilities  // D3/D32: PATH probe + internal/dl dlopen probes
 func run(ctx context.Context, opt options) error
 
 // shutdownStack is a LIFO of teardown closures (§3.3). Pushed as resources are
@@ -270,7 +270,10 @@ teardown is exactly reverse order. **Four** ports are bound (§2):
     Each FATAL on error (port exhaustion §2). Nothing to unwind on a bind error
     except already-bound listeners (closed in the deferred cleanup before return).
  3. addrs    := netx.InterfaceCIDRs()                      // §3.1 (empty on loopback — fine)
- 4. caps     := capabilities(opt)                          // D3: PATH probe (backends/playback), sources=[file,http,input], formats, codecs
+ 4. caps     := capabilities(opt)                          // D3/D32: PATH probe (exec backends/playback) + internal/dl dlopen probes
+                                                          //   (libopus → codecs gains "opus"; libasound → backends gains "alsa"),
+                                                          //   sources=[file,http,input], formats. Probe results feed BOTH this
+                                                          //   record AND the sink-backend registry / audio package (see note below).
  5. mux      := stream.NewMux(streamUDP, log)              // owns STREAM_PORT UDP; not yet Run
  6. cluster  := cluster.New{Self:cfg.NodeID, Name:cfg.Name,
                   HTTPPort, StreamPort:streamPort, SourcePort:sourcePort, GossipPort:gossipPort,
@@ -305,6 +308,30 @@ teardown is exactly reverse order. **Four** ports are bound (§2):
 17. log "ready": id, name, ports{http,stream,source,gossip}, output backend, playback cap
 18. <-ctx.Done()  → graceful shutdown (§3.3)
 ```
+
+**Capability assembly & probe wiring (step 4, D3/D32).** `capabilities(opt)`
+assembles the node's `contracts.Capabilities` from three sources: the `$PATH`
+scan for exec tools (playback backends, the `input` capture scheme), the static
+format/scheme lists, and the `internal/dl` dlopen probes (D32). `dl.Open` is
+tried once per optional library at startup — `libopus.so.0`/`libopus.so` and
+`libasound.so.2`/`libasound.so` — dlsym-verifying every required symbol before
+the capability is reported on; a missing/old library or symbol yields
+`dl.ErrUnavailable` (soft, never a panic) and the capability stays off. The
+probe results are wired in **two** places, not just the cluster record:
+
+- **Cluster capability setter.** `caps` is handed to `cluster.New{…,
+  Capabilities:caps,…}` (step 6), which advertises the record over gossip — so
+  `codecs` gains `"opus"` exactly when libopus loaded and `backends` gains
+  `"alsa"` exactly when libasound loaded.
+- **Sink backend registry / audio package.** The same `dl` probe outcome gates
+  what `sink.PickBackend` (step 8) can actually return: the `alsa` backend
+  registers itself in the registry only when the libasound probe succeeded
+  (D34, first in `auto` order), and the opus codec constructors in
+  `internal/audio` (`audio.NewOpusEncoder`/`NewOpusDecoder`, D33) return
+  `dl.ErrUnavailable` when libopus did not load. K does **not** re-run the
+  probes per call: the registry/audio side and the advertised `caps` derive
+  from the **same** startup `dl.Open` result, so a node never advertises a
+  backend or codec it cannot construct.
 
 **The API↔group cycle (steps 12–13).** `api.New` needs the engine (REST
 `/play`,`/follow`,`/master`,`/stop`,`/group/settings` delegate to it); the
@@ -416,13 +443,17 @@ construction; workers only start after the graph is closed.
   **not** generate a fresh ID over a corrupt file — that would duplicate
   identity on the network. Fail loudly.
 - **`ENSEMBLE_OUTPUT=null` (K mandate, §8.5, D27).** `opt.Output=="null"` selects
-  the null backend regardless of `$PATH`. `capabilities(opt)` still probes
-  `$PATH` truthfully: with forced `null`, `playback=false`, but the
-  receiver→sink path is independent of the backend, so a two-null cluster still
-  **subscribes and "plays"** (frames written to the null sink advance
-  `Stats().Played`). `auto` (default) probes pw-play/pw-cat/aplay/paplay; none
-  found → null + `playback=false`. `backends` in capabilities lists every name
-  this build/host actually offers (D27).
+  the null backend regardless of `$PATH` **and regardless of what the dlopen
+  probe found** — forcing null keeps the e2e backends honest even on a host
+  whose libasound probe succeeded (`alsa` may legitimately appear in
+  `capabilities.backends`, but the sink is still null for tests). `capabilities(opt)`
+  still probes `$PATH` and the optional libraries truthfully: with forced
+  `null`, `playback=false`, but the receiver→sink path is independent of the
+  backend, so a two-null cluster still **subscribes and "plays"** (frames
+  written to the null sink advance `Stats().Played`). `auto` (default) picks
+  alsa → exec → null (D27/D34); none usable → null + `playback=false`.
+  `backends` in capabilities lists every name this host actually offers —
+  `"alsa"` exactly when the libasound dlopen probe succeeded (D32/D34).
 - **Source schemes in capabilities (D26).** `capabilities(opt).Sources` is the
   static `["file","http","input"]` (`input` only if an exec-capture tool is on
   `$PATH`, mirroring the playback probe). `play` of an `http://` URI needs no
@@ -552,6 +583,23 @@ The assertions (mirror the K mandate in IMPLEMENTATION.md exactly):
    each node advertises its SOURCE_PORT in the record:
    `wait_for $N1/api/cluster '[.nodes[]|select(.sourcePort>0)]|length' 2`.
 
+2a. **Capabilities reflect host reality (D3/D32).** The reported codecs/backends
+   are assembled from the `internal/dl` dlopen probes, so they must match what
+   this host can actually load. Compute the host truth from `ldconfig` and
+   assert the cluster record agrees on **both** nodes:
+   ```sh
+   HAS_OPUS=$(ldconfig -p 2>/dev/null | grep -q 'libopus\.so' && echo true || echo false)
+   for N in "$N1" "$N2"; do
+     HAS=$(api "$N/api/cluster" | jq -r --arg id "$(api "$N/api/status"|jq -r .id)" \
+       '[.nodes[]|select(.id==$id).capabilities.codecs[]]|index("opus")!=null')
+     [ "$HAS" = "$HAS_OPUS" ] || { echo "codecs/opus mismatch on $N: got $HAS want $HAS_OPUS"; exit 1; }
+   done
+   ```
+   (Same shape applies to `backends`/`"alsa"` vs `libasound.so`; the opus check
+   is the load-bearing one because assertion 11 conditions on it. `ENSEMBLE_OUTPUT=null`
+   keeps the *backend* honest — `"alsa"` may still appear in `backends` from the
+   probe, but the forced null sink is what actually runs, §8.5.)
+
 3. **Follow forms a 2-node group with XOR id.**
    `post $N2/api/follow "{\"target\":\"$ID1\"}"`. Wait until N1's cluster shows
    one group of two mastered by `ID1`:
@@ -638,6 +686,38 @@ The assertions (mirror the K mandate in IMPLEMENTATION.md exactly):
    the sinks (old-gen frames dropped at the boundary) is allowed:
    `api $N1/api/status | jq -e '.sink.staleGen >= 0'`.
 
+9a. **Conditional opus leg (D32/D33) — skipped cleanly when unavailable.** Opus
+   is one universal binary's runtime-loaded codec, so the leg runs **only when
+   BOTH nodes report it** (matching the host's `libopus.so` via the dlopen
+   probe). It rides the live-settings machinery just proven in assertion 9: flip
+   the group codec to opus, confirm both sinks still play, then reset.
+   ```sh
+   o1=$(api "$N1/api/cluster" | jq -r --arg id "$ID1" \
+     '[.nodes[]|select(.id==$id).capabilities.codecs[]]|index("opus")!=null')
+   o2=$(api "$N2/api/cluster" | jq -r --arg id "$ID2" \
+     '[.nodes[]|select(.id==$id).capabilities.codecs[]]|index("opus")!=null')
+   if [ "$o1" = true ] && [ "$o2" = true ]; then
+     # master must accept opus only when every member can decode (D33).
+     P1=$(api "$N1/api/status"|jq .sink.played); P2=$(api "$N2/api/status"|jq .sink.played)
+     post $N2/api/group/settings "{\"codec\":\"opus\",\"transport\":\"udp\",\"bufferMs\":80}"
+     wait_for $N1/api/cluster '.groups[]|select(.master=="'$ID2'").settings.codec' opus
+     # both sinks keep advancing through the opus gen (master encodes once, each member decodes):
+     sleep 1
+     api "$N1/api/status" | jq -e '.sink.played > '"$P1"
+     api "$N2/api/status" | jq -e '.sink.played > '"$P2"
+     # reset codec back to pcm for the remaining legs:
+     post $N2/api/group/settings "{\"codec\":\"pcm\",\"transport\":\"udp\",\"bufferMs\":80}"
+     wait_for $N1/api/cluster '.groups[]|select(.master=="'$ID2'").settings.codec' pcm
+   else
+     echo "skip: opus leg — codecs opus not present on both nodes (n1=$o1 n2=$o2)"
+   fi
+   ```
+   (Note N3 was paused/resumed in assertion 8 but remains a member; if it
+   reports opus too the master fan-out includes it. The leg only asserts on
+   N1/N2 to keep the skip condition a simple two-node `AND`. `ENSEMBLE_OUTPUT=null`
+   still forces the null sink — opus decodes to canonical PCM that the null sink
+   "plays", advancing `played`, §8.5.)
+
 10. **Stop.** `post $N2/api/stop`. Wait until playback is idle on all nodes:
     `wait_for $N1/api/cluster '.groups[]|select(.id=="'$GID3'").playback.state' idle`.
     Then assert sinks stop advancing (within the watchdog window §8.6): sample
@@ -681,9 +761,16 @@ Go unit tests (`cmd/ensemble/main_test.go`):
   (env-only, D2; no flag).
 - `TestParseOptionsBadPort` — non-numeric `--http-port` → parse error, no panic.
 - `TestCapabilitiesNullForcesNoPlayback` — output=null → `caps.Playback==false`,
-  `caps.Codecs==["pcm"]`, `caps.Sources` contains `"file"` and `"http"`.
+  `caps.Sources` contains `"file"` and `"http"`. (`caps.Codecs` is independent
+  of the output backend — opus presence tracks the dlopen probe, D32/D33.)
 - `TestCapabilitiesBackendsListed` — `caps.Backends` always contains `"null"`
-  and `"file"`; `"exec"` only when a pipe tool is on `$PATH` (D27).
+  and `"file"`; `"exec"` only when a pipe tool is on `$PATH`; `"alsa"` exactly
+  when the libasound dlopen probe (`internal/dl`) succeeds on this host
+  (D27/D32/D34).
+- `TestCapabilitiesOpusProbe` — `caps.Codecs` contains `"opus"` iff the
+  libopus dlopen probe succeeds (`internal/dl`, D32/D33); `"pcm"` always
+  present. One universal binary — asserted against host reality, not a build
+  tag.
 - `TestFollowClientPostsFollow` — `followClient.Follow` hits `/api/follow` with
   `{target}` JSON and the `X-Ensemble-Proxied` header, against an httptest server
   faking a peer (addr resolved via a fake `StateStore.DialCandidates`).
@@ -698,9 +785,12 @@ Go unit tests (`cmd/ensemble/main_test.go`):
   goroutine-count delta).
 
 Shell e2e (`scripts/e2e.sh`, via `make e2e` / CI):
-- the ten assertions of §6 are the test; the script exits 0 only if all pass. CI
-  runs it on loopback with `ENSEMBLE_OUTPUT=null`, no audio hardware, no root, no
-  real multicast (explicit `--join`).
+- the §6 assertions are the test (the ten core legs plus the capability-reality
+  check 2a and the conditional opus leg 9a); the script exits 0 only if all
+  pass — 9a may *skip* (logged), which still passes. CI runs it on loopback with
+  `ENSEMBLE_OUTPUT=null`, no audio hardware, no root, no real multicast
+  (explicit `--join`); `null` keeps the backend honest while the dlopen probes
+  report `alsa`/`opus` per host reality (D32).
 - `make e2e`: `go build` → `scripts/e2e.sh`. Budget ~15 s (boot + convergence +
   follow + takeover + a short looped/live tone + late-join + settings change).
 

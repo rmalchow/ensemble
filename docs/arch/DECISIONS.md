@@ -16,11 +16,12 @@ ports, observations) is runtime/replicated, in-memory only, rebuilt on start.
 | explicit backend name). No flag. Added to spec §2. (A/E/K)
 
 **D3 — capabilities are assembled by K (main) at startup** — PATH probe for
-the output backends, build-tag for opus, static format list — and handed to
-cluster via its config/setter. A stays pure, D stays decode-only. A node with
-`ENSEMBLE_OUTPUT=null` reports `playback:false` but still receives and
-"plays" to the null sink; playback capability never gates group membership or
-stream fan-out. (A/D/K)
+the exec tools **plus runtime dlopen probes** (D32: `libopus.so.0` →
+`codecs:["pcm","opus"]`, `libasound.so.2` → `backends` includes `"alsa"`),
+static format/scheme lists — and handed to cluster via its config/setter.
+A stays pure, D stays decode-only. A node with `ENSEMBLE_OUTPUT=null` reports
+`playback:false` but still receives and "plays" to the null sink; playback
+capability never gates group membership or stream fan-out. (A/D/E/K)
 
 **D4 — discovery `Peer` is `{ID id.ID; Addr netip.Addr; GossipPort, HTTPPort,
 StreamPort int}`** with a `GossipAddrPort()` helper; B's channel is
@@ -183,12 +184,13 @@ silence, cadence never stalls). `input` is exec-capture (`pw-record`/
 `arecord`), mirroring the exec playback backend. Available schemes reported
 in `capabilities.sources`. (D/H)
 
-**D27 — sink-backend registry (E)**: named backends `exec` (fallback pipe),
-`null`, `file` in the default build; `alsa` behind build tag `alsa`
-(implementation is v1.1 — only the registry + `DelayReporter` seam ship in
-v1). `ENSEMBLE_OUTPUT` selects by name; available names reported in
-`capabilities.backends`; `playback` = a real (non-null) backend is usable.
-(E/K)
+**D27 — sink-backend registry (E)** *(amended by D32 — no build tags)*:
+named backends `alsa` (runtime-loaded libasound, implements `DelayReporter`,
+**v1**), `exec` (fallback pipe), `null`, `file` — all in the one and only
+build; `alsa` registers itself only when the dlopen probe succeeds.
+`ENSEMBLE_OUTPUT` selects by name; `auto` picks **alsa → exec → null**.
+Available names reported in `capabilities.backends`; `playback` = a real
+(non-null) backend is usable. (E/K)
 
 **D28 — source stats surfacing**: `SourceStats{Clients, Connects, Restarts,
 Primes}` — in `/api/status` (D19) and riding the master-written replicated
@@ -216,6 +218,49 @@ engine in `api.Config` and obtains the follow client via
 `apiSrv.FollowClient()` — actually constructed standalone before the engine:
 `api.NewFollowClient(cluster)` → `group.New(...)` → `api.New(Config{Group:
 engine, ...})`. K-main-e2e.md's `SetGroup` fallback is unused. (H/I/K)
+
+---
+
+## Runtime library loading (third review round)
+
+User question: can the binary ALWAYS carry libopus/libalsa support and probe
+loadability at runtime, degrading gracefully? Yes — and it kills the
+build-tag convention entirely. There is exactly **one build**, no cgo.
+
+**D32 — runtime loading via purego (`internal/dl`, S-owned)**: optional
+shared libraries are loaded with `github.com/ebitengine/purego`
+(dlopen/dlsym FFI from pure Go, works with CGO_ENABLED=0).
+`dl.Open(sonames, symbols)` tries sonames in order (`libopus.so.0` then
+`libopus.so`; `libasound.so.2` then `libasound.so`), and **dlsym-verifies
+every required symbol before any `RegisterLibFunc`** — a missing library,
+wrong version, or missing symbol yields `dl.ErrUnavailable` (soft), never a
+panic, and the corresponding capability is simply reported off (D3).
+Call-rate is ~50/s (per 20 ms frame) so FFI overhead is irrelevant. The
+CGO_ENABLED=0 static-build interaction is purego's documented supported mode;
+verified at implementation time. Build tags for `opus`/`alsa` are abolished
+everywhere. (S/D/E/K)
+
+**D33 — opus placement & validation (supersedes the §8.3 build-tag text)**:
+the codec module lives in `internal/audio` (piece D):
+`audio.NewOpusEncoder() / NewOpusDecoder()` return `dl.ErrUnavailable` when
+libopus isn't loadable. The ~7 functions bound: `opus_encoder_create`,
+`opus_encoder_ctl` (bitrate 128k), `opus_encode`, `opus_encoder_destroy`,
+`opus_decoder_create`, `opus_decode`, `opus_decoder_destroy`. **Master
+encodes once** (H wires it between source `ReadFrame` and `source.Server`
+fan-out); **each member decodes** (wired between the subscriber's deliver
+callback and `Sink.Push` — the sink always consumes canonical PCM). Before
+starting an opus session the master checks that every current member reports
+the `opus` capability and rejects `play` naming the nodes that lack it.
+No packet-loss concealment on the decoder — a lost opus frame is silence,
+same as pcm (§8.5); keep simple. (D/E/G/H)
+
+**D34 — alsa backend (E, v1)**: simple-API binding via `internal/dl`:
+`snd_pcm_open(&pcm, "default", PLAYBACK, 0)`,
+`snd_pcm_set_params(pcm, S16_LE, RW_INTERLEAVED, 2, 48000, 1, latencyUs)`,
+`snd_pcm_writei` per frame with `snd_pcm_recover` on `-EPIPE`/`-ESTRPIPE`,
+`snd_pcm_delay` implementing `contracts.DelayReporter` (exact servo
+measurement), `snd_pcm_close`. Registers in the backend registry only when
+the probe succeeds; first in `auto` order (D27). (E)
 
 ## Confirmed as designed (no change)
 
