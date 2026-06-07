@@ -48,6 +48,10 @@ Configuration is via flags with env-var fallbacks:
 `--gossip-port` / `ENSEMBLE_GOSSIP_PORT`, `--data` / `ENSEMBLE_DATA_DIR`
 (default `./data`), `--media` / `ENSEMBLE_MEDIA_DIR` (default `DATA_DIR/media`),
 `--name` (initial node name, only applied on first start).
+Additionally: `ENSEMBLE_OUTPUT` (env only) overrides the PCM output backend
+(`auto` default | `null` | `file:<path>`), and `--join` / `ENSEMBLE_JOIN`
+(dev only) seeds gossip with a comma-separated `host:gossipPort` list for
+multicast-less environments (tests).
 
 ## 3. Discovery
 
@@ -72,10 +76,14 @@ or HTTP traffic from a peer, it records the peer's remote IP as an *observed
 address* (`peerId → ip, lastSeen`), and publishes its observation map in its
 own node record.
 
-When choosing an address to dial a peer (proxy, clock, stream, gossip join),
-candidates are taken from the peer's self-reported CIDR list **intersected
-with the cluster's observations**: an IP that no node has ever observed is
-ignored. Observed addresses are preferred in order of most recent observation.
+When choosing an address to dial a peer (proxy, clock, stream, post-boot
+gossip), candidates are taken from the peer's self-reported CIDR list
+**intersected with the cluster's observations**: an IP that no node has ever
+observed is ignored. Observed addresses are preferred in order of most recent
+observation. Two bootstrap exceptions: the *initial* gossip join dials the
+address mDNS actually answered from, and a peer with no observations yet
+falls back to its self-reported list (it tightens to observed-only as soon as
+any traffic flows).
 
 ## 4. Replicated cluster state
 
