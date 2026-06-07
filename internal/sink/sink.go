@@ -45,6 +45,7 @@ type Playout struct {
 	clock         contracts.Clock
 	out           contracts.Backend
 	delay         contracts.DelayReporter // out asserted to DelayReporter, or nil
+	flush         contracts.Flusher       // out asserted to Flusher, or nil
 	gain          *gainStage
 	bufferNs      int64
 	delayOffsetNs int64 // output-delay calibration (D36); subtracted from the deadline
@@ -105,6 +106,9 @@ func New(cfg Config) *Playout {
 		silence:       make([]byte, stream.FrameBytes),
 		wake:          make(chan struct{}, 1),
 		done:          make(chan struct{}),
+	}
+	if fl, ok := cfg.Backend.(contracts.Flusher); ok {
+		p.flush = fl
 	}
 	if dr, ok := cfg.Backend.(contracts.DelayReporter); ok {
 		p.delay = dr
@@ -265,6 +269,12 @@ func (p *Playout) Disarm() {
 	p.servo.reset()
 	p.rs.reset()
 	p.stats.Buffered = 0
+	if p.flush != nil {
+		// Session over: drop whatever the device/player retains, or it
+		// audibly replays at the next session's start (user-reported on
+		// leave+rejoin).
+		p.flush.Flush()
+	}
 	p.log.Info("playout disarmed (session ended)", "gen", p.gen)
 	p.signal()
 }
@@ -537,6 +547,9 @@ func (p *Playout) checkStarvationLocked() (fireRestart func()) {
 	p.servo.reset()
 	p.rs.reset()
 	p.stats.Buffered = 0
+	if p.flush != nil {
+		p.flush.Flush()
+	}
 	p.log.Warn("playout still starved after RESTART, disarming")
 	return nil
 }

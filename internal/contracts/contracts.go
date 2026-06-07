@@ -40,6 +40,15 @@ type DelayReporter interface {
 	DeviceDelay() (nanos int64, ok bool)
 }
 
+// Flusher is an OPTIONAL Backend extension (type-asserted by the sink): drop
+// any audio queued inside the device/player when a playout session ends.
+// Without it, device layers that retain their buffer across an underrun
+// (PipeWire's alsa plugin, pipe players) audibly REPLAY stale audio when the
+// node rejoins a stream.
+type Flusher interface {
+	Flush()
+}
+
 // ---- Frame sink (playout; sink piece E owns it, group H feeds it) -----------
 
 // Sink is what the receiver/group hands decoded frames to for scheduled

@@ -37,11 +37,14 @@ func lookExecTool() (execTool, string, bool) {
 
 // execBackend pipes canonical PCM (s16le 48k stereo) into a player subprocess.
 type execBackend struct {
-	cmd  *exec.Cmd
-	in   io.WriteCloser // stdin pipe
-	log  *slog.Logger
-	once sync.Once
-	mu   sync.Mutex
+	cmd      *exec.Cmd
+	in       io.WriteCloser // stdin pipe
+	toolPath string
+	toolName string
+	toolArgs []string
+	log      *slog.Logger
+	once     sync.Once
+	mu       sync.Mutex
 }
 
 func newExecBackend(log *slog.Logger) (*execBackend, error) {
@@ -49,16 +52,47 @@ func newExecBackend(log *slog.Logger) (*execBackend, error) {
 	if !ok {
 		return nil, fmt.Errorf("exec backend: no player tool on $PATH")
 	}
-	cmd := exec.Command(path, tool.args...)
+	b := &execBackend{toolPath: path, toolName: tool.name, toolArgs: tool.args, log: log}
+	if err := b.spawnLocked(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// spawnLocked starts (or restarts) the player process. Caller holds b.mu (or
+// is the constructor).
+func (b *execBackend) spawnLocked() error {
+	cmd := exec.Command(b.toolPath, b.toolArgs...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("exec backend: stdin pipe: %w", err)
+		return fmt.Errorf("exec backend: stdin pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("exec backend: start %s: %w", tool.name, err)
+		return fmt.Errorf("exec backend: start %s: %w", b.toolName, err)
 	}
-	log.Info("exec backend started", "tool", tool.name)
-	return &execBackend{cmd: cmd, in: stdin, log: log}, nil
+	b.cmd = cmd
+	b.in = stdin
+	b.log.Info("exec backend started", "tool", b.toolName)
+	return nil
+}
+
+// Flush discards whatever the player buffered (contracts.Flusher): pipe
+// players retain queued audio across a write stall and replay it when writes
+// resume — stale audio at the next session's start. The only reliable flush
+// for an external process is a respawn.
+func (b *execBackend) Flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cmd != nil {
+		_ = b.in.Close()
+		_ = b.cmd.Process.Kill()
+		_, _ = b.cmd.Process.Wait()
+	}
+	if err := b.spawnLocked(); err != nil {
+		b.log.Warn("exec backend respawn after flush failed", "err", err)
+		b.cmd = nil
+		b.in = nil
+	}
 }
 
 func (b *execBackend) Write(frame []byte) error {

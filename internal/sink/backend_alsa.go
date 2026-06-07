@@ -30,6 +30,7 @@ var (
 	alsaSymbols = []string{
 		"snd_pcm_open", "snd_pcm_set_params", "snd_pcm_writei",
 		"snd_pcm_recover", "snd_pcm_delay", "snd_pcm_close",
+		"snd_pcm_drop", "snd_pcm_prepare",
 	}
 )
 
@@ -42,6 +43,8 @@ type alsaFuncs struct {
 	recover   func(pcm uintptr, err, silent int32) int32
 	delay     func(pcm uintptr, delayp *int) int32
 	close     func(pcm uintptr) int32
+	drop      func(pcm uintptr) int32
+	prepare   func(pcm uintptr) int32
 }
 
 var (
@@ -75,6 +78,8 @@ func probeAlsa() (*alsaFuncs, error) {
 	lib.Func(&f.writei, "snd_pcm_writei")
 	lib.Func(&f.recover, "snd_pcm_recover")
 	lib.Func(&f.delay, "snd_pcm_delay")
+	lib.Func(&f.drop, "snd_pcm_drop")
+	lib.Func(&f.prepare, "snd_pcm_prepare")
 	lib.Func(&f.close, "snd_pcm_close")
 	return f, nil
 }
@@ -199,4 +204,21 @@ func (b *alsaBackend) Close() error {
 		return fmt.Errorf("alsa: snd_pcm_close: %d", rc)
 	}
 	return nil
+}
+
+// Flush drops queued-but-unplayed audio and re-prepares the device
+// (contracts.Flusher): a session ended — whatever the device retains must
+// never replay at the next session's start.
+func (b *alsaBackend) Flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	if rc := b.f.drop(b.pcm); rc < 0 {
+		b.log.Debug("alsa drop failed", "rc", rc)
+	}
+	if rc := b.f.prepare(b.pcm); rc < 0 {
+		b.log.Debug("alsa prepare after drop failed", "rc", rc)
+	}
 }
