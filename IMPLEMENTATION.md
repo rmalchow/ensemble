@@ -11,7 +11,7 @@ agents before implementation).
 ## Pieces
 
 ### S — skeleton *(integrator, before everything)*
-`go.mod`, `Makefile`, `.gitignore`, directory tree, and the shared contracts:
+`go.mod`, build scripts (`scripts/build.sh|ui.sh|check.sh`), `.gitignore`, directory tree, and the shared contracts:
 - `internal/id`: `ID [16]byte`, `New()`, `Parse(string)`, `String()` (hex),
   `XOR(ids ...ID) ID`, JSON marshalling.
 - `internal/stream/wire.go`: frame header struct + encode/decode

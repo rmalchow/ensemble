@@ -4,9 +4,30 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"time"
 
 	"github.com/labstack/echo/v4"
 )
+
+// requestLogMiddleware logs every served request at DEBUG (method, path,
+// status, latency, client IP). Mutating routes additionally emit their own
+// INFO audit line; this DEBUG line is the low-level access log.
+func requestLogMiddleware(log *slog.Logger) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			start := time.Now()
+			err := next(c)
+			log.Debug("request",
+				"method", c.Request().Method,
+				"path", c.Request().URL.Path,
+				"status", c.Response().Status,
+				"ms", time.Since(start).Milliseconds(),
+				"ip", c.RealIP(),
+			)
+			return err
+		}
+	}
+}
 
 // recoverMiddleware turns a handler panic into a 500 JSON error rather than
 // crashing the process. Replaces echo's middleware.Recover (which we cannot

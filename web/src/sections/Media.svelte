@@ -4,6 +4,7 @@
   import { bytes, relTime } from "../lib/fmt.js";
   import { nodeById } from "../lib/derive.js";
   import { getMedia, play } from "../lib/api.js";
+  import { entriesFor, crumbs, parentDir, joinDir } from "../lib/tree.js";
 
   let { snapshot, self } = $props();
 
@@ -11,6 +12,8 @@
   let files = $state([]);
   let url = $state("");
   let loading = $state(false);
+  // current directory within the picked node's media tree ("" == root).
+  let dir = $state("");
 
   // default the picker to self once self id is known.
   $effect(() => {
@@ -30,9 +33,14 @@
   let canInput = $derived(sources.includes("input"));
   let urlValid = $derived(/^https?:\/\/\S+/.test(url.trim()));
 
-  // refetch files when the picked node changes.
+  // directory view derived from the flat file list + current dir (pure, tree.js).
+  let view = $derived(entriesFor(files, dir));
+  let trail = $derived(crumbs(dir));
+
+  // refetch files when the picked node changes; reset to the root directory.
   $effect(() => {
     const id = pickedNodeId;
+    dir = "";
     if (!id) {
       files = [];
       return;
@@ -40,7 +48,8 @@
     loading = true;
     getMedia(id)
       .then((list) => {
-        if (pickedNodeId === id) files = Array.isArray(list) ? list : [];
+        // Spec §6: bare array; tolerate an older node's {files:[...]} envelope.
+        if (pickedNodeId === id) files = Array.isArray(list) ? list : Array.isArray(list?.files) ? list.files : [];
       })
       .catch(() => {
         if (pickedNodeId === id) files = [];
@@ -58,6 +67,16 @@
   }
   function playInput() {
     play(pickedNodeId, "input:").catch(() => {});
+  }
+
+  function enter(folder) {
+    dir = joinDir(dir, folder.name);
+  }
+  function goUp() {
+    dir = parentDir(dir);
+  }
+  function goTo(d) {
+    dir = d;
   }
 </script>
 
@@ -96,10 +115,36 @@
       </div>
     {/if}
 
-    {#if files.length === 0}
+    <div class="crumbs row wrap">
+      {#each trail as c, i (c.dir)}
+        {#if i > 0}<span class="crumb-sep">/</span>{/if}
+        {#if i === trail.length - 1}
+          <span class="crumb here">{c.name}</span>
+        {:else}
+          <button class="crumb link" onclick={() => goTo(c.dir)}>
+            {c.name}
+          </button>
+        {/if}
+      {/each}
+    </div>
+
+    {#if view.folders.length === 0 && view.files.length === 0 && dir === ""}
       <div class="empty">{loading ? "" : "No media files."}</div>
     {:else}
-      {#each files as f (f.path)}
+      {#if dir !== ""}
+        <button class="media-file folder-row up" onclick={goUp}>
+          <span class="glyph">▸</span>
+          <span>..</span>
+        </button>
+      {/if}
+      {#each view.folders as folder (folder.name)}
+        <button class="media-file folder-row" onclick={() => enter(folder)}>
+          <span class="glyph">📁</span>
+          <span>{folder.name}</span>
+          <span class="muted small">{folder.count} file{folder.count === 1 ? "" : "s"}</span>
+        </button>
+      {/each}
+      {#each view.files as f (f.path)}
         <div class="media-file">
           <span title={f.path}>{f.name}</span>
           <span class="muted small">{bytes(f.sizeBytes)}</span>

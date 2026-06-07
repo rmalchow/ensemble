@@ -493,7 +493,7 @@ construction; workers only start after the graph is closed.
 
 `bash`, `set -euo pipefail`. Builds once, launches two nodes on **loopback** with
 four disjoint port blocks and temp data dirs, both forced to the null backend,
-prints their base URLs. Used by `make dev` and sourced by `e2e.sh`.
+prints their base URLs. Run directly and sourced by `e2e.sh`.
 
 ```sh
 #!/usr/bin/env bash
@@ -784,14 +784,14 @@ Go unit tests (`cmd/ensemble/main_test.go`):
   non-nil error fast and starts no goroutine (assert via short timeout +
   goroutine-count delta).
 
-Shell e2e (`scripts/e2e.sh`, via `make e2e` / CI):
+Shell e2e (`scripts/e2e.sh`, also for CI):
 - the §6 assertions are the test (the ten core legs plus the capability-reality
   check 2a and the conditional opus leg 9a); the script exits 0 only if all
   pass — 9a may *skip* (logged), which still passes. CI runs it on loopback with
   `ENSEMBLE_OUTPUT=null`, no audio hardware, no root, no real multicast
   (explicit `--join`); `null` keeps the backend honest while the dlopen probes
   report `alsa`/`opus` per host reality (D32).
-- `make e2e`: `go build` → `scripts/e2e.sh`. Budget ~15 s (boot + convergence +
+- `scripts/e2e.sh` (builds the binary itself). Budget ~15 s (boot + convergence +
   follow + takeover + a short looped/live tone + late-join + settings change).
 
 All Go unit tests run without network root, hardware, or multicast: `httptest`

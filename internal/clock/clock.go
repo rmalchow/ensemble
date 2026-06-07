@@ -99,6 +99,7 @@ type Follower struct {
 
 	probes  uint64 // probes sent
 	replies uint64 // replies accepted
+	synced  bool   // last-observed sync state (for sync acquired/lost logging)
 
 	done    chan struct{}
 	wg      sync.WaitGroup
@@ -152,15 +153,25 @@ func (f *Follower) Start() {
 func (f *Follower) SetMaster(dst netip.AddrPort, gen uint32) {
 	dst = dialable(dst)
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.have && f.dst == dst && f.gen == gen {
+		f.mu.Unlock()
 		return // no-op: same target, do not wipe the window
 	}
+	prev := f.dst
+	hadPrev := f.have
 	f.dst = dst
 	f.gen = gen
 	f.have = true
 	f.est.reset()
+	f.synced = false
 	clear(f.pending)
+	f.mu.Unlock()
+
+	if hadPrev && prev != dst {
+		f.log.Info("master clock re-pointed", "from", prev.String(), "to", dst.String(), "gen", gen)
+	} else {
+		f.log.Info("master clock set", "endpoint", dst.String(), "gen", gen)
+	}
 }
 
 // dialable rewrites a wildcard/unspecified host to loopback so a self-dial
@@ -247,6 +258,15 @@ func (f *Follower) handleReply(pkt []byte, from netip.AddrPort) {
 	delete(f.pending, h.Seq)
 	f.est.add(newSample(t1, t2, t3, t4))
 	f.replies++
+
+	// First-sync transition (unsynced → synced): log offset + best RTT once.
+	if !f.synced {
+		if off, rtt, ok := f.est.estimate(); ok {
+			f.synced = true
+			f.log.Info("clock sync acquired", "gen", f.gen, "master", f.dst.String(),
+				"offsetNs", off, "rttNs", rtt)
+		}
+	}
 }
 
 // MasterNow returns master-clock ns and whether synced (contracts.Clock).
@@ -286,6 +306,7 @@ func (f *Follower) LocalToMaster(localNanos int64) (masterNanos int64, ok bool) 
 type FollowerStats struct {
 	Synced   bool   // MasterNow ok
 	OffsetNs int64  // current estimate (0 if unsynced)
+	RTTNs    int64  // smallest RTT in the window (0 if unsynced)
 	Samples  int    // samples currently in window
 	Gen      uint32 // current generation
 	Master   string // dst.String()
@@ -297,7 +318,7 @@ type FollowerStats struct {
 func (f *Follower) Stats() FollowerStats {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	off, ok := f.est.offset()
+	off, rtt, ok := f.est.estimate()
 	master := ""
 	if f.have {
 		master = f.dst.String()
@@ -305,6 +326,7 @@ func (f *Follower) Stats() FollowerStats {
 	return FollowerStats{
 		Synced:   ok,
 		OffsetNs: off,
+		RTTNs:    rtt,
 		Samples:  f.est.len(),
 		Gen:      f.gen,
 		Master:   master,

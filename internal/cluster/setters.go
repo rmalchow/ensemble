@@ -23,6 +23,7 @@ func (c *Cluster) bumpOwn() *NodeRecord {
 // broadcastOwn enqueues a node delta for our own record + notifies. Caller must
 // NOT hold mu. snapshot is the record state to send (cloned under the lock).
 func (c *Cluster) broadcastOwn(rec *NodeRecord) {
+	c.log.Debug("broadcast own record", "version", rec.Version)
 	c.enqueueBroadcast(kindNodeDelta, c.self, delta{Node: rec})
 	c.notify()
 }

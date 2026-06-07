@@ -44,7 +44,20 @@ type options struct {
 	cfgArgs  []string // flag args forwarded to config.Load (--host stripped)
 }
 
+// version is stamped by the build (scripts/build.sh / CI: -X main.version=…).
+var version = "dev"
+
 func main() {
+	{ // --version, tolerating the `run` alias prefix.
+		a := os.Args[1:]
+		if len(a) > 0 && a[0] == "run" {
+			a = a[1:]
+		}
+		if len(a) == 1 && (a[0] == "--version" || a[0] == "-version") {
+			fmt.Println("ensemble", version)
+			return
+		}
+	}
 	opt, err := parseOptions(os.Args[1:], os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ensemble:", err)
@@ -79,6 +92,12 @@ func parseOptions(args []string, env func(string) string) (options, error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case i == 0 && a == "run":
+			// v1-CLI muscle-memory alias: `ensemble run …` == `ensemble …`.
+			// Without this, Go's flag parser would stop at the positional and
+			// silently ignore EVERY following flag (--data included!).
+		case a == "-v" || a == "--verbose":
+			opt.LogLevel = "debug"
 		case a == "--host" || a == "-host":
 			if i+1 >= len(args) {
 				return opt, errors.New("flag needs an argument: --host")
@@ -120,13 +139,25 @@ func validateConfigFlags(args []string) error {
 	fs.String("media", "", "")
 	fs.String("name", "", "")
 	fs.String("join", "", "")
-	return fs.Parse(args)
+	fs.Bool("no-mdns", false, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	// Go's flag parser STOPS at the first positional; anything left over means
+	// part of the command line was about to be silently ignored. Refuse loudly.
+	if extra := fs.Args(); len(extra) > 0 {
+		return fmt.Errorf("unexpected argument %q (flags only; flags after a positional would be ignored)", extra[0])
+	}
+	return nil
 }
 
 // run builds the component graph, starts it, blocks until ctx is cancelled, then
 // unwinds the shutdown stack in reverse. Returns the first fatal/shutdown error.
 func run(ctx context.Context, opt options) (rerr error) {
-	log := newLogger(opt.LogLevel).With("comp", "main")
+	// base carries no comp attr: components attach their own comp=… exactly
+	// once. main's own lines use log (comp=main).
+	base := newLogger(opt.LogLevel)
+	log := base.With("comp", "main")
 
 	// 1. config / node.json (A). Fatal on error — never mint a fresh id over a
 	//    corrupt file (§4).
@@ -134,6 +165,11 @@ func run(ctx context.Context, opt options) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+
+	log.Info("starting",
+		"version", version, "id", cfg.NodeID.String(), "name", cfg.NodeName,
+		"output", outputLabel(opt.Output), "media", cfg.MediaDir, "logLevel", opt.LogLevel,
+	)
 
 	// A LIFO of teardown closures; unwound in reverse on shutdown (§3.3).
 	stack := &shutdownStack{}
@@ -175,10 +211,22 @@ func run(ctx context.Context, opt options) (rerr error) {
 		return nil
 	})
 
-	gossipPort, err := probeGossipPort(opt.Host, cfg.GossipPort, netx.DefaultTries)
+	gossipPort, gossipReleased, err := probeGossipPort(opt.Host, cfg.GossipPort, netx.DefaultTries)
 	if err != nil {
 		return fmt.Errorf("probe gossip port (base %d): %w", cfg.GossipPort, err)
 	}
+
+	// PORTS (§2): one consistent line per actually-bound port at startup.
+	host := opt.Host
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	log.Info("port bound", "service", "http", "proto", "tcp", "host", host, "port", httpPort)
+	log.Info("port bound", "service", "stream", "proto", "tcp", "host", host, "port", streamPort)
+	log.Info("port bound", "service", "stream", "proto", "udp", "host", host, "port", streamPort)
+	log.Info("port bound", "service", "source", "proto", "tcp", "host", host, "port", sourcePort)
+	log.Info("port bound", "service", "source", "proto", "udp", "host", host, "port", sourcePort)
+	log.Info("port bound", "service", "gossip", "proto", "tcp+udp", "host", host, "port", gossipPort, "probeReleased", gossipReleased)
 
 	// 3. Addresses (§3.1). When bound to a SPECIFIC --host, only that address is
 	//    actually reachable, so advertise exactly it (critical on loopback dev/e2e:
@@ -196,18 +244,27 @@ func run(ctx context.Context, opt options) (rerr error) {
 	caps := capabilities(opt)
 
 	// 5. UDP mux over STREAM_PORT (not yet Run).
-	mux := stream.NewMux(streamUDP, log)
+	mux := stream.NewMux(streamUDP, base)
 
 	// 6. Cluster (memberlist on the probed gossip port; impls StateStore). The
 	//    discovery Peers channel is consumed by the cluster's own join loop.
-	disc := discovery.New(discovery.Config{
-		ID:         cfg.NodeID,
-		GossipPort: gossipPort,
-		HTTPPort:   httpPort,
-		StreamPort: streamPort,
-		SourcePort: sourcePort,
-		Log:        log,
-	})
+	var disc *discovery.Discovery
+	if cfg.NoMDNS {
+		log.Info("mDNS discovery disabled (--no-mdns); gossip relies on --join seeds")
+	} else {
+		disc = discovery.New(discovery.Config{
+			ID:         cfg.NodeID,
+			GossipPort: gossipPort,
+			HTTPPort:   httpPort,
+			StreamPort: streamPort,
+			SourcePort: sourcePort,
+			Log:        base,
+		})
+	}
+	var peers <-chan discovery.Peer
+	if disc != nil {
+		peers = disc.Peers()
+	}
 	cl, err := cluster.New(cluster.Config{
 		Self:          cfg.NodeID,
 		Name:          cfg.NodeName,
@@ -220,20 +277,20 @@ func run(ctx context.Context, opt options) (rerr error) {
 		SourcePort:    sourcePort,
 		GossipPort:    gossipPort,
 		BindAddr:      opt.Host,
-		Peers:         disc.Peers(),
-		Logger:        log,
+		Peers:         peers,
+		Logger:        base,
 	})
 	if err != nil {
 		return fmt.Errorf("cluster: %w", err)
 	}
 
 	// 7. Clock server (passive) + follower (contracts.Clock).
-	clockSrv := clock.NewServer(mux, log)
+	clockSrv := clock.NewServer(mux, base)
 	clockSrv.Start() // registers 0x10 on the mux (idempotent, mux not yet running)
-	clockFol := clock.NewFollower(mux, log)
+	clockFol := clock.NewFollower(mux, base)
 
 	// 8. Sink backend + playout. ENSEMBLE_OUTPUT=null forces null (§8.5/D27).
-	backend, backendName, err := sink.Open(opt.Output, log)
+	backend, backendName, err := sink.Open(opt.Output, base)
 	if err != nil {
 		return fmt.Errorf("sink backend %q: %w", opt.Output, err)
 	}
@@ -243,7 +300,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		BufferMs:      contracts.DefaultBufferMs,
 		Volume:        cfg.Volume,
 		OutputDelayMs: cfg.OutputDelayMs,
-		Log:           log,
+		Log:           base,
 	})
 
 	// 9. Source server (master-side; idle until a session runs) on SOURCE_PORT.
@@ -251,7 +308,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		Self: cfg.NodeID,
 		UDP:  srcUDP,
 		TCP:  srcTCP,
-		Log:  log,
+		Log:  base,
 	})
 
 	// 10. Subscriber client (member-side). The deliver closure decodes opus when
@@ -259,15 +316,17 @@ func run(ctx context.Context, opt options) (rerr error) {
 	//     sink on a generation change, and pushes canonical PCM to the sink.
 	subClient := stream.NewClient(stream.ClientConfig{
 		Mux:     mux,
-		Deliver: newDeliver(theSink, log),
-		Log:     log,
+		Deliver: newDeliver(theSink, base),
+		Log:     base,
 	})
 
 	// 11. Media + opus factories (D's audio package), bound to MediaDir.
 	media := mediaFactory{mediaDir: cfg.MediaDir}
 	var opusFac group.OpusFactory
 	if audio.OpusAvailable() {
-		opusFac = opusFactory{}
+		opusFac = opusFactory{log: log}
+	} else {
+		log.Debug("opus unavailable (libopus not loadable)")
 	}
 
 	// 12. Group engine (H). Follow client comes from I (D16) bound to the cluster.
@@ -283,7 +342,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		ClockCtl: clockFol,
 		Follow:   follow,
 		Caps:     caps,
-		Log:      log,
+		Log:      base,
 	})
 
 	// 13. API server (I) on the bound HTTP listener. Group is wired via an adapter
@@ -307,7 +366,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		},
 		Listener: httpLn,
 		DistFS:   distFS,
-		Log:      log,
+		Log:      base,
 	})
 
 	// 14. SEED + ACTIVATE. Closers are pushed in acquisition order so the LIFO
@@ -343,17 +402,25 @@ func run(ctx context.Context, opt options) (rerr error) {
 	go engine.Run(ctx)
 	stack.push("engine", func(context.Context) error { return engine.Close() })
 
-	disc.Run()
-	stack.push("discovery", func(context.Context) error { return disc.Close() })
+	// Member-side 1 Hz playing stats: one INFO line/second while the local sink is
+	// actively playing (idle → silent). The master side is logged by H (it owns
+	// the session); here we own the sink/clock/subscriber directly.
+	go memberStatsLoop(ctx, theSink, clockFol, subClient, base)
+
+	if disc != nil {
+		disc.Run()
+		stack.push("discovery", func(context.Context) error { return disc.Close() })
+	}
 
 	apiErr := make(chan error, 1)
 	go func() { apiErr <- apiSrv.Start() }()
 	stack.push("api", func(sc context.Context) error { return apiSrv.Shutdown(sc) })
 
 	log.Info("ready",
+		"version", version,
 		"id", cfg.NodeID.String(), "name", cfg.NodeName,
 		"http", httpPort, "stream", streamPort, "source", sourcePort, "gossip", gossipPort,
-		"output", backendName, "playback", caps.Playback,
+		"output", backendName, "media", cfg.MediaDir, "playback", caps.Playback,
 	)
 
 	// 15. Wait for shutdown signal or a fatal API error.
@@ -398,14 +465,14 @@ func hostCIDR(host string) string {
 // probeGossipPort finds a free TCP+UDP pair via netx, CLOSES both, and returns
 // the bare number for memberlist to bind itself (D8). The tiny rebind race is
 // accepted for v1.
-func probeGossipPort(host string, base, tries int) (int, error) {
+func probeGossipPort(host string, base, tries int) (port int, released bool, err error) {
 	tcp, udp, port, err := netx.BindTCPUDP(host, base, tries)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	_ = tcp.Close()
 	_ = udp.Close()
-	return port, nil
+	return port, true, nil
 }
 
 // newLogger builds a text slog handler at the requested level (default info).
@@ -454,6 +521,15 @@ func forcedNull(output string) bool {
 	return strings.TrimSpace(output) == "null"
 }
 
+// outputLabel renders the requested ENSEMBLE_OUTPUT for the startup line ("auto"
+// when unset; the backend is resolved/logged again at bind time).
+func outputLabel(output string) string {
+	if strings.TrimSpace(output) == "" {
+		return "auto"
+	}
+	return output
+}
+
 // ---- adapters (K-owned glue between sibling packages) -----------------------
 
 // newDeliver builds the member-side stream→sink callback (wiring gap #3): it
@@ -487,6 +563,7 @@ func newDeliver(sk contracts.Sink, log *slog.Logger) stream.DeliverFunc {
 					return
 				}
 				dec = d
+				dl.Info("opus decoder created", "rate", 48000, "channels", 2)
 			}
 			out, err := dec.Decode(payload)
 			if err != nil {
@@ -496,6 +573,48 @@ func newDeliver(sk contracts.Sink, log *slog.Logger) stream.DeliverFunc {
 			pcm = out
 		}
 		sk.Push(h.Gen, h.Seq, h.PTS, pcm)
+	}
+}
+
+// memberStatsLoop emits the member-side 1 Hz playing-stats line (comp=sink)
+// while the local sink is actively playing. It ticks every second and logs only
+// when playout advanced (played/silence moved) since the previous tick, so an
+// idle node stays quiet. Returns when ctx is cancelled.
+func memberStatsLoop(ctx context.Context, sk *sink.Playout, fol *clock.Follower, sub *stream.Client, log *slog.Logger) {
+	sl := log.With("comp", "sink")
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	var prevPlayed, prevSilence uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		ss := sk.Stats()
+		// Active iff playout produced output frames (real or silence) this second.
+		if ss.Played == prevPlayed && ss.Silence == prevSilence {
+			prevPlayed, prevSilence = ss.Played, ss.Silence
+			continue
+		}
+		prevPlayed, prevSilence = ss.Played, ss.Silence
+
+		cs := fol.Stats()
+		ct := sub.Counters()
+		sl.Info("playing",
+			"side", "member",
+			"played", ss.Played,
+			"silence", ss.Silence,
+			"lateDrop", ss.LateDrop,
+			"buffered", ss.Buffered,
+			"ratePPM", ss.RatePPM,
+			"synced", ss.Synced,
+			"offsetNs", cs.OffsetNs,
+			"rttNs", cs.RTTNs,
+			"delivered", ct.Delivered,
+			"recovered", ct.Recovered,
+			"lost", ct.Lost,
+		)
 	}
 }
 
@@ -511,10 +630,14 @@ func (m mediaFactory) Open(uri string) (group.MediaSource, error) {
 }
 
 // opusFactory adapts audio.NewOpusEncoder to group.OpusFactory.
-type opusFactory struct{}
+type opusFactory struct{ log *slog.Logger }
 
-func (opusFactory) NewEncoder() (group.OpusEncoder, error) {
-	return audio.NewOpusEncoder()
+func (f opusFactory) NewEncoder() (group.OpusEncoder, error) {
+	enc, err := audio.NewOpusEncoder()
+	if err == nil && f.log != nil {
+		f.log.With("comp", "audio").Info("opus encoder created", "bitrate", audio.OpusBitrate, "rate", 48000, "channels", 2)
+	}
+	return enc, err
 }
 
 // statusStats builds the GET /api/status closure from the sink (E), clock

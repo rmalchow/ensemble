@@ -8,6 +8,7 @@ import {
   joinTargets,
   groupLabel,
   selfNode,
+  addTargets,
 } from "./derive.js";
 
 const A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -93,5 +94,24 @@ describe("groupLabel", () => {
 describe("selfNode", () => {
   it("resolves self", () => {
     expect(selfNode(snap(), A).name).toBe("alice");
+  });
+});
+
+describe("addTargets", () => {
+  it("returns alive nodes not already in the group", () => {
+    const s = snap();
+    const group = { id: A, master: A, members: [A, B] };
+    const t = addTargets(s, group).map((n) => n.id);
+    expect(t).toEqual([C]); // alice+bob are members, carol is alive & outside
+  });
+  it("excludes dead non-members", () => {
+    const s = snap();
+    s.nodes[2].alive = false; // carol dead
+    const group = { id: A, master: A, members: [A, B] };
+    expect(addTargets(s, group)).toEqual([]);
+  });
+  it("empty for null inputs", () => {
+    expect(addTargets(undefined, { members: [] })).toEqual([]);
+    expect(addTargets(snap(), null)).toEqual([]);
   });
 });

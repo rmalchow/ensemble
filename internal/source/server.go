@@ -33,7 +33,7 @@ type Frame struct {
 
 // sourceCounters are the atomic stats read lock-free by Stats.
 type sourceCounters struct {
-	connects, restarts, primes atomic.Uint64
+	connects, restarts, primes, parity atomic.Uint64
 }
 
 // Server is the audio source: SOURCE_PORT control intake + per-frame fan-out to
@@ -108,8 +108,12 @@ func (s *Server) StartSession(gen uint32, t stream.Transport, bufferMs int) {
 	s.fec.reset(gen)
 	s.seq = 0
 	s.active = true
+	ringSize := len(s.ring.frames)
+	clients := s.reg.count()
 	s.mu.Unlock()
 
+	s.log.Info("session start", "gen", gen, "transport", t.String(),
+		"bufferMs", bufferMs, "ringSize", ringSize, "clients", clients)
 	s.Reconfig()
 }
 
@@ -147,6 +151,7 @@ func (s *Server) ReleaseFrame(pts int64, payload []byte) uint64 {
 		s.fec.fold(s.gen, seq, payload)
 		if s.fec.ready() {
 			if par := s.fec.parityPacket(s.scratch[:0]); par != nil {
+				s.stats.parity.Add(1)
 				for _, sub := range subs {
 					if sub.tr == stream.TransportUDP {
 						s.writeUDP(par, sub.addr)
@@ -198,8 +203,11 @@ func (s *Server) writeTCP(sub *subscriber, pkt []byte) {
 // Reconfig broadcasts a non-stop RECONFIG to every subscriber (D23).
 func (s *Server) Reconfig() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	gen := s.gen
+	clients := s.reg.count()
 	s.broadcastReconfig(false)
+	s.mu.Unlock()
+	s.log.Info("reconfig broadcast", "gen", gen, "stop", false, "clients", clients)
 }
 
 // StopSession ends the current session: flushes any partial FEC tail block,
@@ -207,12 +215,16 @@ func (s *Server) Reconfig() {
 // Subscribers are NOT removed. Idempotent.
 func (s *Server) StopSession() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.active {
+		s.mu.Unlock()
 		return
 	}
+	gen := s.gen
+	frames := s.seq
+	clients := s.reg.count()
 	if s.transport == stream.TransportUDP {
 		if par := s.fec.flushPartial(s.scratch[:0]); par != nil {
+			s.stats.parity.Add(1)
 			for _, sub := range s.reg.live() {
 				if sub.tr == stream.TransportUDP {
 					s.writeUDP(par, sub.addr)
@@ -223,6 +235,9 @@ func (s *Server) StopSession() {
 	s.broadcastReconfig(true)
 	s.active = false
 	s.ring.clear()
+	s.mu.Unlock()
+	s.log.Info("session stop", "gen", gen, "framesReleased", frames, "clients", clients)
+	s.log.Info("reconfig broadcast", "gen", gen, "stop", true, "clients", clients)
 }
 
 // broadcastReconfig sends a RECONFIG control to all subscribers. Caller holds mu.
@@ -251,12 +266,15 @@ func (s *Server) broadcastReconfig(stop bool) {
 func (s *Server) Stats() contracts.SourceStats {
 	s.mu.Lock()
 	clients := s.reg.count()
+	released := s.seq
 	s.mu.Unlock()
 	return contracts.SourceStats{
 		Clients:  clients,
 		Connects: s.stats.connects.Load(),
 		Restarts: s.stats.restarts.Load(),
 		Primes:   s.stats.primes.Load(),
+		Released: released,
+		Parity:   s.stats.parity.Load(),
 	}
 }
 
@@ -321,8 +339,12 @@ func (s *Server) handleControlUDP(pkt []byte, from netip.AddrPort) {
 		s.onSubscribe(from, stream.TransportUDP, nil, now, true, true)
 	case stream.TypeBye:
 		s.mu.Lock()
+		removed := s.reg.get(from) != nil
 		s.reg.remove(from)
 		s.mu.Unlock()
+		if removed {
+			s.log.Info("client left (BYE)", "addr", from.String(), "transport", "udp")
+		}
 	}
 }
 
@@ -336,17 +358,33 @@ func (s *Server) onSubscribe(addr netip.AddrPort, t stream.Transport, conn net.C
 	if isRestart {
 		s.stats.restarts.Add(1)
 	}
+	var primeFrames int
+	var primeSpanMs int64
+	primed := false
 	if primeMe && s.active && !sub.priming {
 		if frames := s.ring.prime(); len(frames) > 0 {
 			// Mark priming under the lock so live fan-out skips this sub
 			// until the burst catches up to the live edge (see prime.go).
 			sub.priming = true
 			s.stats.primes.Add(1)
+			primed = true
+			primeFrames = len(frames)
+			primeSpanMs = (frames[len(frames)-1].pts - frames[0].pts) / 1_000_000
 			s.wg.Add(1)
 			go s.prime(sub, frames, s.gen)
 		}
 	}
 	s.mu.Unlock()
+
+	switch {
+	case isRestart:
+		s.log.Info("client RESTART", "addr", addr.String(), "transport", t.String(), "prime", primed)
+	case isNew:
+		s.log.Info("client joined (HELLO)", "addr", addr.String(), "transport", t.String(), "primeRequested", primeMe)
+	}
+	if primed {
+		s.log.Info("prime burst", "addr", addr.String(), "frames", primeFrames, "spanMs", primeSpanMs)
+	}
 }
 
 // acceptLoop accepts TCP subscriber connections.
@@ -373,6 +411,7 @@ func (s *Server) tcpConnReader(conn *net.TCPConn) {
 	defer conn.Close()
 
 	ap, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
+	s.log.Debug("tcp subscriber conn accepted", "addr", ap.String())
 
 	for {
 		select {
@@ -383,8 +422,12 @@ func (s *Server) tcpConnReader(conn *net.TCPConn) {
 		chunk, err := readTCPFrame(conn)
 		if err != nil {
 			s.mu.Lock()
+			existed := s.reg.get(ap) != nil
 			s.reg.remove(ap)
 			s.mu.Unlock()
+			if existed {
+				s.log.Info("tcp subscriber conn closed", "addr", ap.String(), "err", err)
+			}
 			return
 		}
 		h, payload, derr := stream.DecodeFrame(chunk)
@@ -402,6 +445,7 @@ func (s *Server) tcpConnReader(conn *net.TCPConn) {
 			s.mu.Lock()
 			s.reg.remove(ap)
 			s.mu.Unlock()
+			s.log.Info("client left (BYE)", "addr", ap.String(), "transport", "tcp")
 			return
 		}
 	}
@@ -418,10 +462,13 @@ func (s *Server) sweepLoop() {
 			return
 		case now := <-t.C:
 			s.mu.Lock()
-			conns := s.reg.expire(now, keepaliveTTL)
+			conns, expired := s.reg.expire(now, keepaliveTTL)
 			s.mu.Unlock()
 			for _, c := range conns {
 				_ = c.Close()
+			}
+			for _, addr := range expired {
+				s.log.Info("client left (keepalive expiry)", "addr", addr.String(), "ttl", keepaliveTTL.String())
 			}
 		}
 	}

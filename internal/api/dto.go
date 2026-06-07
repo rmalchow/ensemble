@@ -70,11 +70,6 @@ type MediaFile struct {
 	ModTime   int64  `json:"modTime"` // unix seconds
 }
 
-// MediaResp is the GET /api/media envelope.
-type MediaResp struct {
-	Files []MediaFile `json:"files"`
-}
-
 // --- POST /api/follow ------------------------------------------------------
 type FollowReq struct {
 	Target string `json:"target"` // 32-hex node id

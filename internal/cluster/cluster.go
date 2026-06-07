@@ -165,6 +165,7 @@ func New(cfg Config) (*Cluster, error) {
 	ml.AdvertisePort = cfg.GossipPort
 	ml.Delegate = c.deleg
 	ml.Events = c.deleg
+	ml.Conflict = c.deleg
 	// Route memberlist's verbose stdlib logging into our slog at debug, rather
 	// than letting it write directly to os.Stderr.
 	ml.LogOutput = &slogWriter{log: log}
@@ -335,6 +336,7 @@ func (c *Cluster) runPurge() {
 	removed := c.doc.purge(c.self, cutoff, alive)
 	c.mu.Unlock()
 	if removed {
+		c.log.Info("purged stale records", "olderThanUnix", cutoff)
 		c.notify()
 	}
 }

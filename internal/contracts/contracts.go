@@ -43,6 +43,10 @@ type Sink interface {
 	// Reset arms the sink for a new session generation, discarding queued
 	// frames from older generations and re-zeroing per-session counters.
 	Reset(gen uint32)
+	// Disarm cleanly ends the local playout session (group idle / session
+	// stopped): discards buffered frames and stops the scheduler WITHOUT the
+	// starvation-watchdog warnings. Idempotent; a later Reset re-arms.
+	Disarm()
 	// Stats returns a snapshot of playout counters for /api/status (§9.1).
 	Stats() SinkStats
 	// SetGain sets the live software volume (0.0–1.0, D35) with a one-frame
@@ -73,6 +77,8 @@ type SourceStats struct {
 	Connects uint64 `json:"connects"` // total HELLO-subscribes accepted
 	Restarts uint64 `json:"restarts"` // RESTART re-prime requests served
 	Primes   uint64 `json:"primes"`   // burst primes sent (connect + restart)
+	Released uint64 `json:"released"` // frames released (seq high-water) this session
+	Parity   uint64 `json:"parity"`   // FEC parity datagrams emitted this session
 }
 
 // ---- Clock (clock piece F owns it; playout E + source H consume it) ---------

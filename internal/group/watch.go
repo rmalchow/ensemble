@@ -58,6 +58,9 @@ func (e *Engine) reconcile() {
 		return
 	}
 
+	// Log observed group composition changes (membership / master / our role).
+	e.logCompositionLocked(mv)
+
 	// Self-heal dangling follow (§5).
 	e.reconcileHeal(mv, now)
 
@@ -69,18 +72,25 @@ func (e *Engine) reconcile() {
 	}
 
 	// Re-point local plumbing at the current master (the heart of "members follow
-	// the master automatically", §3.2).
+	// the master automatically", §3.2). Subscribe/arm only while the group has an
+	// active session: an idle node must not HELLO, must not arm its sink (no
+	// boot-time starvation warnings), and must BYE when the session ends.
 	gen := e.curGen
 	if isMaster && e.sess != nil {
 		gen = e.sess.gen.Load() // our own running session
 	}
-	e.repointLocked(mv.master, gen, mv.group.Settings.Transport)
+	playing := mv.group.Playback.State == "playing" || (isMaster && e.sess != nil)
+	e.repointLocked(mv.master, gen, mv.group.Settings.Transport, playing)
 
 	// Heartbeat (D28): master, while playing, every Heartbeat interval.
 	if e.sess != nil && isMaster && !now.Before(e.lastBeat.Add(e.p.Heartbeat)) {
 		e.p.Cluster.SetPlayback(e.sess.groupID, e.sess.playbackRecord(now, e.p.Source.Stats()))
 		e.lastBeat = now
 	}
+
+	// 1 Hz playing stats: one INFO line per active side per second (master via
+	// SourceStats; member via sink/clock/client counters). Stops when idle.
+	e.logPlayingStatsLocked(mv, isMaster, now)
 
 	e.mu.Unlock()
 }
@@ -89,12 +99,20 @@ func (e *Engine) reconcile() {
 // given master + generation when they changed since last time (§3.2). The master
 // dials itself via loopback like any member (§8.2). Caller holds e.mu; the calls
 // are all non-blocking target updates.
-func (e *Engine) repointLocked(master id.ID, gen uint32, transport string) {
+func (e *Engine) repointLocked(master id.ID, gen uint32, transport string, playing bool) {
 	if master.IsZero() {
 		return
 	}
-	if e.haveCur && e.curMaster == master && e.curGen == gen {
+	if e.haveCur && e.curMaster == master && e.curGen == gen && e.curPlaying == playing {
 		return // unchanged: idempotent, no churn
+	}
+	// Generations are PER-MASTER counters: a new master's session may carry a
+	// LOWER gen than our previous master's (or our own) last one. Never carry
+	// the old floor across a master change — subscribe/arm at 0 and let the
+	// first frame / RECONFIG establish the new master's gen (the client window
+	// and the deliver-side sink re-arm both re-anchor upward).
+	if e.haveCur && e.curMaster != master && master != e.self {
+		gen = 0
 	}
 
 	ip := e.dialIP(master)
@@ -119,12 +137,22 @@ func (e *Engine) repointLocked(master id.ID, gen uint32, transport string) {
 	srcAddr := netip.AddrPortFrom(ip, uint16(srcPort))
 	clkAddr := netip.AddrPortFrom(ip, uint16(streamPort))
 
-	e.p.Sink.Reset(gen)
-	_ = e.p.Sub.Subscribe(srcAddr, gen, stream.ParseTransport(transport))
+	// The clock follower tracks the master ALWAYS (cheap; keeps every member
+	// synced and ready). Stream subscription + sink arming are session-gated.
 	e.p.ClockCtl.SetMaster(clkAddr, gen)
+	if playing {
+		e.p.Sink.Reset(gen)
+		_ = e.p.Sub.Subscribe(srcAddr, gen, stream.ParseTransport(transport))
+	} else if e.haveCur && e.curPlaying {
+		// Session ended: leave the source politely (BYE) and disarm playout
+		// cleanly (no starvation warnings).
+		e.p.Sub.Unsubscribe()
+		e.p.Sink.Disarm()
+	}
 
 	e.curMaster = master
 	e.curGen = gen
+	e.curPlaying = playing
 	e.haveCur = true
 }
 

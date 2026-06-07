@@ -85,7 +85,7 @@ a {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   margin-bottom: 12px;
 }
 
@@ -221,9 +221,8 @@ input[type="range"] {
   width: 110px;
 }
 
-/* member / node rows */
-.member,
-.noderow {
+/* member rows inside a group card */
+.member {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -257,9 +256,60 @@ input[type="range"] {
 .media-file {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 5px 0;
   border-top: 1px solid var(--border);
+}
+
+/* media breadcrumb */
+.crumbs {
+  gap: 4px;
+  padding: 4px 0 6px;
+  font-size: 13px;
+}
+.crumb {
+  color: var(--fg);
+}
+.crumb.link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.crumb.link:hover {
+  text-decoration: underline;
+}
+.crumb.here {
+  color: var(--muted);
+}
+.crumb-sep {
+  color: var(--muted);
+}
+
+/* a folder (or "..") row reuses .media-file but is a clickable button */
+.folder-row {
+  width: 100%;
+  background: none;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  text-align: left;
+  font: inherit;
+  color: var(--fg);
+  cursor: pointer;
+}
+.folder-row:hover {
+  color: var(--accent);
+}
+.folder-row .glyph {
+  width: 1.2em;
+  text-align: center;
+  color: var(--muted);
+}
+.folder-row.up .glyph {
+  transform: rotate(180deg);
 }
 
 /* toast */

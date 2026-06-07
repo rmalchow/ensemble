@@ -51,18 +51,19 @@ func (r *registry) get(addr netip.AddrPort) *subscriber { return r.subs[addr] }
 func (r *registry) remove(addr netip.AddrPort) { delete(r.subs, addr) }
 
 // expire removes subscribers whose lastSeen < now-ttl; returns the removed TCP
-// conns so the caller can close them outside the map mutation.
-func (r *registry) expire(now time.Time, ttl time.Duration) []net.Conn {
-	var conns []net.Conn
+// conns (so the caller can close them outside the map mutation) and the addrs
+// of every expired subscriber (for keepalive-expiry logging).
+func (r *registry) expire(now time.Time, ttl time.Duration) (conns []net.Conn, expired []netip.AddrPort) {
 	for addr, s := range r.subs {
 		if now.Sub(s.lastSeen) > ttl {
 			if s.conn != nil {
 				conns = append(conns, s.conn)
 			}
+			expired = append(expired, addr)
 			delete(r.subs, addr)
 		}
 	}
-	return conns
+	return conns, expired
 }
 
 // live returns a snapshot slice of current subscribers for fan-out. Subs with

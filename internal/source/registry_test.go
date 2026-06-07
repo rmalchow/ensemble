@@ -33,7 +33,7 @@ func TestRegistryExpire(t *testing.T) {
 	now := time.Now()
 	r.upsert(ap("127.0.0.1:5000"), stream.TransportUDP, nil, now)
 	r.upsert(ap("127.0.0.1:5001"), stream.TransportUDP, nil, now.Add(20*time.Second))
-	conns := r.expire(now.Add(20*time.Second), 15*time.Second)
+	conns, _ := r.expire(now.Add(20*time.Second), 15*time.Second)
 	if len(conns) != 0 {
 		t.Fatal("UDP sub has no conn to return")
 	}
@@ -55,7 +55,7 @@ func TestRegistryExpireReturnsTCPConn(t *testing.T) {
 	defer c2.Close()
 	now := time.Now()
 	r.upsert(ap("127.0.0.1:6000"), stream.TransportTCP, c1, now)
-	conns := r.expire(now.Add(20*time.Second), 15*time.Second)
+	conns, _ := r.expire(now.Add(20*time.Second), 15*time.Second)
 	if len(conns) != 1 {
 		t.Fatalf("expected 1 returned conn, got %d", len(conns))
 	}

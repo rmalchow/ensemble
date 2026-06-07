@@ -60,12 +60,22 @@ type Engine struct {
 	gen  uint32   // monotonic per-node session generation (§8.4); never reused
 
 	// reconcile / member-side tracking — what the local plumbing is pointed at
-	curMaster id.ID     // master this node currently tracks (Zero = none)
-	curGen    uint32    // generation the subscriber+sink+clock are armed for
-	haveCur   bool      // curMaster/curGen have been set at least once
-	healAt    time.Time // when stale `following` becomes eligible for reset (zero=none)
+	curMaster  id.ID     // master this node currently tracks (Zero = none)
+	curGen     uint32    // generation the subscriber+sink+clock are armed for
+	curPlaying bool      // stream subscription + sink are armed (session active)
+	haveCur    bool      // curMaster/curGen have been set at least once
+	healAt     time.Time // when stale `following` becomes eligible for reset (zero=none)
 
 	lastBeat time.Time // last heartbeat SetPlayback (master, while playing)
+
+	// observed group composition (for logging membership/role/master changes)
+	prevRole    role
+	prevMaster  id.ID
+	prevMembers map[id.ID]bool
+	havePrev    bool
+
+	// 1 Hz playing-stats throttle (one INFO line per second per side)
+	lastStats time.Time
 
 	closed bool
 	done   chan struct{}
@@ -129,6 +139,7 @@ func (e *Engine) Unfollow() error {
 		return ErrClosed
 	}
 	e.p.Cluster.SetFollowing(id.Zero)
+	e.log.Info("unfollowing (now solo)", "reason", "user")
 	return nil
 }
 

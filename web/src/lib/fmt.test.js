@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { shortId, relTime, position, bytes, cidrList } from "./fmt.js";
+import { shortId, relTime, position, bytes, cidrList, ports } from "./fmt.js";
 
 describe("shortId", () => {
   it("returns first 8 chars", () => {
@@ -44,5 +44,22 @@ describe("cidrList", () => {
     expect(cidrList(["a/24", "b/64"])).toBe("a/24, b/64");
     expect(cidrList([])).toBe("—");
     expect(cidrList(undefined)).toBe("—");
+  });
+});
+
+describe("ports", () => {
+  it("formats the full port set compactly", () => {
+    expect(
+      ports({ httpPort: 8080, streamPort: 9090, sourcePort: 9200, gossipPort: 7946 }),
+    ).toBe("http 8080 · stream 9090 · source 9200 · gossip 7946");
+  });
+  it("omits unset ports", () => {
+    expect(ports({ httpPort: 8080, gossipPort: 7946 })).toBe(
+      "http 8080 · gossip 7946",
+    );
+  });
+  it("empty for missing node", () => {
+    expect(ports(undefined)).toBe("");
+    expect(ports({})).toBe("");
   });
 });

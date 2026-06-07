@@ -67,6 +67,7 @@ func New(cfg Config) *Server {
 	e.Pre(s.proxyMiddleware)
 
 	e.Use(recoverMiddleware(log))
+	e.Use(requestLogMiddleware(log))    // DEBUG access log (non-mutating chatter)
 	e.Use(bodyLimitMiddleware(1 << 20)) // 1 MiB (§9 no large uploads)
 
 	g := e.Group("/api")

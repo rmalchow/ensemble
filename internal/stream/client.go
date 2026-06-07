@@ -122,6 +122,10 @@ func (c *Client) Subscribe(sourceAddr netip.AddrPort, gen uint32, t Transport) e
 	c.mu.Unlock()
 
 	if old != nil {
+		if old.gen != gen {
+			c.log.Info("subscription gen change", "master", sourceAddr.String(),
+				"from", old.gen, "to", gen)
+		}
 		old.shutdown(true) // BYE + stop loops
 	}
 
@@ -141,6 +145,7 @@ func (c *Client) Subscribe(sourceAddr netip.AddrPort, gen uint32, t Transport) e
 
 	if t == TransportTCP {
 		if err := s.dialTCP(); err != nil {
+			c.log.Warn("subscribe: tcp dial failed", "master", sourceAddr.String(), "gen", gen, "err", err)
 			return err
 		}
 	} else {
@@ -158,6 +163,7 @@ func (c *Client) Subscribe(sourceAddr netip.AddrPort, gen uint32, t Transport) e
 	c.mu.Unlock()
 
 	s.startLoops()
+	c.log.Info("subscribed", "master", sourceAddr.String(), "gen", gen, "transport", t.String())
 	return nil
 }
 
@@ -170,6 +176,7 @@ func (c *Client) Unsubscribe() {
 	c.subPtr.Store(nil)
 	c.mu.Unlock()
 	if old != nil {
+		c.log.Info("unsubscribed", "master", old.addr.String(), "gen", old.gen)
 		old.shutdown(true)
 	}
 }
@@ -228,7 +235,7 @@ func (c *Client) onReconfigUDP(pkt []byte, from netip.AddrPort) {
 		return
 	}
 	stop := len(payload) > 0 && payload[0]&FlagStop != 0
-	_ = h
+	c.log.Info("reconfig received", "master", from.String(), "gen", h.Gen, "stop", stop)
 	if c.reconfig != nil {
 		c.reconfig(stop)
 	}

@@ -10,6 +10,19 @@ import (
 	"ensemble/internal/id"
 )
 
+// auditAttrs returns the client-IP (+ proxied-from peer, when the request was
+// one-hop proxied) attrs prepended to every mutating-endpoint audit log. Shape:
+// comp=api verb=<v> <fields...> ip=<addr> [proxiedFrom=<peer>].
+func auditAttrs(c echo.Context, verb string) []any {
+	attrs := []any{"verb", verb, "ip", c.RealIP()}
+	if c.Request().Header.Get(proxiedHeader) != "" {
+		if from := c.Request().Header.Get(fromHeader); from != "" {
+			attrs = append(attrs, "proxiedFrom", from)
+		}
+	}
+	return attrs
+}
+
 // handleStatus reports this node's identity, role, group, and live sink/clock/
 // source stats (§9.1, D19).
 func (s *Server) handleStatus(c echo.Context) error {
@@ -81,7 +94,7 @@ func (s *Server) handleCluster(c echo.Context) error {
 // handleMedia lists this node's local playable files (§6).
 func (s *Server) handleMedia(c echo.Context) error {
 	if s.cfg.Media == nil {
-		return c.JSON(http.StatusOK, MediaResp{Files: []MediaFile{}})
+		return c.JSON(http.StatusOK, []MediaFile{})
 	}
 	files, err := s.cfg.Media.List()
 	if err != nil {
@@ -91,7 +104,7 @@ func (s *Server) handleMedia(c echo.Context) error {
 	if files == nil {
 		files = []MediaFile{}
 	}
-	return c.JSON(http.StatusOK, MediaResp{Files: files})
+	return c.JSON(http.StatusOK, files)
 }
 
 // handlePatchNode applies {name?, volume?, outputDelayMs?} to THIS node:
@@ -122,6 +135,7 @@ func (s *Server) handlePatchNode(c echo.Context) error {
 			return failCode(c, http.StatusInternalServerError, "internal_error", "")
 		}
 		s.cfg.Cluster.SetName(*req.Name)
+		s.log.Info("node mutation", append(auditAttrs(c, "rename"), "name", *req.Name)...)
 	}
 	if req.Volume != nil {
 		if err := s.cfg.NodeCfg.SetVolume(*req.Volume); err != nil {
@@ -132,6 +146,7 @@ func (s *Server) handlePatchNode(c echo.Context) error {
 		if sink := s.sink(); sink != nil {
 			sink.SetGain(*req.Volume)
 		}
+		s.log.Info("node mutation", append(auditAttrs(c, "volume"), "volume", *req.Volume)...)
 	}
 	if req.OutputDelayMs != nil {
 		if err := s.cfg.NodeCfg.SetOutputDelayMs(*req.OutputDelayMs); err != nil {
@@ -142,6 +157,7 @@ func (s *Server) handlePatchNode(c echo.Context) error {
 		if sink := s.sink(); sink != nil {
 			sink.SetDelayOffset(int64(*req.OutputDelayMs) * 1_000_000)
 		}
+		s.log.Info("node mutation", append(auditAttrs(c, "outputDelayMs"), "outputDelayMs", *req.OutputDelayMs)...)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -167,6 +183,7 @@ func (s *Server) handleFollow(c echo.Context) error {
 	if err := s.cfg.Group.Follow(c.Request().Context(), target); err != nil {
 		return s.fail(c, err)
 	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "follow"), "target", target.String())...)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -175,6 +192,7 @@ func (s *Server) handleUnfollow(c echo.Context) error {
 	if err := s.cfg.Group.Unfollow(c.Request().Context()); err != nil {
 		return s.fail(c, err)
 	}
+	s.log.Info("ui mutation", auditAttrs(c, "unfollow")...)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -191,6 +209,7 @@ func (s *Server) handleGroupName(c echo.Context) error {
 	if err := s.cfg.Group.NameGroup(c.Request().Context(), gid, req.Name); err != nil {
 		return s.fail(c, err)
 	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "groupName"), "group", gid.String(), "name", req.Name)...)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -207,6 +226,7 @@ func (s *Server) handleGroupMaster(c echo.Context) error {
 	if err := s.cfg.Group.MakeMaster(c.Request().Context(), node); err != nil {
 		return s.fail(c, err)
 	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "makeMaster"), "node", node.String())...)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -227,6 +247,7 @@ func (s *Server) handlePlay(c echo.Context) error {
 	if err := s.cfg.Group.Play(c.Request().Context(), uri); err != nil {
 		return s.fail(c, err)
 	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "play"), "uri", uri)...)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -292,6 +313,7 @@ func (s *Server) handleStop(c echo.Context) error {
 	if err := s.cfg.Group.Stop(c.Request().Context()); err != nil {
 		return s.fail(c, err)
 	}
+	s.log.Info("ui mutation", auditAttrs(c, "stop")...)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -310,5 +332,7 @@ func (s *Server) handleSetSettings(c echo.Context) error {
 	if err := s.cfg.Group.SetSettings(c.Request().Context(), body); err != nil {
 		return s.fail(c, err)
 	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "groupSettings"),
+		"codec", body.Codec, "transport", body.Transport, "bufferMs", body.BufferMs)...)
 	return c.NoContent(http.StatusNoContent)
 }

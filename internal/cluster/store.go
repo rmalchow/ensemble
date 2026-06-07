@@ -22,7 +22,15 @@ func (c *Cluster) Snapshot() contracts.Snapshot {
 
 	nodes := make([]contracts.NodeView, 0, len(doc.Nodes))
 	for nid, r := range doc.Nodes {
-		nodes = append(nodes, nodeView(nid, r, alive, seen, nowUnix))
+		nv := nodeView(nid, r, alive, seen, nowUnix)
+		if nid == c.self {
+			// This process IS the node: memberlist never gossips us to
+			// ourselves, so liveness/staleness must not depend on it.
+			nv.Alive = true
+			nv.LastSeenUnix = nowUnix
+			nv.Stale = false
+		}
+		nodes = append(nodes, nv)
 	}
 	sort.Slice(nodes, func(i, j int) bool { return idLess(nodes[i].ID, nodes[j].ID) })
 

@@ -166,7 +166,10 @@ func (p *Playout) Reset(gen uint32) {
 	p.originSet = false
 	p.armed = true
 	p.lastPkt = p.now()
+	bufMs := p.bufferNs / 1_000_000
+	delayMs := p.delayOffsetNs / 1_000_000
 	p.mu.Unlock()
+	p.log.Info("session armed", "gen", gen, "bufferMs", bufMs, "delayOffsetMs", delayMs)
 	p.signal()
 }
 
@@ -186,6 +189,7 @@ func (p *Playout) SetBufferMs(ms int) {
 // next frame. Safe from any goroutine, no restart, applies on every backend.
 func (p *Playout) SetGain(g float64) {
 	p.gain.setTarget(g)
+	p.log.Info("gain changed", "volume", g)
 }
 
 // SetDelayOffset sets the node's output-delay calibration in nanoseconds (D36;
@@ -204,10 +208,30 @@ func (p *Playout) SetDelayOffset(nanos int64) {
 	p.originSet = false
 	p.stats.Buffered = 0
 	restart := p.restart
+	offMs := p.delayOffsetNs / 1_000_000
 	p.mu.Unlock()
+	p.log.Info("delay offset changed; re-anchoring", "delayOffsetMs", offMs, "willRestart", restart != nil)
 	if restart != nil {
 		restart()
 	}
+}
+
+// Disarm cleanly ends the local session (contracts.Sink): group went idle or
+// the session stopped. Discards buffered frames and stops the scheduler with
+// no starvation warnings. Idempotent; Reset re-arms.
+func (p *Playout) Disarm() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || !p.armed {
+		return
+	}
+	p.armed = false
+	p.jb.reset()
+	p.servo.reset()
+	p.rs.reset()
+	p.stats.Buffered = 0
+	p.log.Info("playout disarmed (session ended)", "gen", p.gen)
+	p.signal()
 }
 
 // Stats snapshots playout counters (contracts.Sink). Synced is read live from

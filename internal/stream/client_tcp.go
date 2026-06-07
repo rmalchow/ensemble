@@ -69,6 +69,7 @@ func (s *subscription) readTCP() {
 			s.ingest(h, payload, true)
 		case TypeReconfig:
 			stop := len(payload) > 0 && payload[0]&FlagStop != 0
+			s.log.Info("reconfig received", "master", s.addr.String(), "gen", h.Gen, "stop", stop)
 			if s.client != nil {
 				s.client.fireReconfig(stop)
 			}

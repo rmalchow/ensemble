@@ -27,7 +27,10 @@ func (s *Server) prime(sub *subscriber, frames []ringSlot, gen uint32) {
 		sub.priming = false
 		s.mu.Unlock()
 	}
+	round := 0
 	for {
+		round++
+		s.log.Debug("prime catch-up round", "addr", sub.addr.String(), "round", round, "frames", len(frames), "gen", gen)
 		var ok bool
 		if sub.tr == stream.TransportTCP {
 			ok = s.primeTCP(sub, frames, gen)

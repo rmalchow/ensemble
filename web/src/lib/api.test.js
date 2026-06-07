@@ -73,6 +73,17 @@ describe("membership", () => {
     expect(path).toBe("/api/follow");
     expect(JSON.parse(opts.body)).toEqual({ target: REMOTE });
   });
+  it("add-node-to-group: follow(X, master) → POST /api/<X>/follow {target:master}", async () => {
+    // GroupCard's "Add node…" folds node X into a group by following X onto
+    // that group's master, issued via the proxy on X.
+    const MASTER = "33333333333333333333333333333333";
+    global.fetch = mockFetch(200, {});
+    await follow(REMOTE, MASTER);
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/api/" + REMOTE + "/follow");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ target: MASTER });
+  });
   it("unfollow posts to acting node", async () => {
     global.fetch = mockFetch(200, {});
     await unfollow(REMOTE);

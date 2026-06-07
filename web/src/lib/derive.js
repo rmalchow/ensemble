@@ -56,3 +56,12 @@ export function groupLabel(group) {
 export function selfNode(snapshot, selfId) {
   return nodeById(snapshot, selfId);
 }
+
+// addTargets returns alive nodes that are NOT members of the given group —
+// candidates for the group card's "Add node…" control. Following one onto the
+// group's master folds it into this group (§5.1).
+export function addTargets(snapshot, group) {
+  if (!snapshot || !snapshot.nodes || !group) return [];
+  const members = new Set(group.members || []);
+  return snapshot.nodes.filter((n) => n.alive && !members.has(n.id));
+}

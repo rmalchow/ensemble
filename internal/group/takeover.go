@@ -39,8 +39,12 @@ func (e *Engine) MakeMaster(ctx context.Context, node id.ID) error {
 
 	// Stop any running playback session before mastership moves (§5.2 step 2).
 	members := append([]id.ID(nil), mv.group.Members...)
+	hadSession := e.sess != nil
 	e.stopLocked()
 	e.mu.Unlock()
+
+	e.log.Info("takeover: orchestrating", "newMaster", node.String(),
+		"group", mv.group.ID.String(), "members", len(members), "stoppedSession", hadSession)
 
 	// Phase 2 (no lock): drive every member over HTTP (§5.2 step 3). Per-member
 	// errors are logged, not fatal — members that miss the command self-heal.
@@ -51,10 +55,13 @@ func (e *Engine) MakeMaster(ctx context.Context, node id.ID) error {
 		if m == e.self {
 			// We are a member but not the new master: follow newMaster locally.
 			e.p.Cluster.SetFollowing(node)
+			e.log.Info("takeover: following new master", "target", node.String())
 			continue
 		}
 		if err := e.p.Follow.Follow(ctx, m, node); err != nil {
 			e.log.Warn("takeover: follow command failed", "member", m, "target", node, "err", err)
+		} else {
+			e.log.Info("takeover: directed member to follow", "member", m.String(), "target", node.String())
 		}
 	}
 
@@ -66,5 +73,6 @@ func (e *Engine) MakeMaster(ctx context.Context, node id.ID) error {
 			e.log.Warn("takeover: unfollow new master failed", "target", node, "err", err)
 		}
 	}
+	e.log.Info("takeover: complete", "newMaster", node.String())
 	return nil
 }
