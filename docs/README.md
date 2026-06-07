@@ -387,6 +387,16 @@ to the address each subscription came from:
   master→member. No FEC (TCP retransmits). The member-side STREAM_PORT TCP
   listener plays no role in audio.
 
+**Protocol version / compatibility (v1, D46).** The **magic byte `0xE5` IS the
+version marker**: every framed packet starts with it. Receivers **MUST ignore
+unknown packet `type` values** (forward-compatible: new optional types may be
+added within v1 without breaking older receivers). A **future incompatible
+revision changes the magic byte**, not the header layout — so a single leading-
+byte check is both the framing sanity check and the version gate. This is what
+lets a *protocol-minimal* receiver (e.g. ESP32-S3 firmware, see
+`docs/DUMB-CLIENT.md`) interoperate without tracking the cluster: it implements
+only the packet types it needs and drops the rest.
+
 ### 8.5 Sink & playout (every member)
 
 Every member (incl. master) runs: subscriber → jitter buffer → **rate-adaptive

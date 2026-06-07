@@ -17,6 +17,11 @@ N1="http://127.0.0.1:18080"
 N2="http://127.0.0.1:28080"
 N3="http://127.0.0.1:38080"
 
+# Build the protocol-minimal reference client (docs/DUMB-CLIENT.md) for the
+# conformance leg (step 11b). It is a standalone, receive-only audio participant.
+DUMB="$(mktemp)"
+go build -o "$DUMB" "$ROOT/cmd/dumbclient"
+
 PASS=0; FAIL=0
 pass() { echo "PASS: $*"; PASS=$((PASS+1)); }
 die()  { echo "FAIL: $*" >&2; FAIL=$((FAIL+1)); cleanup_fail; exit 1; }
@@ -211,6 +216,37 @@ wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID1"'").settings.buffe
 rising "$N1/api/status" '.sink.played' 1 || die "n1 playback stalled after settings change"
 rising "$N2/api/status" '.sink.played' 1 || die "n2 playback stalled after settings change"
 pass "11 live settings change (bufferMs=200), playback continues on both"
+
+# ---- 11b. dumb-client conformance: a protocol-minimal receiver plays --------
+# The group is mid-play, master=n1, codec=pcm (step 11) — a clean PCM window.
+# Launch the standalone reference client (cmd/dumbclient, no internal/ imports):
+# it discovers via GET /api/cluster on n1, subscribes to the master's source,
+# follows the master clock, and schedules PCM playout. It IS a source
+# subscriber (so source.clients rises to 3) but is NOT a cluster gossip member —
+# it never appears in groups[].members and never affects codec negotiation.
+# Assert its own 1 Hz stats line shows played>0 and strictly rising, then kill it.
+# Re-issue play on the master so a fresh, full-length PCM session is guaranteed
+# to be in flight for the leg (the original tone may have finished by now).
+post_retry "$N1/api/play" '{"uri":"file:tone.wav"}' || die "11b replay on n1 failed"
+wait_for "$N1/api/status" '.sink.played>0' true 8 || die "11b n1 not playing before dumb leg"
+DCLOG="$(mktemp)"
+"$DUMB" --node 127.0.0.1:18080 --group "$ID1" --out null >"$DCLOG" 2>&1 &  DCPID=$!
+# Wait for the first non-zero played count in its stats line.
+dc_played() { grep -oE 'played=[0-9]+' "$DCLOG" | tail -n1 | cut -d= -f2; }
+ok=
+for _ in $(seq 24); do
+  p=$(dc_played 2>/dev/null || true)
+  [ -n "${p:-}" ] && [ "${p:-0}" -gt 0 ] && { ok=1; break; }
+  sleep 0.25
+done
+[ -n "$ok" ] || { echo "----- dumbclient log -----"; cat "$DCLOG"; kill "$DCPID" 2>/dev/null || true; die "dumbclient never played (played>0)"; }
+A=$(dc_played); sleep 1; B=$(dc_played)
+[ "${B:-0}" -gt "${A:-0}" ] || { echo "----- dumbclient log -----"; cat "$DCLOG"; kill "$DCPID" 2>/dev/null || true; die "dumbclient played not rising ($A -> $B)"; }
+# Invisible to gossip: it never joins the group's member set (still 2 members).
+M=$(api "$N1/api/cluster" | jq '[.groups[]|select(.master=="'"$ID1"'").members[]]|length')
+[ "$M" = 2 ] || { kill "$DCPID" 2>/dev/null || true; die "dumbclient leaked into group members ($M != 2)"; }
+kill "$DCPID" 2>/dev/null || true; wait "$DCPID" 2>/dev/null || true
+pass "11b dumb-client conformance: protocol-minimal receiver plays (played $A -> $B rising); not a cluster member"
 
 # ---- 12. takeover: make n2 master; group id MOVES to n2 (D42) ---------------
 # D42: the group id is the master's node id, so takeover changes it from ID1 to
