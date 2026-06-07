@@ -1,47 +1,349 @@
-# G — stream transport
+# G — audio source server & subscriber client
 
-Source of truth: [docs/README.md](../README.md) §8.4. Contracts I code against:
-[S-skeleton.md](S-skeleton.md) — `internal/stream/wire.go` (Header, Encode,
-AppendFrame, Decode, DecodeFrame, XORInto, type/PCM consts) and
-`internal/stream/mux.go` (Mux: Register, WriteTo, LocalAddr). Both are
-**read-only** to me; I add new files in the same package `stream`.
+Source of truth: [docs/README.md](../README.md) §8.2, §8.4, §8.6, §8.7; integrator
+decisions [DECISIONS.md](DECISIONS.md) **D12, D13, D18 (→D22), D22, D23, D24, D28**.
+Contracts I code against from [S-skeleton.md](S-skeleton.md), all **read-only** to me:
 
-This piece is the wire transport between the group master and its members: a
-**sender** (master side, fan-out to N endpoints) and a **receiver** (member
-side, one per node). Two transports, selected by the group setting
-`transport: udp | tcp` (§8.4): UDP datagrams + XOR FEC, or one persistent
-length-prefixed TCP connection per member. Both deliver `(Header, payload)` to
-a caller-supplied callback. Pure transport: no decode, no clock, no jitter
-buffer (that is E/H). Frames in, frames out, plus loss/recovery counters.
+- `internal/stream/wire.go` — `Header`, `Encode`, `AppendFrame`, `Decode`,
+  `DecodeFrame`, `XORInto`; packet-type consts `TypeAudio 0x01`, `TypeFEC 0x02`,
+  control `TypeHello 0x20`, `TypeBye 0x21`, `TypeRestart 0x22`, `TypeReconfig
+  0x23`; PCM consts (`FrameBytes`, `FrameNanos`, …); `Magic`, `HeaderSize`.
+- `internal/stream/mux.go` — `Mux`: `Register(type,h)`, `WriteTo(pkt,addr)`,
+  `LocalAddr()`. The member-side STREAM_PORT UDP socket.
+- `internal/contracts` — `SourceStats` (D28); I do **not** implement any contract
+  interface, I expose concrete types H consumes via a small Go-style interface H
+  declares on its side.
+
+This piece is the **subscribe-based** stream layer (D22, supersedes the old
+push/`SetEndpoints` model — there is no `Resolver`, no `SetEndpoints`, no
+master-dials-members anywhere here):
+
+- **Source server** (`internal/source/*`, master side, §8.2/§8.7): listens on
+  `SOURCE_PORT` (TCP+UDP), keeps a **subscriber registry** keyed by observed
+  addr with HELLO keepalive (5 s) / expiry (15 s), a **ring buffer** of recently
+  released frames sized `max(2×bufferMs, 1 s)`, **burst-primes** new/restarting
+  subscribers (D24), broadcasts **RECONFIG** (incl. the stop flag, §8.6), and
+  **fans out** every released frame to all live subscribers — UDP datagrams +
+  XOR FEC parity every 4 frames, or length-prefixed frames down each TCP
+  subscriber connection. Surfaces `SourceStats` (D28).
+- **Subscriber client** (`internal/stream/*` minus the S files, member side):
+  dials/HELLOs the master's `SOURCE_PORT` (UDP from the STREAM_PORT mux socket,
+  or TCP to SOURCE_PORT), sends keepalive HELLO / BYE / RESTART, receives audio
+  on the member-side mux (`0x01`/`0x02`) with reorder + FEC recovery, or on the
+  TCP subscription connection, delivers `(Header, payload)` to a callback, counts
+  loss/recovery, and runs the **starvation watchdog** that issues RESTART (§8.6).
+
+The master's own sink subscribes over loopback like any other client — no special
+self path. Pure transport/control: no decode, no clock, no jitter buffer (D/E/F/H).
+
+Preserved internals from the previous round (re-presented in this structure):
+`fecBlock` (sender parity build), `recoveryWindow` (receiver single-loss XOR
+recovery), `reorderBuffer` (ordered/at-most-once delivery), and the **uint32-BE
+TCP length prefix per D13**.
 
 ---
 
 ## 1. Package / file layout
 
-All in package `stream`, alongside the read-only `wire.go` / `mux.go`.
+Two packages. `internal/source` is **new and owned entirely by G**.
+`internal/stream` adds the subscriber-client files alongside the read-only S
+files (`wire.go`, `mux.go` and their tests stay untouched).
 
 ```
-internal/stream/sender.go        Sender: transport-agnostic fan-out API; owns Endpoint set, gen, seq, FEC block accumulator; routes to udp/tcp impl
-internal/stream/sender_udp.go    udpTransport: per-datagram WriteTo via Mux + parity datagram every 4 audio frames
-internal/stream/sender_tcp.go    tcpTransport: one tcpConn per endpoint, length-prefixed writes, dial + backoff reconnect goroutine
-internal/stream/receiver.go      Receiver: registers a Deliver callback; owns UDP path (mux 0x01/0x02 → reorder/FEC window) and TCP listener path; Counters()
-internal/stream/fec.go           fecBlock encode helper (sender) + recoveryWindow (receiver): per-block buffering, single-loss XOR recovery
-internal/stream/recvwindow.go    reorderBuffer: small ordered window, in-order/at-most-once delivery, gap accounting, flush on gen change
-internal/stream/sender_test.go   sender fan-out, FEC parity emission cadence, gen/seq monotonicity, tcp reconnect, null-endpoint
-internal/stream/receiver_test.go udp loopback deliver, FEC single-loss recovery, reorder, stale-gen drop, tcp listener deliver, counters
-internal/stream/fec_test.go      block parity build, recover missing payload from parity+3, double-loss unrecoverable
-internal/stream/recvwindow_test.go in-order, out-of-order reorder, duplicate drop, window overflow eviction, gen reset
+internal/source/server.go        Server: SOURCE_PORT TCP+UDP listeners, control intake (HELLO/BYE/RESTART),
+                                  RECONFIG broadcast, ReleaseFrame fan-out, gen, SourceStats. One per node.
+internal/source/registry.go      subscriber registry: addr-keyed entries, transport (udp|tcp), keepalive/expiry,
+                                  per-tcp conn handle; add/refresh/remove/expire under the server mutex.
+internal/source/ring.go          ringBuffer: fixed-capacity ring of released (Header,payload) frames; Prime() selects
+                                  frames whose pts+bufferMs deadline is still future (D24); resize on bufferMs change.
+internal/source/prime.go         primer: paces a burst to one subscriber — UDP ~4× realtime (one frame/~5 ms),
+                                  TCP back-to-back; counts primes.
+internal/source/fanout.go        per-frame fan-out: UDP datagram + FEC parity every 4 frames (fecBlock), TCP length-prefixed.
+internal/source/server_test.go   subscribe→prime→live, keepalive/expiry, RESTART re-prime, RECONFIG+stop, stats, udp+tcp.
+internal/source/registry_test.go add/refresh/expire, addr-key identity, transport routing, count.
+internal/source/ring_test.go     capacity wrap, Prime deadline cutoff, resize, empty.
+internal/source/prime_test.go    udp pacing cadence, tcp back-to-back, prime count.
+
+internal/stream/client.go        Client: subscriber client. Subscribe(master,gen,settings)→HELLO loop, BYE/RESTART,
+                                  Deliver callback, starvation watchdog→RESTART, Counters. One per node.
+internal/stream/client_udp.go    udp subscription: HELLO from the mux socket to SOURCE_PORT; receive 0x01/0x02 via the mux.
+internal/stream/client_tcp.go    tcp subscription: dial SOURCE_PORT, send control frames, read length-prefixed audio.
+internal/stream/fec.go           fecBlock (parity build, source side) + recoveryWindow (single-loss XOR recovery, client side).
+internal/stream/recvwindow.go    reorderBuffer: ordered, at-most-once delivery; gap accounting; flush on gen change.
+internal/stream/client_test.go   udp deliver, FEC recovery, reorder, stale-gen drop, tcp deliver, watchdog→RESTART, counters.
+internal/stream/fec_test.go      block parity build, recover-from-parity+3, parity-last/data-last, double-loss, padding, reset.
+internal/stream/recvwindow_test.go in-order, reorder, dup drop, overflow evict, gen reset, mid-stream anchor.
 ```
 
-No new exported types beyond `Sender`, `Receiver`, their constructors, the
-small `Endpoint`/`Counters`/options structs, and the `DeliverFunc` callback
-type. Everything else is unexported.
+Exported surface is intentionally tiny: `source.Server` (+ `Config`,
+`Frame`), `stream.Client` (+ `Config`, `Subscription`, `DeliverFunc`,
+`Counters`), `stream.ParseTransport`/`Transport`. Everything else is unexported.
 
 ---
 
 ## 2. Concrete Go API
 
-### 2.1 Common: endpoints, callback, transport selector
+### 2.1 Common: transport selector & frame
+
+```go
+package stream
+
+// Transport selects the wire transport for a subscription (group setting §8.4),
+// mirroring contracts.GroupSettings.Transport ("udp" | "tcp").
+type Transport int
+
+const (
+	TransportUDP Transport = iota // 0: datagrams + XOR FEC (default §8.4)
+	TransportTCP                  // 1: persistent length-prefixed conn on SOURCE_PORT
+)
+
+// ParseTransport maps the group-setting string to a Transport. Unknown -> UDP,
+// so a malformed record never wedges a subscription.
+func ParseTransport(s string) Transport
+```
+
+```go
+package source
+
+// Frame is one released audio frame handed to the source for fan-out. The
+// source owns header bookkeeping (Seq, Gen) — H supplies only pts + payload via
+// ReleaseFrame, and the server stamps Seq/Gen. (Frame is the ring's element.)
+type Frame struct {
+	Seq     uint64
+	PTS     int64
+	Payload []byte // canonical PCM (FrameBytes) for pcm; opus bytes for opus — opaque here
+}
+```
+
+### 2.2 Source server (master side) — `internal/source`
+
+**One `Server` per node** (every node binds SOURCE_PORT per D22; the listeners
+matter only while this node is a master). The group engine (H) calls
+`StartSession` on `Play`, `ReleaseFrame` per 20 ms frame from its release ticker,
+`Reconfig` on a live settings change (D23), and `StopSession`/`Close` at
+end-of-source or stop (§8.6).
+
+```go
+package source
+
+import (
+	"log/slog"
+	"net"
+	"sync"
+
+	"ensemble/internal/contracts"
+	"ensemble/internal/id"
+	"ensemble/internal/stream"
+)
+
+// Server is the audio source: SOURCE_PORT control intake + per-frame fan-out to
+// the subscriber registry, with a ring buffer for burst priming (§8.2/§8.7/D24).
+//
+// Concurrency: ONE mutex guards the registry, ring, current session (gen,
+// transport, bufferMs, active), and the FEC accumulator. ReleaseFrame is called
+// from H's single release goroutine; control packets arrive on the UDP read
+// goroutine and per-TCP-conn goroutines; StartSession/Reconfig/StopSession/Close
+// come from H's API goroutine. All take the one mutex. Stats are atomics read
+// lock-free for /api/status.
+type Server struct {
+	mu       sync.Mutex
+	self     id.ID
+	udp      *net.UDPConn      // SOURCE_PORT UDP (control in, audio+fec out)
+	tcpLn    *net.TCPListener  // SOURCE_PORT TCP (control + audio per conn)
+	reg      registry          // addr-keyed subscribers
+	ring     ringBuffer        // recently released frames (prime source)
+	fec      fecBlock          // UDP parity accumulator (per session)
+
+	active   bool              // a session is running
+	gen      uint32            // current session generation
+	transport stream.Transport // current session transport
+	bufferMs int               // current session bufferMs (ring sizing + prime cutoff)
+	seq      uint64            // next Seq to stamp
+
+	stats    sourceCounters    // atomics: connects, restarts, primes
+	done     chan struct{}
+	wg       sync.WaitGroup
+	log      *slog.Logger
+}
+
+// Config wires a Server to its already-bound SOURCE_PORT sockets (from
+// netx.BindTCPUDP, owned by K). Both are required: any node can become master.
+type Config struct {
+	Self id.ID
+	UDP  *net.UDPConn      // SOURCE_PORT UDP socket
+	TCP  *net.TCPListener  // SOURCE_PORT TCP listener
+	Log  *slog.Logger      // nil -> slog.Default with comp=source
+}
+
+// NewServer builds a Server; no goroutines yet.
+func NewServer(cfg Config) *Server
+
+// Run starts the UDP control read loop, the TCP accept loop, and the expiry
+// sweeper (1 s tick → drop subscribers unseen for 15 s). Non-blocking; call once.
+func (s *Server) Run()
+
+// StartSession arms a new play session: bumps to the given gen, sets transport
+// and bufferMs, resizes/clears the ring to max(2*bufferMs,1s), resets the FEC
+// accumulator and Seq=0, marks active. Existing subscribers persist across the
+// StartSession boundary (they get RECONFIG and a fresh prime on their next
+// HELLO/RESTART under the new gen); a RECONFIG (non-stop) is broadcast so they
+// resubscribe promptly (D23). Called by H on Play and on settings change.
+func (s *Server) StartSession(gen uint32, t stream.Transport, bufferMs int)
+
+// ReleaseFrame fans out one frame. The server stamps Seq (next) and uses the
+// session Gen; pts is master-clock ns (§8.2). It appends the frame to the ring,
+// sends it to every live subscriber on the session transport, and (UDP) folds it
+// into the FEC block — emitting a parity datagram to all UDP subscribers after
+// every 4th frame (§8.4). No error: per-subscriber write failures are counted,
+// never propagated (a dead path must not stall H's ticker, §8.2). Returns the
+// Seq used. No-op (returns 0) if no session is active.
+func (s *Server) ReleaseFrame(pts int64, payload []byte) uint64
+
+// Reconfig broadcasts a RECONFIG control (non-stop) to every subscriber: "gen/
+// settings changed, re-read group settings and resubscribe" (§8.7/D23). H calls
+// it right after StartSession on a live settings change so subscribers reconnect
+// without waiting for their watchdog.
+func (s *Server) Reconfig()
+
+// StopSession ends the current session: flushes any partial FEC tail block
+// (parity for a 1..3-frame remainder, D13), broadcasts RECONFIG with the STOP
+// flag (the explicit end-of-session notice, §8.6), marks inactive, and clears
+// the ring. Subscribers are NOT removed (they keep their entry and re-prime on
+// the next play's RECONFIG/HELLO). Idempotent.
+func (s *Server) StopSession()
+
+// Stats returns a snapshot of source stats for /api/status and the replicated
+// playback record (D28). Clients = current live subscriber count.
+func (s *Server) Stats() contracts.SourceStats
+
+// Close stops all goroutines (read loops, accept loop, sweeper) and closes
+// tracked TCP subscriber conns. It does NOT close the SOURCE_PORT sockets — K
+// owns them (symmetry with the Mux). Idempotent.
+func (s *Server) Close() error
+```
+
+`SourceStats` (D28): `Clients` = live registry size at call time; `Connects` =
+total HELLO-subscribes accepted (a brand-new addr, not a keepalive); `Restarts` =
+RESTART re-prime requests served; `Primes` = burst primes sent (connect +
+restart). `Clients` is computed under the mutex; the other three are atomics.
+
+### 2.3 Subscriber registry — `internal/source/registry.go`
+
+```go
+package source
+
+import (
+	"net"
+	"net/netip"
+	"time"
+
+	"ensemble/internal/stream"
+)
+
+// registry holds the live subscribers, keyed by their OBSERVED source address
+// (§8.7: UDP audio flows back to the addr the HELLO came from; TCP audio rides
+// the accepted conn). Guarded by Server.mu (no own lock).
+type registry struct {
+	subs map[netip.AddrPort]*subscriber
+}
+
+// subscriber is one live destination.
+type subscriber struct {
+	addr     netip.AddrPort // UDP: HELLO source addr (= STREAM_PORT mux socket); TCP: RemoteAddr
+	tr       stream.Transport
+	conn     net.Conn       // TCP only (nil for UDP); writes go here length-prefixed
+	lastSeen time.Time      // last HELLO/RESTART; expiry at +15 s
+	wmu      sync.Mutex     // TCP: serializes writes to conn (fan-out + prime)
+}
+
+// upsert records a HELLO from addr. Returns (sub, isNew): isNew true on a
+// previously-unknown addr (Connects++). Refreshes lastSeen otherwise (keepalive).
+func (r *registry) upsert(addr netip.AddrPort, t stream.Transport, conn net.Conn, now time.Time) (sub *subscriber, isNew bool)
+
+// get returns the subscriber for addr (RESTART/BYE lookups), or nil.
+func (r *registry) get(addr netip.AddrPort) *subscriber
+
+// remove drops a subscriber (BYE, or TCP conn error/close).
+func (r *registry) remove(addr netip.AddrPort)
+
+// expire removes subscribers whose lastSeen < now-ttl (15 s, §8.7); returns the
+// removed TCP conns so the caller can close them outside the map mutation.
+func (r *registry) expire(now time.Time, ttl time.Duration) []net.Conn
+
+// live returns the current subscriber slice (snapshot for fan-out) and count.
+func (r *registry) live() []*subscriber
+```
+
+### 2.4 Ring buffer & primer — `internal/source/ring.go`, `prime.go`
+
+```go
+package source
+
+// ringBuffer is a fixed-capacity ring of recently released frames, the source
+// for burst priming (§8.2/D24). Sized max(2*bufferMs/FrameDuration, 1s worth) of
+// frames; oldest frames overwrite. Guarded by Server.mu.
+type ringBuffer struct {
+	frames []ringSlot // capacity slots; circular
+	head   int        // index of the next write
+	count  int        // valid slots (<= cap)
+	bufMs  int        // current bufferMs (prime deadline = pts + bufMs)
+}
+
+type ringSlot struct {
+	seq     uint64
+	pts     int64
+	payload []byte // owned copy
+}
+
+// resize (re)allocates the ring to hold max(2*bufferMs, 1000) ms of 20 ms
+// frames and clears it. Called from StartSession (new session / settings change).
+func (b *ringBuffer) resize(bufferMs int)
+
+// push appends a released frame (copying payload), overwriting the oldest when full.
+func (b *ringBuffer) push(seq uint64, pts int64, payload []byte)
+
+// prime returns the frames to burst to a (re)joining subscriber, oldest→newest:
+// every ring frame whose playout deadline pts+bufferMs is STILL IN THE FUTURE
+// relative to nowMaster — older frames are useless to the newcomer and skipped
+// (D24). nowMaster is the source's current master-clock ns (H passes it; the
+// source has no clock of its own).
+func (b *ringBuffer) prime(nowMaster int64) []ringSlot
+
+// clear empties the ring (StopSession).
+func (b *ringBuffer) clear()
+```
+
+The prime cutoff needs `nowMaster`. The source does not own a `Clock`; rather
+than thread one in, **H stamps every `ReleaseFrame` pts itself and the most-recent
+released pts is monotone**, so the server tracks `lastPTS` (the pts of the newest
+ring frame) and computes the cutoff as `lastPTS - bufferMs` worth of frames:
+`prime` keeps slots with `slot.pts >= lastPTS - bufferMs*1e6` (i.e. only the most
+recent `bufferMs` of audio — exactly the frames whose deadline hasn't passed
+relative to the live edge). This is clock-free and equivalent for a continuously
+releasing source. (Edge: §4 "prime when paused/idle".)
+
+```go
+package source
+
+// primeUDP bursts the selected frames to a UDP subscriber via the SOURCE_PORT
+// UDP socket, paced ~4× realtime: one frame per ~5 ms (D24), so it outruns the
+// live stream without flooding. Each frame is sent as a TypeAudio datagram with
+// its original Seq/PTS/Gen; NO FEC during a prime (the live FEC cadence continues
+// independently). Runs in its own goroutine; counts primes++ when done.
+func (s *Server) primeUDP(sub *subscriber, frames []ringSlot, gen uint32)
+
+// primeTCP writes the selected frames back-to-back (length-prefixed) on the
+// subscriber's conn (TCP flow control paces it, D24). Holds sub.wmu so it never
+// interleaves mid-frame with live fan-out writes. Counts primes++.
+func (s *Server) primeTCP(sub *subscriber, frames []ringSlot, gen uint32)
+```
+
+### 2.5 Subscriber client (member side) — `internal/stream/client.go`
+
+**One `Client` per node**, long-lived. It owns exactly one active
+`Subscription` at a time (a node follows exactly one master). H calls
+`Subscribe` when the current master/gen/settings change (incl. the master itself
+subscribing to its own loopback source), and `Unsubscribe` on stop / leaving.
 
 ```go
 package stream
@@ -49,592 +351,593 @@ package stream
 import (
 	"context"
 	"log/slog"
-	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
 )
 
-// Transport selects the wire transport for a session (group setting §8.4).
-// Mirrors contracts.GroupSettings.Transport ("udp" | "tcp").
-type Transport int
-
-const (
-	TransportUDP Transport = iota // 0: datagrams + XOR FEC (default)
-	TransportTCP                  // 1: persistent length-prefixed conn
-)
-
-// ParseTransport maps the group-setting string to a Transport. Unknown ->
-// TransportUDP (the spec default §8.4), so a malformed record never wedges play.
-func ParseTransport(s string) Transport
-
-// Endpoint is one stream destination: a group member's STREAM_PORT, already
-// resolved to an address by the group/cluster piece (H/C, §3.1 candidate
-// selection happens upstream — G dials exactly what it's handed). The master's
-// own sink is just another Endpoint pointing at localhost:STREAM_PORT (§8.2,
-// "including itself … one code path").
-type Endpoint struct {
-	Node id.ID          // member node id (for logs / per-endpoint state keys)
-	Addr netip.AddrPort // member STREAM_PORT (same number for UDP and TCP, §2)
-}
-```
-
-### 2.2 Sender (master side)
-
-One `Sender` per active play session. The group piece (H) creates it on `Play`,
-calls `SetEndpoints` once (and again if membership changes mid-session),
-`SendFrame` per 20 ms frame from the source ticker, and `Stop`/`Close` at
-end-of-file or stop (§8.6).
-
-```go
-// Sender fans audio frames out to a set of Endpoints over UDP+FEC or TCP.
-// Transport-agnostic: it owns the header bookkeeping (gen, seq, FEC blocking)
-// and delegates the actual write to a transport impl. One Sender per session.
-//
-// Concurrency: SendFrame is called from a single goroutine (the source
-// ticker). SetEndpoints / Stop / Close may be called from another (the API/
-// group goroutine). All exported methods are safe under one mutex.
-type Sender struct {
-	mu        sync.Mutex
-	gen       uint32
-	seq       uint64
-	endpoints []Endpoint
-	tr        senderTransport // udpTransport or tcpTransport
-	fec       fecBlock        // UDP only; zero-value/unused for TCP
-	closed    bool
-	log       *slog.Logger
-}
-
-// SenderConfig wires a Sender to its transport. mux is required for
-// TransportUDP (it is the WriteTo side of the STREAM_PORT UDP socket, owned by
-// S); ignored for TransportTCP. gen is the session generation (§8.4); the first
-// SendFrame uses Seq 0.
-type SenderConfig struct {
-	Transport Transport
-	Gen       uint32
-	Mux       *Mux         // UDP write side (nil ok for TCP)
-	Log       *slog.Logger // nil -> slog.Default with comp=stream/sender
-}
-
-// NewSender builds a Sender. For TransportTCP it starts no goroutines until
-// SetEndpoints adds endpoints (each endpoint gets its own dial/reconnect
-// goroutine). For TransportUDP it is purely synchronous (writes via Mux).
-func NewSender(cfg SenderConfig) *Sender
-
-// SetEndpoints replaces the destination set. For TCP, new endpoints get a
-// dial+backoff goroutine; dropped endpoints have their conn closed. Idempotent
-// for unchanged endpoints (keyed by Node id). Safe mid-session on membership
-// change (§5).
-func (s *Sender) SetEndpoints(eps []Endpoint)
-
-// SendFrame encodes one audio frame (TypeAudio) with the next Seq and the given
-// PTS (master-clock ns, §8.2) and the session Gen, then transmits it to every
-// endpoint. For UDP it also folds the payload into the current FEC block and,
-// after every 4th audio frame, emits the parity datagram (TypeFEC) to every
-// endpoint (§8.4). payload must be canonical PCM (FrameBytes) for pcm, or an
-// Opus packet for opus — G is codec-agnostic, it just carries bytes. Returns
-// the Seq used. No error: per-endpoint write failures are counted+logged, never
-// propagated (a dead UDP path or a reconnecting TCP path must not stall the
-// source ticker, §8.2/§8.6).
-func (s *Sender) SendFrame(pts int64, payload []byte) uint64
-
-// Stop sends a control "stop" by bumping the generation contract is NOT here —
-// generation bumping and the stop-control record live in H (§8.6). G's Stop
-// just flushes any partial FEC block (emits an early parity if 1..3 frames are
-// pending) and stops; the receiver's watchdog (E) handles cessation. Kept for
-// symmetry; callers normally just Close.
-func (s *Sender) Stop()
-
-// Close stops all transport goroutines (TCP dialers/conns) and releases
-// resources. The UDP socket itself is owned by the Mux (S), not closed here.
-// Idempotent.
-func (s *Sender) Close() error
-
-// senderTransport is the private seam between Sender and its two impls.
-type senderTransport interface {
-	send(pkt []byte, eps []Endpoint)            // unicast pkt to every endpoint
-	setEndpoints(eps []Endpoint)                // (re)dial for TCP; no-op for UDP
-	close() error
-}
-```
-
-#### UDP transport (`sender_udp.go`)
-
-```go
-// udpTransport writes each pre-encoded packet to every endpoint via the shared
-// Mux (the STREAM_PORT UDP write side, S). Stateless beyond the Mux handle:
-// FEC blocking lives in Sender.fec, parity packets arrive here as ordinary
-// send() calls. Per-endpoint write errors are counted, not returned.
-type udpTransport struct {
-	mux     *Mux
-	log     *slog.Logger
-	writeErr atomic.Uint64
-}
-
-func (u *udpTransport) send(pkt []byte, eps []Endpoint) // mux.WriteTo per ep
-func (u *udpTransport) setEndpoints([]Endpoint)         // no-op
-func (u *udpTransport) close() error                    // no-op (mux owned by S)
-```
-
-#### TCP transport (`sender_tcp.go`)
-
-```go
-// tcpTransport keeps one persistent outbound connection per endpoint and writes
-// length-prefixed frames (uint32 big-endian length + header+payload bytes,
-// §8.4). A per-endpoint dialer goroutine reconnects with capped exponential
-// backoff (250ms → 4s) whenever the conn is absent or errors. send() is
-// best-effort: if an endpoint has no live conn, the packet is dropped for it
-// (counted); TCP retransmit handles loss for connected endpoints, so there is
-// NO FEC on this path (§8.4).
-type tcpTransport struct {
-	mu    sync.Mutex
-	conns map[id.ID]*tcpConn // keyed by Endpoint.Node
-	log   *slog.Logger
-}
-
-// tcpConn is the per-endpoint connection state + dialer loop.
-type tcpConn struct {
-	node    id.ID
-	addr    netip.AddrPort
-	mu      sync.Mutex     // guards c
-	c       net.Conn       // nil while (re)connecting
-	done    chan struct{}  // closed on removal -> dialer exits
-	drops   atomic.Uint64  // frames dropped while disconnected
-	log     *slog.Logger
-}
-
-func newTCPTransport(log *slog.Logger) *tcpTransport
-func (t *tcpTransport) send(pkt []byte, eps []Endpoint)
-func (t *tcpTransport) setEndpoints(eps []Endpoint) // diff: dial new, close gone
-func (t *tcpTransport) close() error
-```
-
-### 2.3 Receiver (member side)
-
-One `Receiver` per node, long-lived (created at startup, not per session). It
-handles **both** transports concurrently: it registers UDP handlers on the Mux
-for `TypeAudio`/`TypeFEC`, and owns the STREAM_PORT **TCP listener** for the TCP
-path. Frames from either path go through the same reorder/dedup logic and out
-the same `DeliverFunc`. The receiver does not know the active group transport —
-it accepts whatever arrives (a member that switched udp↔tcp mid-cluster just
-sees frames on the new path).
-
-```go
-// DeliverFunc receives one decoded frame: the parsed Header and its payload.
-// payload aliases the receiver's buffer and is ONLY valid for the duration of
-// the call — the Sink (E) copies on Push. Called from the receiver's own
-// goroutine(s), serialized per source path; the callback must not block long.
+// DeliverFunc receives one ordered, de-duplicated, FEC-recovered frame: the
+// parsed Header and its payload. payload aliases the client's buffer and is ONLY
+// valid for the duration of the call — the Sink (E) copies on Push. Called
+// serialized per subscription; must not block long (Sink.Push is non-blocking, S).
 type DeliverFunc func(h Header, payload []byte)
 
-// Receiver terminates both stream transports on a member and delivers ordered,
-// de-duplicated, FEC-recovered frames to a callback (§8.4/§8.5). One per node.
+// Client is the member-side subscriber: it HELLOs a master's SOURCE_PORT, keeps
+// the subscription alive, receives audio (UDP via the mux, or TCP), recovers/
+// reorders, and delivers frames. It also runs the starvation watchdog that
+// issues RESTART, then gives up (§8.6).
 //
-// Concurrency: the UDP path runs on the Mux read goroutine (S) calling onUDP;
-// the TCP path runs one goroutine per accepted connection. Both funnel into the
-// reorder window under a single mutex. Counters are atomic.
-type Receiver struct {
+// Concurrency: ONE mutex guards the active subscription pointer + lifecycle.
+// The receive paths (mux callback on the S read goroutine for UDP; a conn-reader
+// goroutine for TCP) funnel into the subscription's reorder/FEC state under the
+// subscription's own mutex. Counters are atomics. Subscribe/Unsubscribe come
+// from H's goroutine.
+type Client struct {
+	mu   sync.Mutex
+	mux  *Mux              // member STREAM_PORT UDP socket (HELLO out, 0x01/0x02 in)
+	sub  *subscription     // current active subscription (nil if none)
+	ctr  clientCounters    // atomic lifetime counters
+	log  *slog.Logger
+}
+
+// ClientConfig wires a Client. Mux + Deliver are required.
+type ClientConfig struct {
+	Mux     *Mux
+	Deliver DeliverFunc
+	Log     *slog.Logger
+}
+
+// NewClient builds a Client and registers the mux handlers for TypeAudio /
+// TypeFEC (they dispatch to whatever subscription is active, or drop). No
+// subscription yet.
+func NewClient(cfg ClientConfig) *Client
+
+// Subscribe starts (or replaces) the active subscription to master at sourceAddr
+// with the given session generation and transport. It tears down any prior
+// subscription (BYE if reachable), then: sends an initial HELLO with the prime-me
+// flag, starts the 5 s keepalive-HELLO loop and the starvation watchdog, and (TCP)
+// dials sourceAddr and starts the conn-reader. Idempotent for an unchanged
+// (addr,gen,transport). Returns an error only on an immediate TCP dial failure;
+// UDP never errors here (fire-and-forget HELLO).
+func (c *Client) Subscribe(sourceAddr netip.AddrPort, gen uint32, t Transport) error
+
+// Unsubscribe sends BYE, stops the keepalive/watchdog/reader, and clears the
+// active subscription. Idempotent; safe if no subscription is active.
+func (c *Client) Unsubscribe()
+
+// OnReconfig is the hook H wires to the RECONFIG control. The Client does NOT
+// parse RECONFIG itself (RECONFIG arrives on the SOURCE_PORT control path which,
+// for UDP, the client receives as... see §3): instead H, on observing the
+// session gen/settings change (it re-reads replicated group settings, D23),
+// calls Subscribe again with the new gen/transport. Provided so the TCP reader,
+// which DOES see RECONFIG inline on its conn, can notify H. Signature:
+//   c.onReconfig(stop bool)  // internal; H injects via ClientConfig if needed
+// (kept internal in v1; see §3 "RECONFIG handling".)
+
+// Counters returns lifetime transport-health counters for /api/status (§9.1, K).
+func (c *Client) Counters() Counters
+
+// Close unsubscribes and stops everything. Idempotent.
+func (c *Client) Close() error
+
+// Counters are monotonic per client (NOT per session — the sink resets its own
+// per-session stats; these are lifetime transport health).
+type Counters struct {
+	Delivered uint64 // frames handed to DeliverFunc
+	Recovered uint64 // frames reconstructed by FEC
+	Lost      uint64 // gaps the reorder window gave up on (E plays silence)
+	Duplicate uint64 // frames dropped as already-delivered
+	StaleGen  uint64 // frames dropped: gen below the active subscription gen
+	Malformed uint64 // datagrams/chunks that failed Decode (UDP garbage)
+	FECParity uint64 // parity datagrams received (type 0x02)
+	Restarts  uint64 // RESTART controls this client issued (starvation, §8.6)
+}
+
+type clientCounters struct { // atomic mirror
+	delivered, recovered, lost, duplicate, staleGen, malformed, fecParity, restarts atomic.Uint64
+}
+```
+
+```go
+// subscription is one active link to a master's source. It holds the wire state
+// (reorder window + FEC recovery), the keepalive/watchdog timers, and (TCP) the
+// conn. Guarded by its own mutex; the Client.mu only guards the *subscription
+// pointer.
+type subscription struct {
 	mu       sync.Mutex
-	window   reorderBuffer  // ordered delivery + gap accounting
+	addr     netip.AddrPort // master SOURCE_PORT
+	gen      uint32         // active generation; frames below are stale-dropped
+	tr       Transport
+	mux      *Mux           // for UDP HELLO/BYE/RESTART out + (no-op) receive
+	conn     net.Conn       // TCP only
+
+	window   reorderBuffer  // ordered, at-most-once delivery
 	fecwin   recoveryWindow // pending FEC blocks awaiting a single missing frame
+	lastRecv int64          // local-ns of the most recent accepted frame (watchdog)
+
 	deliver  DeliverFunc
-	listener *net.TCPListener
-	ctr      receiverCounters
+	ctr      *clientCounters
 	done     chan struct{}
 	wg       sync.WaitGroup
 	log      *slog.Logger
 }
-
-// ReceiverConfig wires a Receiver. Mux + Deliver are required. TCPListener is
-// the STREAM_PORT TCP listener from netx.BindTCPUDP (S/K); nil disables the TCP
-// path (UDP-only nodes / tests). The receiver does NOT register UDP handlers or
-// start accepting until Run.
-type ReceiverConfig struct {
-	Mux         *Mux
-	TCPListener *net.TCPListener
-	Deliver     DeliverFunc
-	Log         *slog.Logger
-}
-
-// NewReceiver builds a Receiver; no goroutines, no Mux registration yet.
-func NewReceiver(cfg ReceiverConfig) *Receiver
-
-// Run registers the UDP handlers (TypeAudio, TypeFEC) on the Mux and starts the
-// TCP accept loop (if a listener was given). Non-blocking. Call once.
-func (r *Receiver) Run()
-
-// Counters returns a snapshot of loss/recovery/drop counters for /api/status
-// (§9.1) and the e2e smoke test (K).
-func (r *Receiver) Counters() Counters
-
-// Close stops the TCP accept loop and open conns and unregisters nothing (the
-// Mux is owned by S; handlers simply stop being fed after Close drains). Safe
-// once.
-func (r *Receiver) Close() error
-
-// Counters are monotonic per receiver (NOT per session — the sink resets its
-// own per-session stats; these are lifetime transport health).
-type Counters struct {
-	Delivered  uint64 // frames handed to DeliverFunc
-	Recovered  uint64 // frames reconstructed by FEC
-	Lost       uint64 // gaps the window gave up on (delivered as nothing; E plays silence)
-	Duplicate  uint64 // frames dropped as already-delivered (reorder dup / FEC+real)
-	StaleGen   uint64 // frames dropped: gen older than the highest seen
-	Malformed  uint64 // datagrams that failed Decode/DecodeFrame (UDP garbage)
-	FECParity  uint64 // parity datagrams received (type 0x02)
-}
-
-type receiverCounters struct { // atomic mirror of Counters
-	delivered, recovered, lost, duplicate, staleGen, malformed, fecParity atomic.Uint64
-}
 ```
 
-### 2.4 FEC (`fec.go`)
-
-XOR FEC over blocks of 4 audio frames (§8.4): one parity datagram per block,
-parity = XOR of the 4 payloads (zero-padded to the longest). Any **single** loss
-in the 5-packet block (4 data + 1 parity) is recoverable.
+### 2.6 UDP & TCP subscription paths — `client_udp.go`, `client_tcp.go`
 
 ```go
-// --- sender side ---
+// --- UDP (client_udp.go) ---
 
-// fecBlock accumulates the payloads of up to 4 audio frames and the header of
-// the FIRST frame of the block (parity reuses that gen and the block's base
-// seq), then produces a parity packet. UDP only.
+// helloUDP sends a control datagram (TypeHello/Bye/Restart) from the member's
+// STREAM_PORT mux socket to the master's SOURCE_PORT (§8.7). Sending from the mux
+// socket is what makes the source stream back to the observed addr (D22). The
+// 1-byte payload flag: bit0 = prime-me (Hello) — set on the initial Hello and on
+// Restart; clear on keepalive Hello and on Bye.
+func (s *subscription) helloUDP(typ byte, primeMe bool)
+
+// onAudioUDP / onFECUDP are dispatched by the Client's mux handlers for the
+// active subscription (the Client routes 0x01/0x02 to s). They run on the S mux
+// read goroutine and must not block: Decode, then ingest under s.mu.
+
+// --- TCP (client_tcp.go) ---
+
+// dialTCP dials the master's SOURCE_PORT, sends the initial HELLO (control frame
+// on the conn), and starts readTCP. Control out (keepalive HELLO / BYE / RESTART)
+// also goes as frames on this conn.
+func (s *subscription) dialTCP() error
+
+// readTCP loops: read uint32-BE length prefix (D13), then that many bytes; Decode
+// the chunk. TypeAudio → ingest(real). TypeReconfig → handle (resubscribe / stop,
+// see §3). Other types ignored. On EOF/error: close, signal watchdog (the master
+// may have died); H re-subscribes on the next cluster change.
+func (s *subscription) readTCP()
+```
+
+### 2.7 FEC & reorder window — `internal/stream/fec.go`, `recvwindow.go`
+
+Re-presented verbatim-in-spirit from the previous round; these are the preserved
+good internals. Source side uses `fecBlock`; client side uses `recoveryWindow`
+and `reorderBuffer`.
+
+```go
+// --- source side (fanout.go uses this) ---
+
+// fecBlock accumulates up to 4 audio payloads (zero-padded to the longest) and
+// the base Seq/Gen of the block, then produces one XOR parity packet. UDP only.
 type fecBlock struct {
-	count    int               // 0..4 frames folded so far
-	baseSeq  uint64            // Seq of the first frame in the block
-	gen      uint32
-	parity   [FrameBytes]byte  // running XOR (payloads are <= FrameBytes)
-	maxLen   int               // longest payload folded (parity PayloadLen)
+	count   int
+	baseSeq uint64
+	gen     uint32
+	parity  [FrameBytes]byte // running XOR
+	maxLen  int              // longest payload folded -> parity PayloadLen
 }
 
-// fold XORs one frame's payload into the running parity and bumps count.
-func (b *fecBlock) fold(gen uint32, seq uint64, payload []byte)
-
-// ready reports count == 4 (full block).
-func (b *fecBlock) ready() bool
-
-// parityPacket encodes the parity datagram (TypeFEC). Its Header carries:
-// Gen=block gen, Seq=baseSeq (identifies the block as [baseSeq, baseSeq+3]),
-// PTS=0 (unused for parity), PayloadLen=maxLen. Returns nil if count==0.
-// Resets the block for the next 4 frames.
+func (b *fecBlock) fold(gen uint32, seq uint64, payload []byte) // XOR in, count++
+func (b *fecBlock) ready() bool                                 // count == 4
+// parityPacket encodes the parity datagram: Header{TypeFEC, Gen, Seq=baseSeq,
+// PTS=0, PayloadLen=maxLen}; resets the block. nil if count==0.
 func (b *fecBlock) parityPacket(buf []byte) []byte
-
-// flushPartial emits parity for a 1..3-frame tail at Stop (so a final short
-// block is still protected); returns nil if count==0. Also resets.
+// flushPartial emits parity for a 1..3-frame tail at StopSession (D13); resets.
 func (b *fecBlock) flushPartial(buf []byte) []byte
+func (b *fecBlock) reset(gen uint32)
 
-// --- receiver side ---
+// --- client side (subscription uses these) ---
 
-// recoveryWindow tracks, per FEC block (keyed by baseSeq within the current
-// gen), which of the 4 data frames have been seen and the parity. When exactly
-// one data frame is missing AND parity is present, it reconstructs the missing
-// payload by XORing the parity with the 3 present payloads.
+// recoveryWindow tracks, per FEC block (keyed by baseSeq within gen), which of
+// the 4 data frames + the parity have arrived. When exactly one data frame is
+// missing AND parity is present, it reconstructs the missing payload.
 type recoveryWindow struct {
 	gen    uint32
-	blocks map[uint64]*fecState // keyed by baseSeq; small, evicted by seq age
+	blocks map[uint64]*fecState
 }
-
 type fecState struct {
 	baseSeq uint64
 	have    [4]bool
-	payload [4][]byte // copies of present data payloads (nil if missing)
-	pts     [4]int64  // PTS of present frames (to reconstruct a recovered frame's header)
-	parity  []byte    // copy of parity payload, nil until seen
+	payload [4][]byte
+	pts     [4]int64
+	parity  []byte
 	parLen  int
 }
-
-// observeData records a data frame in its block. Returns (recoveredSeq,
-// recoveredPTS, recoveredPayload, true) if THIS arrival completed a block that
-// was missing exactly one OTHER frame — i.e. a recovery is now possible for a
-// frame still missing. (In practice recovery fires when parity OR the 3rd-of-3
-// data arrives; see control flow §3.)
 func (w *recoveryWindow) observeData(gen uint32, seq uint64, pts int64, payload []byte) (rseq uint64, rpts int64, rpay []byte, ok bool)
-
-// observeParity records the parity for a block; returns a recovered frame if the
-// block now has parity + exactly 3 data (one missing). Same return shape.
 func (w *recoveryWindow) observeParity(gen uint32, baseSeq uint64, parity []byte) (rseq uint64, rpts int64, rpay []byte, ok bool)
-
-// reset clears all blocks for a new generation.
 func (w *recoveryWindow) reset(gen uint32)
-```
 
-### 2.5 Reorder window (`recvwindow.go`)
-
-```go
-// reorderBuffer delivers frames in Seq order, at most once, tolerating small
-// out-of-order arrival and bounded gaps. It does NOT buffer for the jitter
-// deadline — that is the Sink's job (E). It only fixes ordering/dedup over the
-// short FEC/network reorder horizon, then hands frames downstream as soon as
-// they are in order or the window slides past a gap (gap => Lost counter; E
-// plays silence).
+// reorderBuffer delivers frames in Seq order, at most once, tolerating bounded
+// out-of-order arrival and gaps. It does NOT buffer for the jitter deadline (E's
+// job) — only fixes ordering/dedup over the FEC/reorder horizon (maxAhead = 32
+// frames, ~640 ms; far smaller than E's 150 ms+ jitter buffer so no double-buffer).
 type reorderBuffer struct {
 	gen      uint32
-	next     uint64            // next Seq to deliver (in order)
-	started  bool              // have we anchored 'next' to the first frame?
-	pend     map[uint64]frameRec // seq -> buffered frame ahead of 'next'
-	maxAhead uint64            // window depth (frames); slide+gap if exceeded
+	next     uint64
+	started  bool
+	pend     map[uint64]frameRec
+	maxAhead uint64
 }
-
 type frameRec struct {
 	pts     int64
-	payload []byte // owned copy
+	payload []byte
 }
-
-// admit takes a frame (real or FEC-recovered). It returns the ordered run of
-// frames now deliverable (could be 0..many as a gap fills), plus how many seqs
-// were skipped as lost (gaps the window slid past). Duplicates (seq < next, or
-// already pending) return ok=false via the dup count.
 func (b *reorderBuffer) admit(gen uint32, seq uint64, pts int64, payload []byte) (deliver []frameRec, lost int, dup bool, stale bool)
-
-// reset re-anchors for a new generation, dropping buffered frames.
 func (b *reorderBuffer) reset(gen uint32)
 ```
-
-The window is intentionally tiny: `maxAhead = 32` frames (~640 ms) — comfortably
-larger than any FEC block (4) plus realistic LAN reorder, far smaller than the
-150 ms+ jitter buffer in E so we never double-buffer.
 
 ---
 
 ## 3. Control flow, goroutines, locking
 
-### Sender — startup / steady / shutdown
+### Source server — startup / control / fan-out / shutdown
 
-- **Startup** (`NewSender`): pure construction. UDP: store `mux`, zero `fec`.
-  TCP: build `tcpTransport` with empty conn map.
-- **SetEndpoints**: under `Sender.mu`, replace the slice; call
-  `tr.setEndpoints(eps)`. TCP diff: for each new `Node` id start a `tcpConn`
-  dialer goroutine; for each removed one, close its `done` channel (dialer exits,
-  conn closed). UDP: no-op.
-- **Steady (SendFrame)**, called every 20 ms from the source ticker (H):
-  1. Lock `Sender.mu`. If `closed`, unlock and return current seq.
-  2. `seq := s.seq; s.seq++`. Build `Header{Magic, TypeAudio, gen, seq, pts,
-     len(payload)}`; `pkt := h.AppendFrame(buf[:0], payload)` (reused scratch
-     buffer on the Sender, no per-frame alloc).
-  3. `tr.send(pkt, endpoints)`.
-  4. UDP only: `fec.fold(gen, seq, payload)`; if `fec.ready()`,
-     `par := fec.parityPacket(parityBuf[:0])`; `tr.send(par, endpoints)`.
-  5. Unlock; return seq.
-  The lock is held across the writes. UDP `mux.WriteTo` is a non-blocking
-  sendto; TCP `send` does a non-blocking-ish `conn.Write` under each conn's own
-  mutex and drops if no conn — neither blocks on the network meaningfully, so
-  holding `Sender.mu` for the fan-out is fine and keeps seq/gen/FEC consistent.
-- **TCP dialer goroutine** (one per endpoint): loop until `done`: if `c == nil`,
-  `net.DialTimeout("tcp", addr, 2s)`; on success store `c`, reset backoff; on
-  failure sleep `backoff` (250ms, ×2 up to 4s) and retry. Writes happen in
-  `send` on the caller's goroutine, guarded by `tcpConn.mu`; a write error nils
-  `c` and signals the dialer (the dialer also wakes on a `reconnect` channel /
-  simply polls c==nil each loop with a short select on `done`+timer). Keep it
-  simple: dialer loops on a timer, checks `c==nil`, redials.
-- **Shutdown (Close)**: set `closed`; `tr.close()` (TCP: close all `done`,
-  Wait dialers, close conns). UDP socket untouched (S owns it).
+- **Startup** (`NewServer` then `Run`): `Run` starts three goroutines — the **UDP
+  control reader** (`ReadFromUDPAddrPort` on the SOURCE_PORT socket), the **TCP
+  accept loop**, and the **expiry sweeper** (1 s ticker). All stop on `done`.
 
-Locking: **one** `Sender.mu` for gen/seq/endpoints/fec/closed. The TCP transport
-has its own `tcpTransport.mu` (conn map) and per-`tcpConn.mu` (the `net.Conn`) —
-these are leaf locks never held while `Sender.mu` is held in a way that nests the
-other direction (Sender calls into transport, never transport back into Sender),
-so no lock-order cycle.
+- **UDP control intake** (read goroutine): read a datagram; `DecodeFrame`; branch
+  on `Header.Type`:
+  - `TypeHello` (0x20): `now := time.Now()`; under `mu`,
+    `sub, isNew := reg.upsert(from, TransportUDP, nil, now)`; if `isNew`
+    `connects++`. If the payload prime-me flag is set (initial HELLO or after the
+    sub was absent), and a session is active, snapshot `frames := ring.prime(...)`
+    and `gen` under the lock, then **outside the lock** launch `primeUDP(sub,
+    frames, gen)` (a goroutine, `wg.Add`). Keepalive HELLOs (flag clear) just
+    refresh `lastSeen`.
+  - `TypeBye` (0x21): under `mu`, `reg.remove(from)`.
+  - `TypeRestart` (0x22): under `mu`, `restarts++`, refresh `lastSeen`, snapshot
+    prime frames + gen; launch `primeUDP` (re-prime + resume, §8.6). Treated as a
+    HELLO that always primes.
+  - Control packets never carry audio; `Seq/PTS` are ignored.
 
-### Receiver — startup / steady / shutdown
+- **TCP accept loop**: `Accept()` until `done`; per conn, `wg.Add(1)` and start a
+  **conn control-reader** goroutine. That goroutine reads length-prefixed control
+  frames (D13): the first frame must be a HELLO → under `mu`,
+  `reg.upsert(RemoteAddr, TransportTCP, conn, now)`, `connects++` if new; if
+  prime-me + active session, `primeTCP(sub, frames, gen)` (back-to-back, under
+  `sub.wmu`). Subsequent frames on the conn: keepalive HELLO → refresh; RESTART →
+  `restarts++` + re-prime; BYE or EOF/error → `reg.remove`, close conn, exit.
 
-- **Startup** (`NewReceiver` then `Run`): `Run` registers two Mux handlers:
-  `mux.Register(TypeAudio, r.onUDP)` and `mux.Register(TypeFEC, r.onUDP)` (same
-  handler, branches on `pkt[1]`). If `TCPListener != nil`, start the accept
-  goroutine.
-- **UDP steady (`onUDP`, runs on the Mux read goroutine, must not block — S
-  contract)**:
-  1. `DecodeFrame(pkt)` → `(h, payload, err)`. On err: `malformed++`, return.
-  2. Branch on `h.Type`:
-     - `TypeAudio`: `ingest(h, payload, true)`.
-     - `TypeFEC`: `fecParity++`; under `mu`, `fecwin.observeParity(h.Gen,
-       h.Seq, payload)`; if it yields a recovered frame, `recovered++` and feed
-       it into `ingest(recoveredHeader, recoveredPayload, false)`.
-  Because `onUDP` runs on the single Mux read goroutine and the TCP path runs on
-  its own goroutine(s), both take `Receiver.mu` around the window/fec mutation;
-  the callback `deliver` is invoked **while holding `mu`** (serialized, simplest)
-  — acceptable because the Sink's `Push` is contractually non-blocking (S). If
-  profiling ever shows contention we'd collect `deliver` frames into a local
-  slice and call after unlock; v1 keeps it under the lock for simplicity.
-- **`ingest(h, payload, real)`** (caller holds nothing; takes `mu`):
-  1. Gen gate: if `h.Gen < window.gen` → `staleGen++`, return. If
-     `h.Gen > window.gen` → `window.reset(h.Gen)`, `fecwin.reset(h.Gen)` (new
-     session §8.4/§8.6).
-  2. If `real`, also feed `fecwin.observeData(h.Gen, h.Seq, h.PTS, payload)`;
-     if that completes a recoverable block, recover that frame too (recurse once
-     via the same ingest path with `real=false`; recovery can only fill one hole
-     per block so no unbounded recursion).
-  3. `window.admit(h.Gen, h.Seq, h.PTS, payload)` → `(deliver, lost, dup,
-     stale)`. Update counters (`lost += lost`, `duplicate++` if dup). For each
-     `frameRec` in `deliver`: reconstruct a `Header` (Magic, TypeAudio, gen,
-     running seq, pts, len) and call `r.deliver(h, payload)`, `delivered++`.
-- **TCP accept goroutine**: `Accept()` in a loop until `done`; per accepted
-  conn, `wg.Add(1)` and start a conn-reader goroutine.
-- **TCP conn-reader goroutine**: read a `uint32` big-endian length prefix, then
-  that many bytes into a buffer, `DecodeFrame`, `ingest(h, payload, true)`
-  (TCP carries no parity → always `real`, no FEC). On EOF/error close and exit;
-  the master's `tcpTransport` reconnects, the watchdog (E) covers a long gap.
-- **Shutdown (Close)**: close `done`, close `listener` (unblocks Accept), close
-  any tracked conns, `wg.Wait()`. UDP handlers remain registered on the Mux but
-  are never called after the node shuts the Mux (K); we don't have an
-  Unregister in the contract and don't need one — a closed receiver simply
-  returns early (guard a `closed` flag in `ingest`).
+- **ReleaseFrame** (H's release goroutine, every 20 ms):
+  1. Lock `mu`. If `!active`, unlock, return 0.
+  2. `seq := s.seq; s.seq++`. `ring.push(seq, pts, payload)` (copies). Track
+     `lastPTS = pts`.
+  3. Build the audio packet once: `h := Header{Magic, TypeAudio, gen, seq, pts,
+     len(payload)}`; `pkt := h.AppendFrame(scratch[:0], payload)`.
+  4. `subs := reg.live()`. Fan out: UDP subs → `mux/udp.WriteToUDPAddrPort(pkt,
+     sub.addr)` (the SOURCE_PORT UDP socket, **not** the member mux — the source
+     writes from its own socket); TCP subs → under `sub.wmu`, write `uint32-BE
+     len | pkt`. Per-sub write errors counted; a TCP write error marks the conn
+     dead (`reg.remove` deferred to the reader's error path).
+  5. UDP path: `fec.fold(gen, seq, payload)`; if `fec.ready()`, build parity and
+     write it to every UDP sub.
+  6. Unlock; return seq.
+  The mutex is held across the fan-out. UDP `WriteTo` is non-blocking `sendto`;
+  TCP writes go to kernel send buffers (a wedged TCP sub is the rare risk — see
+  §4 "slow TCP subscriber"). This keeps seq/gen/ring/FEC consistent with one lock.
 
-Locking: **one** `Receiver.mu` guarding `window` + `fecwin` + the running
-delivery seq. Counters are `atomic.Uint64` (read by `Counters()` from the API
-goroutine without the lock). The TCP listener/conn lifecycle uses `done` + `wg`,
-no extra mutex beyond `mu` for the window.
+- **Reconfig**: under `mu`, snapshot subs + gen, build a RECONFIG packet
+  (`Header{TypeReconfig, gen, 0, 0, 1}`, payload `[stop?1:0 byte]` = 0), and send
+  it to every sub (UDP datagram to `sub.addr`; TCP length-prefixed on `sub.conn`).
 
-### FEC recovery timing (the subtle part)
+- **StartSession**: under `mu` — `gen=newGen`, `transport=t`, `bufferMs=b`,
+  `ring.resize(b)`, `fec.reset(gen)`, `seq=0`, `active=true`. Then (outside the
+  lock) `Reconfig()` so existing subscribers resubscribe under the new gen (D23).
 
-A block is `[baseSeq, baseSeq+3]`. We can recover **one** missing data frame
-once we hold parity + the other three data frames. Recovery therefore fires from
-whichever arrival is the *last* of those four (the 3rd data frame if parity came
-first, or the parity if it came last). `observeData`/`observeParity` both check
-the same completion condition: `parity != nil && countHave == 3` → reconstruct
-the single missing data payload (`XORInto(recovered, parity)` then `XORInto`
-each present payload). The recovered frame's `PTS` is computed as
-`block.pts[present] ± k·FrameNanos` from a present neighbor's PTS and seq delta
-(PTS is linear in seq within a session, §8.2), so the recovered frame carries a
-correct timestamp for E to schedule. The recovered frame then flows through
-`ingest(real=false)` → reorder window → deliver. Double loss in a block is
-unrecoverable: those seqs fall out as `Lost` when the reorder window slides past
-them (E plays silence, §8.5).
+- **StopSession**: under `mu` — if active: `if par := fec.flushPartial(buf); par
+  != nil` send it to UDP subs (D13 tail parity); build RECONFIG **with the stop
+  flag** (payload `[1]`), send to all subs; `active=false`, `ring.clear()`.
+  Subscribers keep their registry entry.
+
+- **Expiry sweeper** (1 s tick): `conns := reg.expire(now, 15s)`; close the
+  returned TCP conns. Under `mu` for the map mutation, conn `Close` outside it.
+
+- **Locking**: **one** `Server.mu` for registry+ring+session+FEC+seq. `Connects/
+  Restarts/Primes` are atomics (read lock-free by `Stats`); `Clients` snapshots
+  `len(reg.subs)` under `mu`. Per-TCP-conn writes use `subscriber.wmu` (leaf lock,
+  never nests `mu`). Prime goroutines read an immutable frame snapshot taken under
+  `mu`, then write without `mu` (UDP `sendto` / TCP under `wmu`) — they never
+  touch the registry.
+
+### Subscriber client — subscribe / receive / watchdog / shutdown
+
+- **NewClient**: registers `mux.Register(TypeAudio, c.onUDP)` and
+  `mux.Register(TypeFEC, c.onUDP)`. The single handler routes by `pkt[1]` and by
+  `from` to the active subscription (drops if none, or if `from != sub.addr`).
+
+- **Subscribe(addr, gen, t)**:
+  1. Lock `c.mu`. If an existing `sub` matches `(addr,gen,t)`, unlock, return
+     (idempotent). Otherwise tear it down (`sub.shutdown()` → BYE, stop loops).
+  2. Build a fresh `subscription{addr, gen, t, …}` with `window.reset(gen)` and
+     `fecwin.reset(gen)`. Store as `c.sub`. Unlock.
+  3. UDP: `sub.helloUDP(TypeHello, primeMe=true)`; start keepalive (5 s ticker →
+     keepalive HELLO) and watchdog goroutines. TCP: `sub.dialTCP()` (initial HELLO
+     on the conn) — on dial error, return it; start `readTCP` + keepalive +
+     watchdog.
+
+- **UDP receive** (`onUDP`, on the S mux read goroutine — must not block):
+  1. `DecodeFrame(pkt)`; on err `malformed++`, return.
+  2. Read `c.sub` (atomic-ish under a short `c.mu` RLock or an `atomic.Pointer`).
+     If nil or `from != sub.addr`, drop.
+  3. `TypeAudio` → `sub.ingest(h, payload, real=true)`.
+     `TypeFEC` → `fecParity++`; under `sub.mu`, `fecwin.observeParity(...)`; on a
+     recovered frame, `recovered++`, feed `ingest(..., real=false)`.
+
+- **`subscription.ingest(h, payload, real)`** (takes `sub.mu`):
+  1. Gen gate: `h.Gen < sub.gen` → `staleGen++`, return. (`h.Gen > sub.gen` should
+     not happen — Subscribe re-creates the subscription per gen — but if it does,
+     `window.reset` / `fecwin.reset` to the higher gen, defensively.)
+  2. `sub.lastRecv = nowLocal()` (watchdog feed) on any accepted frame.
+  3. If `real`: `fecwin.observeData(...)`; a completed block recovers one frame →
+     feed it back through `ingest(real=false)` (single hole per block ⇒ bounded).
+  4. `window.admit(...)` → `(deliver, lost, dup, stale)`; update counters; for
+     each `frameRec`, build a `Header` and call `c.deliver(h, payload)`,
+     `delivered++`. Delivery happens under `sub.mu` (serialized; Sink.Push is
+     non-blocking per S — acceptable, matches the previous round).
+
+- **TCP receive** (`readTCP`, one goroutine): `uint32-BE len | chunk`;
+  `DecodeFrame`; `TypeAudio` → `ingest(real=true)` (TCP ⇒ no FEC, always real);
+  `TypeReconfig` → see "RECONFIG handling". EOF/error → close, the watchdog/H
+  re-subscribe.
+
+- **Keepalive** (5 s ticker): UDP → `helloUDP(TypeHello, primeMe=false)`; TCP →
+  write a HELLO control frame. Stops on `sub.done`.
+
+- **Starvation watchdog** (§8.6) — this is the piece that moved here from the old
+  push model. A timer-driven goroutine: if `nowLocal() - sub.lastRecv > 2 s` and
+  a frame was ever received:
+  - **First trip**: issue **RESTART** (UDP `helloUDP(TypeRestart, primeMe=true)`
+    or a TCP RESTART frame), `restarts++`, and reset the deadline. "I got lost,
+    re-prime me" — the source re-bursts the ring and resumes.
+  - **Second consecutive trip** (still no frames ~2 s after RESTART): the source
+    is gone (master died). Log, `Unsubscribe()` locally, and stop. Group
+    self-healing (§5) re-points this node and H re-Subscribes to the new master.
+  The watchdog does **not** close the sink — E has its own internal disarm; the
+  sink re-arms on the next `Reset(gen)` when H re-subscribes.
+
+- **RECONFIG handling**: RECONFIG is `src→sub`. On **TCP** it arrives inline on
+  the conn and `readTCP` sees it directly: stop-flag set → treat like EOF (end of
+  session; H clears playback). Non-stop → signal H to re-read settings and
+  re-Subscribe. On **UDP**, control flows only sub→src on the SOURCE_PORT; the
+  source's RECONFIG datagram is delivered to the member's STREAM_PORT mux as a
+  `TypeReconfig` packet, so the Client also registers `mux.Register(TypeReconfig,
+  c.onReconfig)`. Either way, the Client's response is the same: invoke the
+  injected `OnReconfig(stop bool)` callback (wired by H via `ClientConfig`), and H
+  decides — re-`Subscribe` under the new gen (re-reading replicated settings,
+  D23) or stop. The Client never re-reads cluster state itself (no cluster import).
+  *(Correction to §2.5's note: `OnReconfig` IS exported via `ClientConfig`; the
+  Client routes both the TCP-inline and UDP-mux RECONFIG to it.)*
+
+- **Shutdown** (`Close`): `Unsubscribe()` (BYE + stop loops + `wg.Wait`). Mux
+  handlers stay registered (D12: no Unregister; a nil/stale `c.sub` makes late
+  dispatch a no-op). Idempotent via a `closed` guard.
+
+- **Locking**: `Client.mu` guards only the `c.sub` pointer + `closed`. Each
+  `subscription` has its own `sub.mu` for `window`/`fecwin`/`lastRecv`/delivery.
+  Counters are atomics (read lock-free by `Counters()`). No lock nesting:
+  `onUDP` reads the sub pointer briefly, then takes `sub.mu`; Subscribe/Unsubscribe
+  take `c.mu`, and call `sub.shutdown()` which takes `sub.mu` — `c.mu` is released
+  before `wg.Wait` to avoid blocking the read path. The two mutexes are never held
+  simultaneously in a cycle.
+
+### FEC recovery timing (preserved, the subtle part)
+
+A block is `[baseSeq, baseSeq+3]`. One missing data frame is recoverable once
+parity + the other three data frames are held. Recovery fires from the **last**
+of those four to arrive (the 3rd data if parity came first, or the parity if it
+came last); `observeData`/`observeParity` both check `parity != nil && have == 3`
+→ reconstruct via `XORInto(recovered, parity)` then `XORInto` each present
+payload. The recovered `PTS` is `present.pts ± k·FrameNanos` from a present
+neighbor (PTS linear in Seq within a session, §8.2). The recovered frame flows
+through `ingest(real=false)` → reorder window → deliver. Double loss in a block
+is unrecoverable: those seqs fall out as `Lost` when the window slides (E plays
+silence, §8.5).
 
 ---
 
 ## 4. Edge cases & failure handling (spec-referenced)
 
-- **Stale generation (§8.4)**: any frame/parity with `Gen` below the receiver's
-  current gen is dropped (`StaleGen++`) before touching the window; a higher gen
-  resets both window and FEC state. This is how a new play / master change
-  cleanly supersedes the old session even if late datagrams from the old gen are
-  still in flight.
-- **Master streams to itself over localhost (§8.2)**: the master's sink is just
-  another `Endpoint{Addr: 127.0.0.1:STREAM_PORT}`; its own `Receiver` gets the
-  frames through the identical UDP/TCP path. No special "self" branch in G.
-- **UDP single loss (§8.4)**: recovered via FEC parity; `Recovered++`,
-  `Delivered++`. The recovered payload is byte-identical to the original (XOR is
-  exact); zero-padding handles the (rare, non-pcm) short-payload case via
-  `XORInto`'s clamp, and `parLen`/per-frame `PayloadLen` restores the true length
-  on recovery.
+- **Master streams to itself over loopback (§8.2, D22)**: the master's own sink
+  runs a `Client` like everyone else; its HELLO comes from `127.0.0.1:STREAM_PORT`
+  to `127.0.0.1:SOURCE_PORT`, so the registry keys it by the loopback addr and
+  fans out to it identically. No "self" branch anywhere.
+
+- **Observed-by-construction return path (§3.1/§8.7, D22)**: the source NEVER
+  resolves an address. UDP subscribers HELLO **from their STREAM_PORT mux socket**
+  and the source replies to that exact `from`; TCP subscribers' audio rides the
+  accepted conn. No `Resolver`, no `DialCandidates` on the source side. (The
+  *subscriber* resolves the master's SOURCE_PORT via H's `cluster.DialCandidates(
+  master)` upstream — G dials exactly the `addr` it is handed.)
+
+- **Burst prime cutoff (§8.2/D24)**: `ring.prime` keeps only frames whose
+  deadline `pts + bufferMs` is still future (the most recent `bufferMs` of audio);
+  older ring frames are skipped — a newcomer can't play already-past audio. UDP
+  prime paced ~4× realtime (one frame/~5 ms) so it outruns live without flooding;
+  TCP back-to-back (flow control paces). Primes counted (D28).
+
+- **Prime when idle / paused (§4/§8.2)**: if no session is active, a HELLO is
+  registered but **no prime** is sent (ring empty / `!active`). The subscriber
+  starts receiving at the next `StartSession`+`ReleaseFrame`. (Pull-paced sources
+  release continuously; there is no real "pause" in v1.)
+
+- **Keepalive / expiry (§8.7)**: HELLO every 5 s; a subscriber unseen for 15 s is
+  swept and (TCP) its conn closed. A subscriber that missed several keepalives but
+  resumes within 15 s simply refreshes `lastSeen`; beyond that it is removed and
+  must re-HELLO (prime-me), which its watchdog/H re-Subscribe drives.
+
+- **RESTART re-prime (§8.6)**: a starved subscriber (>2 s no frames) sends
+  RESTART; the source re-bursts the live edge of the ring and the subscriber
+  resumes mid-session. `Restarts` counted on both ends. If still starved ~2 s
+  later, the subscriber gives up (`Unsubscribe`) and group self-heal takes over.
+
+- **Stale generation (§8.4)**: client-side, any frame/parity below the active
+  subscription `gen` is dropped (`StaleGen++`) before touching the window. A new
+  play / master change creates a **new subscription** (Subscribe with the new
+  gen), so old-gen datagrams still in flight are cleanly ignored. Source-side,
+  `StartSession` bumps gen and resets seq/FEC so no cross-gen mixing.
+
+- **Live settings change (§8.7/D23)**: master `StartSession(newGen,…)` +
+  `Reconfig()`. Subscribers get RECONFIG, H re-reads replicated settings and
+  re-`Subscribe`s under the new gen/transport. A transport flip (udp↔tcp)
+  tears down the old subscription path and builds the new one; the source's
+  `transport` field selects the fan-out path for new releases.
+
+- **UDP single loss (§8.4)**: FEC-recovered; `Recovered++`, `Delivered++`. The
+  recovered payload is byte-identical (XOR exact); `XORInto`'s clamp + per-frame
+  `PayloadLen` handle the (rare, opus) short-payload case.
+
 - **UDP double loss in a block (§8.4)**: unrecoverable; the two seqs become
-  `Lost`, the reorder window slides past them, E inserts silence. We do NOT block
-  waiting — the window's `maxAhead` bound forces forward progress.
-- **Reorder beyond the window**: a frame arriving more than `maxAhead` ahead of
-  `next` forces the window to slide (delivering/abandoning the oldest), counting
-  the skipped seqs as `Lost`. Prevents unbounded buffering on a stuck low seq.
-- **Duplicate frames (§8.4 FEC + reorder)**: a frame delivered by FEC recovery
-  and then its real datagram also arriving (or a UDP dup) is dropped at the
-  reorder window (`seq < next` or already-delivered) → `Duplicate++`, never
-  double-delivered. At-most-once delivery is the window's invariant.
-- **Truncated / garbage datagram on the open UDP port (§8.4, S §4)**:
-  `DecodeFrame` returns `ErrShort`/`ErrBadMagic`; counted `Malformed`, dropped.
-  The Mux already filters bad magic / short before dispatch, so this is
-  defense-in-depth for `PayloadLen` truncation specifically.
-- **TCP reconnect (§8.4)**: master-side dialer reconnects with capped backoff;
-  while disconnected, `SendFrame` drops that endpoint's frames (counted). On
-  reconnect, streaming resumes mid-session — the receiver's reorder window slid
-  forward during the gap, so resumed frames with a higher seq just re-anchor
-  `next` forward and deliver; the gap is `Lost` (silence), exactly as spec wants.
-- **TCP listener absent (tests / UDP-only)**: `TCPListener == nil` disables the
-  accept loop cleanly; UDP path unaffected.
-- **Membership change mid-session (§5/§5.2)**: `SetEndpoints` adds/removes
-  destinations without bumping gen or seq — the stream continues to the new set.
-  A member that joined late just starts receiving from the current seq and
-  re-anchors its window; missed earlier frames are simply silence on its side.
-- **Source faster/slower than 20 ms**: G imposes no rate; it sends exactly when
-  `SendFrame` is called. Seq/PTS come from the caller (H) and the FEC block
-  cadence is purely per-4-audio-frames, independent of wall time.
-- **Empty endpoint set**: `SendFrame` with zero endpoints still advances
-  seq/gen/FEC bookkeeping (so a member that joins next frame sees a consistent
-  stream) but writes nowhere. No error.
-- **Payload length**: pcm payloads are always `FrameBytes`; opus payloads vary.
-  G never assumes `FrameBytes` for transport — it uses `Header.PayloadLen`.
-  Only the FEC parity buffer is sized `FrameBytes` (the max), and `XORInto`
-  zero-pads shorter payloads, matching the spec's "XOR … padded" (§8.4).
-- **Receiver close vs in-flight Mux callback**: a `closed` guard at the top of
-  `ingest` makes a late `onUDP` call after `Close` a no-op (it still holds `mu`
-  briefly); the Mux read goroutine is stopped by S's `Mux.Close` in K's shutdown
-  order, so this is belt-and-suspenders.
+  `Lost`, the reorder window slides past them (`maxAhead` bound forces progress),
+  E inserts silence. Never blocks.
+
+- **Reorder / duplicate (§8.4)**: out-of-order within `maxAhead` (32) reorders to
+  in-order; a frame delivered by FEC then also arriving real (or a UDP dup) is
+  dropped at the window (`seq < next` / already-pending) → `Duplicate++`,
+  at-most-once preserved.
+
+- **Garbage on the open UDP ports (§8.4, S §4)**: both the SOURCE_PORT UDP socket
+  (source) and the member mux (client) get internet/garbage datagrams.
+  `DecodeFrame` returns `ErrShort`/`ErrBadMagic` → counted `Malformed`/dropped; an
+  unknown control type on SOURCE_PORT is ignored. No panic on hostile input.
+
+- **Slow / wedged TCP subscriber (§8.4, D13)**: a TCP subscriber whose receive
+  window is full would block the source's `conn.Write` under `Server.mu`,
+  stalling H's release ticker. Mitigation: source TCP writes use a short write
+  deadline (`SetWriteDeadline(now+50ms)`); a timeout marks the conn dead
+  (`reg.remove` on its reader's next error, conn closed), dropping that
+  subscriber rather than the whole group. Accepted v1 limitation; UDP (the
+  default) has no such risk (`sendto` never blocks).
+
+- **TCP subscriber reconnect (§8.4)**: if a TCP subscriber's conn drops, its
+  `readTCP` errors → the client tears down and H re-`Subscribe`s (re-dial), which
+  re-HELLOs and re-primes from the ring. The gap is `Lost` (silence) exactly as
+  the spec wants; no master-side reconnect logic (the subscriber drives, D22).
+
+- **Empty subscriber set**: `ReleaseFrame` with zero subscribers still advances
+  seq/gen/ring/FEC bookkeeping (so a subscriber that HELLOs next frame primes and
+  joins a consistent stream) but writes nowhere. No error.
+
+- **Source faster/slower than 20 ms**: G imposes no rate; it fans out exactly when
+  `ReleaseFrame` is called. Seq is server-stamped, pts comes from H, FEC cadence
+  is per-4-frames, independent of wall time.
+
+- **Payload length**: pcm payloads are always `FrameBytes`; opus payloads vary. G
+  never assumes `FrameBytes` for the wire — it uses `Header.PayloadLen`. Only the
+  FEC parity buffer is sized `FrameBytes` (the max) and `XORInto` zero-pads
+  shorter payloads, matching the spec's "padded" parity (§8.4).
+
+- **Close vs in-flight callbacks (D12)**: a `closed` guard makes a late mux
+  dispatch after `Close` a no-op; K stops the Mux in shutdown order, so this is
+  belt-and-suspenders. No `Mux.Unregister` (D12). The source's read/accept/sweeper
+  goroutines exit on `done`; tracked TCP conns are closed.
 
 ---
 
 ## 5. Test plan (all loopback / in-process, no hardware, no root)
 
+UDP tests build two `*Mux`/raw `*net.UDPConn` instances on `127.0.0.1:0`; loss is
+injected by a drop-filtering wrapper around `WriteTo`. TCP tests use a real
+`net.TCPListener` on `127.0.0.1:0`. Fakes: a `fakeDeliver` collecting
+`(Header, payload-copy)`, a manual time source for keepalive/expiry/watchdog.
+
 ### `internal/stream/fec_test.go`
 - `TestFECBlockParityXOR` — fold 4 known payloads; parity == XOR of all four.
-- `TestFECRecoverMissingFromParity` — drop one of four data, supply parity+3 →
-  `observeParity`/`observeData` reconstructs the exact missing payload + PTS.
-- `TestFECRecoverWhenParityArrivesLast` — 3 data then parity triggers recovery.
-- `TestFECRecoverWhenDataArrivesLast` — parity then 3rd data triggers recovery.
-- `TestFECDoubleLossUnrecoverable` — drop two of four → no recovery emitted.
-- `TestFECShortPayloadPadding` — mixed/short payload lengths zero-pad correctly;
-  recovered payload trimmed to its `PayloadLen`.
+- `TestFECRecoverMissingFromParity` — drop one of four; parity+3 reconstructs the
+  exact missing payload + PTS.
+- `TestFECRecoverWhenParityArrivesLast` / `…DataArrivesLast` — both completion
+  orders trigger recovery.
+- `TestFECDoubleLossUnrecoverable` — drop two of four → no recovery.
+- `TestFECShortPayloadPadding` — mixed/short lengths zero-pad; recovered payload
+  trimmed to its `PayloadLen`.
 - `TestFECPartialFlush` — `flushPartial` on a 2-frame tail emits usable parity.
-- `TestFECResetOnGen` — `reset` drops old-gen blocks; new gen starts clean.
+- `TestFECResetOnGen` — `reset` drops old-gen blocks; new gen clean.
 
 ### `internal/stream/recvwindow_test.go`
-- `TestWindowInOrderDelivery` — seqs 0,1,2,3 deliver immediately in order.
-- `TestWindowReordersWithinWindow` — 0,2,1,3 → delivered as 0,1,2,3.
-- `TestWindowGapBecomesLost` — 0,1,(skip 2),3,4 with no recovery → seq 2 counted
-  Lost, 3 and 4 delivered after the slide.
-- `TestWindowDuplicateDropped` — re-admit an already-delivered seq → `dup`, not
-  re-delivered.
-- `TestWindowOverflowEvicts` — admit `next+maxAhead+1` → window slides, oldest
-  gap counted Lost, forward progress.
-- `TestWindowResetReanchors` — `reset(newGen)` then admit re-anchors `next` to
-  the first new-gen seq.
-- `TestWindowFirstFrameAnchors` — first admitted seq (nonzero) anchors `next` to
-  it (joining mid-stream).
+- `TestWindowInOrderDelivery`, `TestWindowReordersWithinWindow`,
+  `TestWindowGapBecomesLost`, `TestWindowDuplicateDropped`,
+  `TestWindowOverflowEvicts`, `TestWindowResetReanchors`,
+  `TestWindowFirstFrameAnchors` (joins mid-stream: first admitted seq anchors).
 
-### `internal/stream/sender_test.go`
-- `TestSenderUDPFanOut` — two fake endpoints (two loopback Muxes); one SendFrame
-  arrives at both with identical header+payload.
-- `TestSenderUDPParityCadence` — 4 SendFrames → exactly one TypeFEC datagram per
-  endpoint after the 4th; none after frames 1–3.
-- `TestSenderSeqMonotonic` — N SendFrames produce Seq 0..N-1; Gen constant.
-- `TestSenderEmptyEndpoints` — SendFrame with no endpoints advances seq, no write,
-  no panic.
-- `TestSenderTCPLengthPrefixed` — TCP sender to a loopback listener; received
-  bytes are `uint32 len | header | payload`, decode matches.
-- `TestSenderTCPReconnect` — start sender before listener up; dialer backs off,
-  then connects when listener opens; subsequent frames arrive.
-- `TestSenderTCPNoParity` — TCP path emits no TypeFEC frames.
-- `TestSenderClose` — Close stops TCP dialers (no goroutine leak via
-  `goleak`/manual wg) and is idempotent.
-- `TestParseTransport` — "tcp"→TCP, "udp"/""/junk→UDP.
+### `internal/stream/client_test.go`
+- `TestClientUDPDeliver` — a fake source `WriteTo`s 4 audio frames to the client's
+  mux; delivered in order; `Delivered==4`.
+- `TestClientFECRecovery` — source emits 4+parity, drop the 2nd data via the
+  filter → all 4 delivered; `Recovered==1`, `Lost==0`.
+- `TestClientDoubleLossSilence` — drop 2 of 4 → 2 delivered, `Lost==2`.
+- `TestClientStaleGenDropped` — active sub gen=5; a gen=4 frame → `StaleGen++`,
+  not delivered.
+- `TestClientReorderThenDeliver` — out-of-order UDP delivered ordered.
+- `TestClientDuplicateCounted` — same datagram twice → one delivery, `Duplicate==1`.
+- `TestClientTCPDeliver` — TCP subscription against a loopback listener that
+  writes 3 length-prefixed frames → all delivered.
+- `TestClientHelloFromMuxSocket` — UDP HELLO's source addr == the client's mux
+  `LocalAddr()` (the observed-return-path invariant, D22).
+- `TestClientKeepaliveCadence` — manual clock: a HELLO emitted every 5 s.
+- `TestClientWatchdogRestart` — feed frames, then stall: after 2 s the client
+  emits a RESTART (prime-me) control to the source addr; `Restarts==1`.
+- `TestClientWatchdogGivesUp` — still no frames after RESTART → `Unsubscribe`
+  (BYE sent, loops stopped, no goroutine leak).
+- `TestClientReconfigStop` — a RECONFIG(stop) over TCP / via mux → `OnReconfig(
+  true)` invoked once.
+- `TestClientResubscribeNewGen` — Subscribe(gen=2) after gen=1 tears down the old
+  sub (BYE) and resets the window; gen=1 frames then `StaleGen`.
+- `TestClientMalformedDropped` — too-short / bad-magic datagram → `Malformed++`.
+- `TestClientClose` — Close → BYE, loops stopped, idempotent, no leak.
 
-### `internal/stream/receiver_test.go`
-- `TestReceiverUDPDeliver` — sender→receiver over two loopback Muxes; frames
-  delivered in order via the callback; `Delivered` counter matches.
-- `TestReceiverFECRecovery` — sender emits 4+parity; drop the 2nd data datagram
-  in a filtering Mux shim → callback still receives all 4; `Recovered==1`,
-  `Lost==0`.
-- `TestReceiverDoubleLossSilence` — drop 2 of 4 → 2 frames delivered, `Lost==2`,
-  no recovery, no block.
-- `TestReceiverStaleGenDropped` — feed gen=5 then a gen=4 frame → `StaleGen++`,
-  not delivered; a gen=6 frame resets and delivers.
-- `TestReceiverReorderThenDeliver` — out-of-order UDP arrival delivered ordered.
-- `TestReceiverDuplicateCounted` — same datagram twice → one delivery,
-  `Duplicate==1`.
-- `TestReceiverTCPDeliver` — real `net.TCPListener` on 127.0.0.1:0; a TCP sender
-  writes 3 length-prefixed frames → all delivered; counters correct.
-- `TestReceiverMalformedDropped` — hand a too-short / bad-`PayloadLen` datagram
-  to `onUDP` → `Malformed++`, no delivery, no panic.
-- `TestReceiverClose` — Close stops the accept loop and conn readers (no leak),
-  idempotent; post-close ingest is a no-op.
+### `internal/source/ring_test.go`
+- `TestRingPushWrap` — push > capacity → oldest overwritten, `count==cap`.
+- `TestRingPrimeDeadlineCutoff` — frames older than the live edge minus bufferMs
+  are excluded; recent ones included, oldest→newest.
+- `TestRingResizeClears` — `resize(newBufferMs)` reallocs to
+  `max(2*bufferMs,1000)ms` of frames and empties.
+- `TestRingPrimeEmpty` — prime on an empty/just-resized ring → nil.
 
-### End-to-end within the package (sender↔receiver, no other pieces)
-- `TestRoundTripUDPLossy` — wire a Sender to a Receiver through a loopback Mux
-  pair with a deterministic 1-in-5 drop filter; stream 100 frames; assert every
-  in-block single loss recovered, double losses (none injected) zero, and the
-  delivered seq set is contiguous where recoverable. Uses a fake DeliverFunc
-  collecting `(Header, payload-copy)`.
-- `TestRoundTripTCPClean` — Sender(TCP)→Receiver(TCP listener); 100 frames; all
-  delivered in order, zero Lost, zero Recovered, zero FECParity.
+### `internal/source/registry_test.go`
+- `TestRegistryUpsertNewVsKeepalive` — first HELLO → isNew; repeat → refresh only.
+- `TestRegistryExpire` — a sub unseen > 15 s is removed; its TCP conn returned for
+  close; a refreshed sub survives.
+- `TestRegistryRemoveBye` — BYE removes the sub.
+- `TestRegistryTransportRouting` — UDP sub has nil conn keyed by addr; TCP sub
+  carries its conn.
 
-All UDP tests build two `*Mux` instances on `127.0.0.1:0` (via
-`netx.BindTCPUDP`, or a raw `net.ListenUDP` helper in `_test.go` if K hasn't
-landed netx), register the receiver, and use `Mux.WriteTo` / a drop-filtering
-wrapper for loss injection. No multicast, no real audio device, no root.
+### `internal/source/prime_test.go`
+- `TestPrimeUDPPacing` — manual clock: N frames sent ~5 ms apart (≈4× realtime);
+  all carry their original Seq/PTS/Gen and no FEC.
+- `TestPrimeTCPBackToBack` — frames written length-prefixed, contiguous, in order.
+- `TestPrimeCountsStat` — a completed prime increments `Primes`.
+
+### `internal/source/server_test.go`
+- `TestServerSubscribeUDPPrimeThenLive` — release 10 frames; a UDP client HELLOs
+  (prime-me) at frame 5 → receives the primed live-edge frames then live frames;
+  `Connects==1`, `Primes==1`.
+- `TestServerSubscribeTCP` — TCP subscriber dials, HELLOs, gets length-prefixed
+  prime+live frames in order.
+- `TestServerFanoutAllSubscribers` — two UDP subs; one `ReleaseFrame` arrives at
+  both with identical header+payload.
+- `TestServerFECCadence` — 4 `ReleaseFrame`s → exactly one TypeFEC datagram per
+  UDP sub after the 4th; none after 1–3.
+- `TestServerKeepaliveExpiry` — manual clock: no HELLO for 15 s → sub expired,
+  `Clients` drops; fan-out skips it.
+- `TestServerRestartReprimes` — a subscribed UDP client sends RESTART → re-prime
+  burst received, `Restarts==1`.
+- `TestServerReconfigBroadcast` — `Reconfig()` → every sub gets a TypeReconfig
+  (non-stop) packet.
+- `TestServerStopSessionFlushesAndNotifies` — release 6 frames (1 partial FEC
+  block of 2), `StopSession` → a tail parity datagram is sent AND a RECONFIG with
+  the stop flag; ring cleared; `active=false`.
+- `TestServerStatsSurface` — `Stats()` reflects Clients/Connects/Restarts/Primes.
+- `TestServerReleaseNoSession` — `ReleaseFrame` before `StartSession` → 0, no send.
+- `TestServerClose` — Close stops all goroutines (no leak), closes TCP conns,
+  leaves SOURCE_PORT sockets open (K owns them), idempotent.
+
+### End-to-end within the two packages (source ↔ client, no other pieces)
+- `TestRoundTripUDPLossy` — `source.Server` (UDP) → `stream.Client` through a
+  loopback UDP pair with a deterministic 1-in-5 drop filter; client HELLOs, gets
+  primed, streams 100 frames; assert every in-block single loss recovered, the
+  delivered seq run contiguous where recoverable, `Lost` only on injected double
+  losses (none here → 0).
+- `TestRoundTripTCPClean` — Server(TCP) → Client(TCP); 100 frames; all delivered
+  in order, `Lost==0`, `Recovered==0`, `FECParity==0`.
+- `TestRoundTripLateJoinPrimed` — client subscribes at frame 50 → receives the
+  primed live-edge (most recent `bufferMs`) then live, no gap at the join seam.
+- `TestRoundTripRestartRecovers` — drop all frames to the client for 2.5 s → the
+  client's watchdog issues RESTART → source re-primes → delivery resumes.
+
+All tests run on loopback sockets, in-process fakes, generated bytes, and a manual
+clock for the timed paths. No multicast, no audio device, no root.

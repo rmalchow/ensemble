@@ -97,11 +97,13 @@ cluster → followClient → group engine → api server. No construction cycle.
 `group.MakeMaster` assumes it executes on the master and errors with
 `ErrNotMaster` otherwise. H owns re-pointing the clock follower
 (`SetMaster(addr, gen)`) whenever the elected master endpoint or generation
-changes. (H/K)
+changes. *(Endpoint-management half superseded by D22 — the subscribe model
+removes per-member stream endpoints; clock re-pointing stands.)* (H/K)
 
-**D18 — stream endpoints**: H's `Resolver` seam (`StreamEndpoints(members)`)
-is implemented in K as a thin adapter over `cluster.DialCandidates` +
-each node's `streamPort`. (H/K)
+**D18 — ~~stream endpoints~~ SUPERSEDED by D22**: there is no `Resolver` /
+`SetEndpoints` seam. Subscribers dial the master's `SOURCE_PORT` (resolved
+via `cluster.DialCandidates(master)`); the source streams back to the address
+each subscription actually came from. (H/K)
 
 **D19 — `/api/status` JSON envelope** (pinned for I, J, and the e2e):
 
@@ -109,22 +111,111 @@ each node's `streamPort`. (H/K)
 {
   "id": "<32hex>", "name": "...", "role": "master|follower|solo",
   "groupId": "<32hex>",
-  "ports": {"http": 8080, "stream": 9090, "gossip": 7946},
-  "sink":  {"played": 0, "silence": 0, "lateDrop": 0, "staleGen": 0, "synced": false},
-  "clock": {"synced": false, "offsetNs": 0, "rttNs": 0}
+  "ports": {"http": 8080, "stream": 9090, "source": 9200, "gossip": 7946},
+  "sink":  {"played": 0, "silence": 0, "lateDrop": 0, "staleGen": 0,
+            "synced": false, "ratePPM": 0, "buffered": 0},
+  "clock": {"synced": false, "offsetNs": 0, "rttNs": 0},
+  "source": {"clients": 0, "connects": 0, "restarts": 0, "primes": 0}
 }
 ```
-(I/K; `role:"solo"` = master of a group of 1.)
+(I/K; `role:"solo"` = master of a group of 1; `source` present only while
+this node runs an active audio source.)
 
 **D20 — `--join` / `ENSEMBLE_JOIN`** (comma-separated `host:gossipPort` seed
 list) is added as a dev flag in A, passed to `cluster.Join`. It exists for
 hermetic loopback e2e tests; mDNS remains the production path. Added to spec
 §2 as dev-only. (K)
 
-**D21 — bufferMs is fixed per session**; changing group settings applies from
-the next `play`. Sink `Stats().Synced` is computed live from the Clock at
-call time. `Backend.Write` may block; the exec backend gets a write deadline
-via process kill on Close — accepted v1 limitation. (E)
+**D21 — ~~bufferMs is fixed per session~~ PARTIALLY SUPERSEDED by D23**:
+settings changes now apply live — the master bumps the generation and
+broadcasts RECONFIG; subscribers re-fetch replicated group settings and
+resubscribe (spec §8.7). Still true: sink `Stats().Synced` is computed live
+from the Clock at call time; `Backend.Write` may block; the exec backend gets
+a write deadline via process kill on Close — accepted v1 limitation. (E)
+
+---
+
+## Audio source/sink restructure (second review round)
+
+Spec §6/§8 were reworked after user review: subscribe-based streaming on a
+dedicated SOURCE_PORT, source ring + burst priming, live settings changes,
+a continuous DAC rate servo, and interchangeable source/backend
+implementations. Decisions D22+ pin the parameters; arch docs D, E, G, H, K
+were regenerated against them.
+
+**D22 — subscribe model on SOURCE_PORT (default 9200, TCP+UDP,
+bind-or-increment)**: the source listens; members subscribe via stream
+control (§8.7: HELLO/BYE/RESTART/RECONFIG, packet types 0x20–0x23, 1-byte
+flag payload). UDP subscribers HELLO **from their STREAM_PORT mux socket**,
+so audio flows back to the observed source addr:port and the member-side
+receive path (mux types 0x01/0x02) is unchanged. TCP subscribers dial
+SOURCE_PORT; control + length-prefixed audio share the connection. HELLO
+keepalive every 5 s; subscriber expiry 15 s. The master's own sink subscribes
+over loopback like any client. Inbound SOURCE_PORT only matters on masters,
+but every node binds it (any node can become master). (G/H/K)
+
+**D23 — live settings changes**: master bumps gen, broadcasts RECONFIG,
+refreshes the replicated group-settings record; subscribers re-read settings
+and resubscribe under the new gen. RECONFIG with the stop flag is the
+explicit end-of-session notice (§8.6). (G/H)
+
+**D24 — source ring & burst prime**: ring of released frames sized
+`max(2 × bufferMs, 1 s)`. Prime = replay ring frames whose `pts + bufferMs`
+deadline is still future (older frames are skipped — useless to the
+newcomer). UDP burst pacing ~4× realtime (one frame per ~5 ms); TCP
+back-to-back. Primes are counted in SourceStats. (G)
+
+**D25 — rate servo (E)**: skew estimator — cumulative samples consumed vs
+master-clock elapsed, ~3 s averaging window; backend `DelayReporter`
+(`DeviceDelay()`) used when implemented, backpressure inference otherwise —
+feeding a PI controller, output clamped ±500 ppm and slew-limited, driving a
+4-tap Catmull-Rom fractional resampler between jitter buffer and backend.
+Runs continuously (drift *prevention*); underruns stay silence + watchdog →
+RESTART (§8.6: starved > 2 s → RESTART to the source; still starved →
+unsubscribe, group self-heal takes over). Target buffer level = bufferMs.
+`SinkStats` gains `RatePPM`, `Buffered`. (E/G)
+
+**D26 — media-source abstraction (D)**: scheme-keyed factory `file` / `http` /
+`input` → one `Source` contract (canonical-PCM `ReadFrame(dst)`, `Close`,
+D9 EOF semantics). Pull-paced (`file`: decode-ahead, EOF ends session) vs
+live-paced (`http`/`input`: never EOF, underflow → the release ticker emits
+silence, cadence never stalls). `input` is exec-capture (`pw-record`/
+`arecord`), mirroring the exec playback backend. Available schemes reported
+in `capabilities.sources`. (D/H)
+
+**D27 — sink-backend registry (E)**: named backends `exec` (fallback pipe),
+`null`, `file` in the default build; `alsa` behind build tag `alsa`
+(implementation is v1.1 — only the registry + `DelayReporter` seam ship in
+v1). `ENSEMBLE_OUTPUT` selects by name; available names reported in
+`capabilities.backends`; `playback` = a real (non-null) backend is usable.
+(E/K)
+
+**D28 — source stats surfacing**: `SourceStats{Clients, Connects, Restarts,
+Primes}` — in `/api/status` (D19) and riding the master-written replicated
+playback record (`Playback.Source`), refreshed with the periodic position
+update, so the UI reads it from the cluster snapshot. (G/C/I/J)
+
+**D29 — seam names follow G's concrete exports** (consistency-sweep
+resolution): the source server is `source.NewServer(source.Config)` with
+`StartSession / ReleaseFrame / Reconfig / StopSession / Stats`; the
+subscriber is `stream.NewClient` (package `internal/stream`) with
+`Subscribe(sourceAddr, gen, transport)` / `Unsubscribe` / `Counters`. H's
+consumer-side interfaces adopt these method names (its `Publish` /
+`SubscribeTo` / `EndSession` spellings in H-group.md are superseded). (G/H/K)
+
+**D30 — live-source underflow is D's problem, not H's**: live sources
+(`http`, `input`) emit silence internally on momentary underflow and
+`ReadFrame` returns `nil` — there is **no** `audio.ErrUnderflow` sentinel;
+H-group.md's references to it are superseded. The release ticker always gets
+a frame. D's `Open(ctx, uri, mediaDir)` signature stands; H bridges with a
+closure. (D/H)
+
+**D31 — no `api.SetGroup`**: H depends on I only via `contracts.FollowClient`
+(leaf package, no cycle), so K builds the API server **last** with the group
+engine in `api.Config` and obtains the follow client via
+`apiSrv.FollowClient()` — actually constructed standalone before the engine:
+`api.NewFollowClient(cluster)` → `group.New(...)` → `api.New(Config{Group:
+engine, ...})`. K-main-e2e.md's `SetGroup` fallback is unused. (H/I/K)
 
 ## Confirmed as designed (no change)
 

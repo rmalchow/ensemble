@@ -16,7 +16,8 @@ agents before implementation).
   `XOR(ids ...ID) ID`, JSON marshalling.
 - `internal/stream/wire.go`: frame header struct + encode/decode
   (`magic|type|gen|seq|pts|len`), packet type constants (audio `0x01`,
-  fec `0x02`, clock req `0x10`, clock resp `0x11`), canonical PCM constants
+  fec `0x02`, clock req `0x10`, clock resp `0x11`, stream control
+  hello/bye/restart/reconfig `0x20–0x23`), canonical PCM constants
   (48000 Hz, 2 ch, s16le, 20 ms, 3840 B).
 - `internal/stream/mux.go`: UDP mux owning the STREAM_PORT UDP socket;
   `Register(type byte, h func(pkt []byte, from netip.AddrPort))`,
@@ -28,14 +29,14 @@ agents before implementation).
   Go-style, but pinned in arch docs): output backend, frame sink, state store.
 
 ### A — identity & config
-`internal/config/*`. Flags + env fallbacks per spec §2, `node.json`
-load/create (id, name) with atomic rewrite on rename, `MEDIA_DIR`/`DATA_DIR`
-resolution. Pure, unit-tested.
+`internal/config/*`. Flags + env fallbacks per spec §2 (incl. SOURCE_PORT and
+the dev `--join` seed list), `node.json` load/create (id, name) with atomic
+rewrite on rename, `MEDIA_DIR`/`DATA_DIR` resolution. Pure, unit-tested.
 
 ### B — discovery (mDNS)
-`internal/discovery/*`. zeroconf register (TXT: id/gossip/http/stream) +
-continuous browse; emits `Peer{ID, Addr, GossipPort, HTTPPort, StreamPort}`
-on a channel, dedup/throttled. No memberlist dependency: the cluster piece
+`internal/discovery/*`. zeroconf register (TXT: id/gossip/http/stream/source)
++ continuous browse; emits `Peer{ID, Addr, GossipPort, HTTPPort, StreamPort,
+SourcePort}` on a channel, dedup/throttled. No memberlist dependency: the cluster piece
 consumes the channel.
 
 ### C — cluster state (gossip)
@@ -47,21 +48,27 @@ candidate resolution per §3.1 (CIDR ∩ observations), liveness events,
 In-memory only; this node's own record fields set via setters
 (`SetName`, `SetFollowing`, `SetPlayback`, …) that bump version + broadcast.
 
-### D — audio source
-`internal/audio/*`. Decoders wav/mp3/flac → canonical PCM stream
-(`Open(path) (FrameReader, error)`; `ReadFrame() ([3840]byte-ish, error)`),
-mono→stereo, linear resampler to 48k. Unit tests with tiny generated fixtures
-(WAV written by test code; mp3/flac decode tested when fixtures exist —
-generate a wav fixture programmatically, skip codec-specific tests if no
-fixture).
+### D — media sources
+`internal/audio/*`. Interchangeable media sources behind one contract
+(`ReadFrame(dst []byte) error` filling canonical 20 ms PCM frames, D9 EOF
+semantics), created by a scheme-keyed factory (spec §6.1, D26): `file`
+(decoders wav/mp3/flac, mono→stereo, linear resample to 48k), `http(s)`
+(same decoders over a response body; live-paced, never EOF), `input`
+(exec-capture via pw-record/arecord, mirroring E's exec playback). Unit tests
+with generated WAV fixtures, an httptest server, and a fake capture command.
 
 ### E — sink & playout
-`internal/sink/*`. Output backends: `pw-play`/`pw-cat -p`/`aplay`/`paplay`
-exec-pipe (auto-pick, raw s16le 48k stereo stdin) + `null` (timed discard) +
-`file` (debug). Jitter buffer keyed by seq, playout loop translating pts via
-a `Clock` interface (`Now() int64` master-time), silence insertion, late-drop
-counters, 2 s starvation watchdog, generation gating. Testable with the null
-backend and a fake clock.
+`internal/sink/*`. Output backends as a **named registry** (D27): `exec`
+(`pw-play`/`pw-cat -p`/`aplay`/`paplay` pipe, auto-pick), `null` (timed
+discard), `file` (debug); `alsa` slot reserved behind a build tag (v1.1) —
+v1 ships the registry and the optional `DelayReporter` seam. Jitter buffer
+keyed by seq, playout loop translating pts via the `Clock` contract, silence
+insertion, late-drop counters, generation gating, and the **continuous rate
+servo** (D25): skew estimator → PI controller (±500 ppm clamp, slewed) →
+4-tap Catmull-Rom fractional resampler between buffer and backend. 2 s
+starvation watchdog triggers the subscriber's RESTART hook (callback injected
+by G/H). Testable with the null backend, a fake clock, and a skewed fake
+DAC.
 
 ### F — clock
 `internal/clock/*`. Server (registers type 0x10 on the UDP mux, answers with
@@ -69,23 +76,28 @@ backend and a fake clock.
 generation/master change). Exposes `Follower.MasterNow() (int64, bool)`
 (synced flag). Uses only the mux contract from S.
 
-### G — stream transport
-`internal/stream/{sender,receiver,tcp,fec}*.go` (wire.go + mux.go are S,
-read-only here). Sender: fan-out to member endpoints, UDP datagrams + XOR
-FEC parity every 4 frames, or persistent TCP conns (length-prefixed,
-reconnect). Receiver: UDP path (mux type 0x01/0x02, reorder + FEC recovery
-window) and TCP listener path; both deliver `(header, payload)` to a
-callback. Loss/recovery counters. Unit tests over loopback.
+### G — audio source server & subscriber client
+`internal/source/*` + `internal/stream/*` (wire.go + mux.go are S, read-only
+here). **Source** (master side, spec §8.2/§8.7, D22–D24): SOURCE_PORT
+TCP+UDP listeners, subscriber registry with keepalive/expiry, ring buffer of
+released frames, burst prime, RECONFIG broadcast, per-frame fan-out (UDP
+datagrams + XOR FEC parity every 4 frames, or length-prefixed frames down
+subscriber TCP conns), SourceStats. **Subscriber** (member side): HELLO/
+keepalive/BYE/RESTART client, UDP receive path (mux types 0x01/0x02, reorder
++ FEC recovery window) and TCP subscription path; both deliver
+`(header, payload)` to a callback. Loss/recovery counters. Unit tests over
+loopback.
 
 ### H — group engine
-`internal/group/*`. Group derivation from cluster state (§5), follow/unfollow
-with validation, self-heal (10 s grace), takeover orchestration (§5.2, calls
-members over HTTP via a small client func injected from API piece),
-playback orchestration: on `Play` → audio source (D) → ticker release →
-sender (G) to all members incl. self; manages generation, playback status
-record (C), group settings (codec/transport/bufferMs) stored in the group-name
-record's sibling map… **settings live in the replicated doc keyed by group ID,
-LWW, written by master**. End-of-file/stop handling.
+`internal/group/*`. Group derivation consumption (C owns the algorithm, D5),
+follow/unfollow with validation, self-heal (10 s grace), takeover
+orchestration (§5.2, calls members over HTTP via a small client func injected
+from API piece), playback orchestration: on `Play` → media source (D) for the
+URI → ticker release → source server (G) which subscribers join; the local
+sink subscribes to whichever master's source is current (incl. self over
+loopback); manages generation, RECONFIG on settings change (D23), playback
+status record incl. SourceStats (C, D28), group settings replicated LWW,
+written by master. End-of-source/stop handling.
 
 ### I — HTTP API
 `internal/api/*`. Echo server: all REST routes (§9.1), WebSocket (§9.2,
@@ -101,11 +113,13 @@ browser, join/leave/make-master/play/stop/rename actions. `npm run build` →
 `web/dist` (gitignored; placeholder index.html committed so go:embed works).
 
 ### K — main & e2e
-`cmd/ensemble/main.go` wiring (S→A→B/C→F/G→E→H→I lifecycle, graceful
-shutdown), `scripts/dev2.sh` (two nodes, tmp data dirs, null sink env var
-`ENSEMBLE_OUTPUT=null`), e2e smoke test script asserting: discovery, cluster
-doc convergence, follow, derived group id = xor, takeover, play→both sinks
-receiving frames in sync (null backend stats endpoint via /api/status).
+`cmd/ensemble/main.go` wiring (S→A→B/C→F/G→E→H→I lifecycle, four port binds,
+graceful shutdown), `scripts/dev2.sh` (two nodes, tmp data dirs, null sink env
+var `ENSEMBLE_OUTPUT=null`), e2e smoke test script asserting: discovery,
+cluster doc convergence, follow, derived group id = xor, takeover,
+play→both sinks subscribe and receive frames in sync (/api/status sink
+stats), late join gets burst-primed, RESTART recovers a lost subscriber,
+source stats (clients/connects/restarts) surface on the master, stop works.
 
 ## Dependency waves
 

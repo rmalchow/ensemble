@@ -2,11 +2,12 @@
 
 A multiroom audio system. Every node runs the same single binary. Nodes find each
 other automatically (mDNS + gossip), organize into **groups**, and play audio in
-sync: the group master decodes local media and streams timestamped PCM (or Opus)
-to every member — including itself — while a master-anchored clock keeps playout
-aligned.
+sync: the group master runs an **audio source** that decodes media into
+timestamped PCM (or Opus); every member — including the master itself —
+**subscribes** to that source and plays the stream out through a clock-disciplined
+sink. A master-anchored clock plus a per-node rate servo keeps playout aligned.
 
-Design goal: **simple and basic**. One binary, three ports, no external services,
+Design goal: **simple and basic**. One binary, four ports, no external services,
 no database, no PKI. State is replicated via gossip; everything heals itself.
 
 ---
@@ -18,22 +19,26 @@ no database, no PKI. State is replicated via gossip; everything heals itself.
 - **Node name**: display name, initially the first 8 chars of the node ID.
   Changeable at runtime via API/UI; persisted in `node.json` and replicated.
 - **Capabilities**: reported in the replicated node record:
-  - `playback`: whether a PCM output backend was found (`pw-cat`, `pw-play`,
-    `aplay`, or `paplay` on `$PATH`)
+  - `playback`: whether a real PCM output backend is available (§8.5)
   - `codecs`: codecs this build can encode/decode for streaming (`["pcm"]`;
     `"opus"` only if built with opus support — see §8.3)
+  - `backends`: sink backends available in this build/host (§8.5),
+    e.g. `["exec","null","file"]` (+ `"alsa"` in an alsa-tagged build)
+  - `sources`: media-source schemes this node can serve (§6.1),
+    e.g. `["file","http","input"]`
   - `formats`: local media formats it can decode (`["wav","mp3","flac"]`)
 
 ## 2. Ports
 
-Three configurable base ports. **Bind-or-increment**: try the base port; if it
+Four configurable base ports. **Bind-or-increment**: try the base port; if it
 is taken, increment by 1 and retry, up to 64 attempts, then fail. The *actually
 bound* ports are what the node advertises (mDNS TXT + gossiped node record).
 
 | Name          | Default | Protocols   | Purpose                                  |
 |---------------|---------|-------------|------------------------------------------|
 | `HTTP_PORT`   | 8080    | TCP         | REST API, WebSocket, SPA, node proxy      |
-| `STREAM_PORT` | 9090    | TCP **and** UDP | audio stream (TCP or UDP+FEC) **and** clock sync (UDP, multiplexed by packet type) |
+| `STREAM_PORT` | 9090    | TCP **and** UDP | member-side stream reception **and** clock sync (UDP, multiplexed by packet type) |
+| `SOURCE_PORT` | 9200    | TCP **and** UDP | audio source: subscriptions + stream control (§8.7); inbound only matters while the node is a group master |
 | `GOSSIP_PORT` | 7946    | TCP **and** UDP | memberlist gossip                         |
 
 TCP and UDP for a given name must end up on the **same** port number: a
@@ -45,13 +50,14 @@ this is not a configurable ensemble port.
 
 Configuration is via flags with env-var fallbacks:
 `--http-port` / `ENSEMBLE_HTTP_PORT`, `--stream-port` / `ENSEMBLE_STREAM_PORT`,
-`--gossip-port` / `ENSEMBLE_GOSSIP_PORT`, `--data` / `ENSEMBLE_DATA_DIR`
-(default `./data`), `--media` / `ENSEMBLE_MEDIA_DIR` (default `DATA_DIR/media`),
-`--name` (initial node name, only applied on first start).
-Additionally: `ENSEMBLE_OUTPUT` (env only) overrides the PCM output backend
-(`auto` default | `null` | `file:<path>`), and `--join` / `ENSEMBLE_JOIN`
-(dev only) seeds gossip with a comma-separated `host:gossipPort` list for
-multicast-less environments (tests).
+`--source-port` / `ENSEMBLE_SOURCE_PORT`, `--gossip-port` /
+`ENSEMBLE_GOSSIP_PORT`, `--data` / `ENSEMBLE_DATA_DIR` (default `./data`),
+`--media` / `ENSEMBLE_MEDIA_DIR` (default `DATA_DIR/media`), `--name` (initial
+node name, only applied on first start).
+Additionally: `ENSEMBLE_OUTPUT` (env only) selects the PCM output backend by
+name (§8.5; `auto` default | `exec` | `null` | `file:<path>` | `alsa` where
+built), and `--join` / `ENSEMBLE_JOIN` (dev only) seeds gossip with a
+comma-separated `host:gossipPort` list for multicast-less environments (tests).
 
 ## 3. Discovery
 
@@ -59,8 +65,9 @@ Two mechanisms, both always on:
 
 1. **mDNS** (`grandcat/zeroconf`): every node registers service
    `_ensemble._tcp` with TXT records `id=<nodeId>`, `gossip=<port>`,
-   `http=<port>`, `stream=<port>`. Every node browses continuously; any peer
-   not yet in the gossip cluster is joined via its discovered address.
+   `http=<port>`, `stream=<port>`, `source=<port>`. Every node browses
+   continuously; any peer not yet in the gossip cluster is joined via its
+   discovered address.
 2. **Gossip** (`hashicorp/memberlist`): carries liveness *and* the replicated
    cluster state (§4). Once any two nodes have met via mDNS, state spreads to
    everyone transitively.
@@ -76,14 +83,18 @@ or HTTP traffic from a peer, it records the peer's remote IP as an *observed
 address* (`peerId → ip, lastSeen`), and publishes its observation map in its
 own node record.
 
-When choosing an address to dial a peer (proxy, clock, stream, post-boot
-gossip), candidates are taken from the peer's self-reported CIDR list
-**intersected with the cluster's observations**: an IP that no node has ever
-observed is ignored. Observed addresses are preferred in order of most recent
-observation. Two bootstrap exceptions: the *initial* gossip join dials the
-address mDNS actually answered from, and a peer with no observations yet
+When choosing an address to dial a peer (proxy, clock, stream subscription,
+post-boot gossip), candidates are taken from the peer's self-reported CIDR
+list **intersected with the cluster's observations**: an IP that no node has
+ever observed is ignored. Observed addresses are preferred in order of most
+recent observation. Two bootstrap exceptions: the *initial* gossip join dials
+the address mDNS actually answered from, and a peer with no observations yet
 falls back to its self-reported list (it tightens to observed-only as soon as
 any traffic flows).
+
+The stream path itself needs no address resolution at all: subscribers dial
+the master's `SOURCE_PORT`, and the source streams back to **the address each
+subscription actually came from** (§8.7) — observed-by-construction.
 
 ## 4. Replicated cluster state
 
@@ -95,13 +106,13 @@ memberlist broadcasts + push/pull sync. No leader, no consensus; merging is
 Records:
 
 - **Node records** — owned and only ever written by the node itself:
-  `id, name, addrs (CIDR), httpPort, streamPort, gossipPort, capabilities,
-  following (nodeId or empty), observed (peerId → {ip, lastSeenUnix}),
-  version, updatedAt`
+  `id, name, addrs (CIDR), httpPort, streamPort, sourcePort, gossipPort,
+  capabilities, following (nodeId or empty), observed (peerId → {ip,
+  lastSeenUnix}), version, updatedAt`
 - **Group names** — map `groupId → {name, version, updatedAt}`; written by
   whichever node renames the group (LWW).
 - **Playback status** — per group, written only by that group's master:
-  `groupId → {state: idle|playing, file, startedAt, positionSec, codec,
+  `groupId → {state: idle|playing, uri, startedAt, positionSec, codec,
   transport, version, updatedAt}`.
 
 Liveness (`lastSeen`) comes from memberlist itself; alive/dead is not part of
@@ -158,19 +169,44 @@ solo; no further coordination. The UI exposes this as a **“make master”**
 button; *playing local media from a follower in the UI does takeover + play
 in one action*.
 
-## 6. Media
+## 6. Media sources
 
-Each node has a local media directory (`MEDIA_DIR`). `GET /api/media` lists
-playable files (recursive scan, extensions `.wav .mp3 .flac`, rescanned on
-request): `[{path, name, sizeBytes, modTime}]`. Paths are relative to
-`MEDIA_DIR`; path traversal outside it is rejected.
+What a master plays is a **URI**; the scheme selects an interchangeable media
+source implementation (§6.1):
+
+- `file:<relative path>` (or a bare path) — a file under the node's local
+  media directory (`MEDIA_DIR`). `GET /api/media` lists playable files
+  (recursive scan, extensions `.wav .mp3 .flac`, rescanned on request):
+  `[{path, name, sizeBytes, modTime}]`. Paths are relative to `MEDIA_DIR`;
+  path traversal outside it is rejected.
+- `http://…` / `https://…` — a remote stream or file (e.g. internet radio),
+  decoded by Content-Type / URL extension. No duration, no seek.
+- `input:` — the node's local capture input (line-in/mic), recorded via an
+  exec-capture backend (`pw-record`/`arecord` pipe, mirroring §8.5 playback).
 
 Any node's media can be browsed cluster-wide through the proxy (§9.3).
 
+### 6.1 Source abstraction
+
+All media sources implement one contract: produce canonical PCM (§8.1) frames
+via `ReadFrame(dst)` until `io.EOF`, plus `Close`. A scheme-keyed factory
+(`file`, `http`, `input`) creates them; a node's available schemes are
+reported in its capabilities (§1). Two pacing classes:
+
+- **Pull-paced** (`file`): decode runs ahead of the release ticker; EOF is the
+  natural end of the session.
+- **Live-paced** (`http`, `input`): data arrives in real time and never EOFs;
+  the session ends only on `stop`. If the source momentarily underflows
+  (network stall, capture hiccup), the release ticker emits silence frames —
+  the stream's seq/pts cadence **never stalls**.
+
+Adding a new kind of source (e.g. Spotify Connect, snapcast pipe) means
+implementing this one interface and registering a scheme.
+
 ## 7. Clock sync
 
-Master-anchored, NTP-style, over **STREAM_PORT UDP** (multiplexed with audio
-by packet type, §8.4).
+Master-anchored, NTP-style, over **STREAM_PORT UDP** (multiplexed with stream
+reception by packet type, §8.4).
 
 - The **master** answers clock requests: echoes the client's t1, stamps
   receive time t2 and send time t3 (monotonic-derived nanoseconds).
@@ -192,16 +228,34 @@ Everything streams as **48 kHz, stereo, s16le** PCM, in **20 ms frames**
 (960 samples/ch, 3840 bytes). Decoders convert: mono → dup to stereo, other
 rates → linear-interpolation resample. Good enough; simple.
 
+Every frame on the wire is both **counted and timestamped**: `seq` (a frame
+counter — ordering, loss detection, FEC block identity) and `pts` (a
+presentation timestamp in master-clock nanoseconds — playout scheduling).
+They serve different layers and both are needed (§8.5).
+
 ### 8.2 Source (master side)
 
-On `play`, the master opens the file (wav: hand-rolled/`go-audio/wav`; mp3:
-`hajimehoshi/go-mp3`; flac: `mewkiz/flac`), decodes → canonical PCM →
-20 ms frames. Each frame gets a presentation timestamp
-`pts = sessionStart + frameIndex·20ms` in **master clock nanoseconds**, where
-`sessionStart = now + leadMs`. Frames are released in real time (ticker),
-slightly ahead of the clock. The master sends every frame to **all group
-members, including itself** (its own sink consumes via the same network path
-on localhost — one code path, no special cases).
+On `play`, the master starts an **audio source server** on its `SOURCE_PORT`:
+
+- It opens the media source for the URI (§6.1) and releases canonical frames
+  in real time (20 ms ticker), each stamped
+  `pts = sessionStart + frameIndex·20ms` (master-clock ns), where
+  `sessionStart = now + leadMs`.
+- It maintains a **subscriber registry**: every group member — *including the
+  master's own sink, which subscribes over loopback exactly like everyone
+  else, no special handling* — subscribes via the stream control protocol
+  (§8.7). Each released frame is sent to every live subscriber.
+- It keeps a **ring buffer of recently released frames** sized
+  `max(2 × bufferMs, 1 s)`. When a subscriber joins (or rejoins after getting
+  lost), the source **burst-primes** it: it replays every ring frame whose
+  playout deadline (`pts + bufferMs`) is still in the future — older frames
+  are useless to the newcomer and are skipped. Over UDP the burst is paced at
+  ~4× realtime (one frame per ~5 ms) so it outruns the stream without
+  flooding the network; over TCP it is written back-to-back (flow control
+  paces it). After the burst, the subscriber receives live frames like
+  everyone else.
+- It counts and surfaces **source stats**: current subscriber count, total
+  connects, restarts (re-prime requests), and primes served (§9.1).
 
 ### 8.3 Codec — group setting `codec: pcm | opus` (default `pcm`)
 
@@ -216,35 +270,105 @@ on localhost — one code path, no special cases).
 
 Common frame header (before payload):
 `magic(1) | type(1) | gen(4) | seq(8) | pts(8) | payloadLen(2)`.
-`gen` is the session generation (bumped on every new play/master change);
-receivers drop frames from stale generations. Packet `type` on the UDP socket
-multiplexes: `0x01` audio frame, `0x02` FEC parity, `0x10` clock request,
-`0x11` clock reply.
+`gen` is the session generation (bumped on every new play / master change /
+settings change); receivers drop frames from stale generations.
 
-- **udp**: one frame per datagram + **XOR FEC**: after every 4 audio frames,
-  one parity datagram (XOR of the 4 payloads, padded) — any single loss per
-  block of 5 is recovered. Receiver keeps a small reorder/recovery window.
-- **tcp**: same header, length-prefixed on a persistent connection from
-  master to each member's STREAM_PORT TCP listener. No FEC (TCP retransmits).
+Members **subscribe** to the master's source (§8.7); the source streams back
+to the address each subscription came from:
+
+- **udp**: the subscriber HELLOs from its own STREAM_PORT UDP socket to the
+  master's SOURCE_PORT; audio then flows source → that observed addr:port,
+  one frame per datagram, plus **XOR FEC**: after every 4 audio frames, one
+  parity datagram (XOR of the 4 payloads, padded) — any single loss per block
+  of 5 is recovered. Receiver keeps a small reorder/recovery window. Packet
+  types multiplex the member's STREAM_PORT UDP socket: `0x01` audio frame,
+  `0x02` FEC parity, `0x10` clock request, `0x11` clock reply; control types
+  (§8.7) ride the SOURCE_PORT.
+- **tcp**: the subscriber dials the master's SOURCE_PORT TCP; the persistent
+  connection carries control frames (§8.7) and length-prefixed audio frames
+  master→member. No FEC (TCP retransmits). The member-side STREAM_PORT TCP
+  listener plays no role in audio.
 
 ### 8.5 Sink & playout (every member)
 
-Every member (incl. master) runs: receiver → jitter buffer → playout. The
-playout loop translates each frame's `pts` to local time via the clock
-follower offset and writes it to the output backend so that audio for `pts`
+Every member (incl. master) runs: subscriber → jitter buffer → **rate-adaptive
+resampler** → output backend.
+
+**Three clocks** are in play and the design keeps them separate:
+
+1. the **master clock** — the shared reference; clock sync (§7) gives every
+   member a translation `MasterToLocal(t)`;
+2. the **local OS clock** — what the member sleeps and schedules against,
+   corrected by that translation;
+3. the **DAC crystal** — the output device consumes samples at *its own* idea
+   of 48 kHz, typically ±20–100 ppm off, and never looks at clocks 1 or 2.
+
+**Coarse scheduling is timestamp-driven** (clocks 1→2): the playout loop
+translates each frame's `pts` and writes it to the backend so audio for `pts`
 hits the device at `pts + bufferMs` (group setting, default **150 ms**).
 Missing frames after FEC/reorder → play silence (gap), never block. Frames
-arriving too late are dropped (counted).
+arriving too late are dropped (counted). This anchors session start, mid-song
+joins, and recovery.
 
-**Output backends**: exec pipe to the first of `pw-play`, `pw-cat -p`,
-`aplay`, `paplay` found (raw s16le 48k stereo via stdin) — zero cgo; plus a
-`null` backend (timed discard) used in tests and on playback-less nodes.
+**Fine cadence is servo-driven** (clock 3): once the device pipeline is full,
+writes are paced by the DAC, not by the scheduler — and crystal skew of
+±50 ppm drifts ~3 ms/min, which would slowly drain/fill the jitter buffer and
+pull rooms audibly apart. So every sink runs a **continuous rate servo**: a
+skew estimator (cumulative samples consumed vs master-clock elapsed time,
+averaged over ~3 s) feeds a small PI controller whose output — clamped to
+±500 ppm and slewed gently — drives a **4-tap (Catmull-Rom) fractional
+resampler** between jitter buffer and backend. The correction magnitudes are
+far below audibility. This is *not* an underrun reaction; it runs at all
+times to prevent drift. Real underruns are handled by silence insertion and,
+if starvation persists, the RESTART path (§8.6).
 
-### 8.6 Stop / end
+**Output backends** are named, interchangeable implementations behind one
+interface (`Write(frame)`, `Close`), selected by `ENSEMBLE_OUTPUT`:
 
-`stop` (or natural end of file) bumps the generation, sends a `stop` control
-through the same channel, clears playback status. Followers also stop when
-frames cease for > 2 s (watchdog).
+- `exec` — the basic fallback: pipe raw s16le 48k stereo into the first of
+  `pw-play`, `pw-cat -p`, `aplay`, `paplay` found on `$PATH`. Zero cgo.
+- `null` — timed discard; tests and playback-less nodes.
+- `file:<path>` — raw PCM append; debugging.
+- `alsa` — raw device access via libalsa, behind build tag `alsa` (analogous
+  to `opus`); not in the default build.
+
+A backend **may** additionally implement `DeviceDelay() (nanos, ok)` — the
+exact amount of audio queued between a `Write` and the speaker. The servo
+type-asserts for it: with it (alsa: `snd_pcm_delay`) skew measurement is
+exact; without it (exec pipes) the servo falls back to backpressure
+inference, and per-device constant offsets limit absolute inter-room accuracy
+to roughly ±10–20 ms. Available backends are reported in capabilities (§1);
+`playback` is true when a real (non-null) backend is usable.
+
+### 8.6 Stop / end / getting lost
+
+`stop` (or natural end of a pull-paced source) bumps the generation,
+broadcasts a RECONFIG/stop control (§8.7), and clears playback status.
+A subscriber whose frames cease for **> 2 s** (watchdog) first sends
+**RESTART** to the source — "I got lost, re-prime me" — and resumes from the
+burst; if the source stays silent (master died), the subscriber gives up,
+unsubscribes locally, and normal group self-healing (§5) takes over.
+
+### 8.7 Stream control (SOURCE_PORT)
+
+A minimal signaling protocol between subscribers and the source, using the
+same header framing (§8.4) with control packet types. Over UDP, control
+datagrams go subscriber → master's SOURCE_PORT (sent from the subscriber's
+STREAM_PORT socket, so the reply/stream path is observed-by-construction);
+over TCP they are frames on the subscription connection.
+
+| Type | Name | Direction | Meaning |
+|---|---|---|---|
+| `0x20` | HELLO | sub → src | subscribe (or keepalive); flag: prime-me |
+| `0x21` | BYE | sub → src | "I am leaving, stop sending" |
+| `0x22` | RESTART | sub → src | "I got lost, re-prime and resume" |
+| `0x23` | RECONFIG | src → sub | "settings/session changed: re-fetch group settings, resubscribe under the new generation" (also doubles as the stop notice with gen 0… payload flag) |
+
+HELLO repeats every **5 s** as keepalive; the source expires subscribers
+unseen for **15 s**. When group settings change mid-session (codec,
+transport, bufferMs), the master bumps the generation, broadcasts RECONFIG,
+and subscribers reconnect with the new settings read from the replicated
+group settings — settings changes therefore apply **live**, not at next play.
 
 ## 9. HTTP API (Echo)
 
@@ -254,17 +378,21 @@ All under `/api`. JSON. No auth (trusted LAN, v1).
 
 | Method/path | Action |
 |---|---|
-| `GET  /api/status` | this node: id, name, ports, role, group, sync/playout stats |
+| `GET  /api/status` | this node: id, name, ports, role, group, sink/clock stats, and — when this node runs a source — `source: {clients, connects, restarts, primes}` |
 | `PATCH /api/node` | `{name}` → rename this node |
-| `GET  /api/cluster` | replicated state, resolved: nodes (alive/dead, addrs, observed), derived groups (id, name, master, members, playback) |
+| `GET  /api/cluster` | replicated state, resolved: nodes (alive/dead, addrs, observed), derived groups (id, name, master, members, playback, source stats) |
 | `GET  /api/media` | list this node's local media |
 | `POST /api/follow` | `{target}` → this node follows target (§5.1) |
 | `POST /api/unfollow` | this node becomes solo master |
 | `POST /api/group/name` | `{group, name}` → name a group (any node may write) |
 | `POST /api/group/master` | `{node}` → takeover (§5.2) |
-| `POST /api/play` | `{file, node?}` → master only: play `file` from local media to the group. Non-masters reject with a hint to use takeover. |
+| `POST /api/play` | `{uri}` (back-compat: `{file}` ≡ `file:` URI) → master only: serve that source to the group. Non-masters reject with a hint to use takeover. |
 | `POST /api/stop` | master only: stop group playback |
-| `GET  /api/group/settings` / `POST` | `{codec, transport, bufferMs}` for this node's group (master only for POST) |
+| `GET  /api/group/settings` / `POST` | `{codec, transport, bufferMs}` for this node's group (master only for POST; applies live via RECONFIG §8.7) |
+
+Sink stats in `/api/status` include `played, silence, lateDrop, staleGen,
+synced, ratePPM, buffered` (the servo's current correction and jitter-buffer
+depth).
 
 ### 9.2 WebSocket
 
@@ -289,20 +417,23 @@ CSS. Built to static files, embedded in the binary via `go:embed`, served at
 
 Screens (single page, sections):
 - **Groups** — cards per derived group: name (click to rename), members with
-  master badge, playback status + position, stop button, per-member
-  **“make master”** button, drag-free “join” via a member's *Join group…*
-  dropdown (issues follow), *Leave* button (unfollow).
+  master badge, playback status + position, source stats (listeners /
+  reconnects) on the master, stop button, per-member **“make master”**
+  button, drag-free “join” via a member's *Join group…* dropdown (issues
+  follow), *Leave* button (unfollow).
 - **Nodes** — all known nodes: name (click to rename — works for remote nodes
   via proxy), id, addresses, capabilities, alive/last-seen, stale indicator.
 - **Media** — node picker (any node, via proxy) → file list → **Play here**:
   plays that file on the selected node's group (does takeover first if the
-  target node isn't its group's master).
+  target node isn't its group's master). A URL field allows playing an
+  `http(s)://` stream; an *Input* button plays the node's capture input.
 
 ## 11. Out of scope (v1)
 
 Volume control, pause/seek, auth/TLS, internet-facing operation, playlists,
 album art/metadata, multiple simultaneous streams per group, Opus in the
-default build.
+default build, the `alsa` backend implementation (the interface and registry
+ship in v1; the backend itself is v1.1).
 
 ## 12. Repository layout
 
@@ -315,9 +446,14 @@ internal/discovery/  mDNS register + browse
 internal/cluster/    memberlist wrapper, replicated state (LWW), observed IPs
 internal/group/      group derivation, follow/takeover, playback orchestration
 internal/clock/      clock server + follower (UDP, via stream mux)
-internal/stream/     frame codec, TCP/UDP+FEC sender & receiver, UDP mux
-internal/audio/      decoders (wav/mp3/flac), resampler, frame source
-internal/sink/       jitter buffer, playout scheduler, output backends
+internal/source/     audio source server: subscriber registry, ring buffer,
+                     burst prime, stream control listener, source stats
+internal/stream/     frame wire codec, member-side UDP mux, subscriber client
+                     (HELLO/keepalive/RESTART), UDP+FEC / TCP reception
+internal/audio/      media sources: scheme registry, decoders (wav/mp3/flac),
+                     http stream source, exec-capture input, resampler
+internal/sink/       jitter buffer, playout scheduler, rate servo + 4-tap
+                     resampler, output backend registry (exec/null/file[/alsa])
 internal/api/        Echo server: REST, WebSocket, proxy, SPA embed
 web/                 Svelte SPA (vite project; `npm run build` → web/dist)
 docs/                this spec, architecture notes (docs/arch/*.md)
