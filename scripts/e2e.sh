@@ -254,7 +254,10 @@ pass "11b dumb-client conformance: protocol-minimal receiver plays (played $A ->
 # name "the-lab" CARRIES OVER (nameDerived stays false), and group SETTINGS carry
 # over too (one extra SetGroupSettings during the handoff). Playback does NOT.
 GID2=$ID2
-post "$N1/api/group/master" "{\"node\":\"$ID2\"}"
+# Post the takeover at the FOLLOWER (n2), not the master: §5.2/D17 — the API
+# forwards it to the current master (one hop). This is exactly what the UI's
+# play-from-node flow does; locks the forwarding path.
+post "$N2/api/group/master" "{\"node\":\"$ID2\"}"
 wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID2"'").master' "$ID2" 15 || die "takeover: master not n2"
 wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID2"'")|.members|length' 2 || die "takeover: members != 2"
 # Name override survives the master change (XOR-keyed), still non-derived.
