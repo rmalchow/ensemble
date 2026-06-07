@@ -51,7 +51,7 @@
       class="btn icon-btn"
       onclick={() => unfollow(member.id)}
       title="leave group"
-      aria-label="leave group">🚪</button
+      aria-label="leave group">✕</button
     >
   {/if}
   <JoinDropdown {member} {snapshot} />
