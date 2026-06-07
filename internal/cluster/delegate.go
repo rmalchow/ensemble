@@ -50,7 +50,9 @@ func (d *delegate) NotifyMsg(msg []byte) {
 		changed = c.doc.mergePlayback(dl.Group, dl.Playback)
 	case kindSettings:
 		changed = c.doc.mergeSettings(dl.Group, dl.Settings)
-		persist = changed
+		// D47: only our OWN settings record (key == self) is persisted; a gossiped
+		// change to another group's settings is master-keyed live state, not saved.
+		persist = changed && dl.Group == c.self
 	}
 	c.mu.Unlock()
 	if persist {
@@ -88,6 +90,13 @@ func (d *delegate) MergeRemoteState(buf []byte, join bool) {
 	// D7: if a peer holds a copy of OUR record at version >= ours, reconcile.
 	if rr, ok := remote.Nodes[c.self]; ok {
 		c.reconcileOwnVersion(rr.Version)
+	}
+	// D7/D47: the same restart-version guard for our OWN group-settings record
+	// (keyed by self id, D44). After a restart we load the persisted record at the
+	// last SAVED version, but a peer may hold a higher version we broadcast before
+	// crashing; bump our local record above it so our next SetGroupSettings wins.
+	if rr, ok := remote.Settings[c.self]; ok {
+		c.reconcileOwnSettingsVersion(rr.Version)
 	}
 
 	c.mu.Lock()

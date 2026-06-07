@@ -156,12 +156,16 @@ are purged (checked hourly). **Group names and group settings are exempt from th
 purge entirely** (D41): they are a lookup table kept indefinitely, so a specific
 member combination keeps its name whenever it reforms.
 
-The group **override-names** map ALONE is persisted to `DATA_DIR/cluster.json`
-(D41, narrowed by D44) — full records incl. version+writer so the LWW merge
-applies on reload — loaded at start before joining gossip and saved debounced
-(and on clean shutdown). A node that was offline therefore still knows every
-group name it ever saw. Group **settings** are NOT persisted (D44: master-keyed
-live state), nor are node records or playback (runtime/replicated).
+The group **override-names** map AND this node's **own group-settings record**
+(keyed by self id, since the group id == the master id, D44) are persisted to
+`DATA_DIR/cluster.json` (D41, amended by D47) — full records incl. version+writer
+so the LWW merge applies on reload — loaded at start before joining gossip and
+saved debounced (and on clean shutdown). A node that was offline therefore still
+knows every group name it ever saw, and a master that restarts re-forms its group
+with its last codec/transport/bufferMs instead of cluster defaults. Only the
+node's OWN settings record persists (other groups' settings are master-keyed live
+state owned by other nodes); node records and playback stay unpersisted
+(runtime/replicated).
 
 ## 5. Groups
 
@@ -396,6 +400,15 @@ byte check is both the framing sanity check and the version gate. This is what
 lets a *protocol-minimal* receiver (e.g. ESP32-S3 firmware, see
 `docs/DUMB-CLIENT.md`) interoperate without tracking the cluster: it implements
 only the packet types it needs and drops the rest.
+
+**Settings are editable per group in the UI and persist with the master** (D47).
+The group card exposes inline `codec` / `transport` / `bufferMs` controls; a
+change POSTs the full trio to `POST /api/group/settings` addressed to the group's
+master (proxied, so it works from any node) and applies live via RECONFIG (§8.7).
+Because the group id == the master id (D44), the master persists its OWN settings
+record (codec/transport/bufferMs, full LWW record) to `DATA_DIR/cluster.json`
+(§4); on restart it re-forms its group with those settings instead of the
+cluster defaults.
 
 ### 8.5 Sink & playout (every member)
 

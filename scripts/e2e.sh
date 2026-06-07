@@ -217,6 +217,21 @@ rising "$N1/api/status" '.sink.played' 1 || die "n1 playback stalled after setti
 rising "$N2/api/status" '.sink.played' 1 || die "n2 playback stalled after settings change"
 pass "11 live settings change (bufferMs=200), playback continues on both"
 
+# ---- 11t. TCP transport leg: switch the live session to tcp audio -----------
+# First e2e coverage of TCP audio end-to-end. n1 is master, mid-play (pcm from
+# step 11). Switch transport to tcp (keep codec/buffer); subscribers resubscribe
+# over the length-prefixed TCP framing (D13) and both sinks must KEEP rising.
+# Then switch back to udp so the remaining legs run on the default transport.
+post_retry "$N1/api/group/settings" '{"codec":"pcm","transport":"tcp","bufferMs":200}' || die "tcp settings POST failed"
+wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID1"'").settings.transport' tcp || die "transport not tcp"
+rising "$N1/api/status" '.sink.played' 1 || die "n1 playback stalled on tcp transport"
+rising "$N2/api/status" '.sink.played' 1 || die "n2 playback stalled on tcp transport"
+post_retry "$N1/api/group/settings" '{"codec":"pcm","transport":"udp","bufferMs":200}' || die "revert to udp POST failed"
+wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID1"'").settings.transport' udp || die "transport not back to udp"
+rising "$N1/api/status" '.sink.played' 1 || die "n1 playback stalled after udp revert"
+rising "$N2/api/status" '.sink.played' 1 || die "n2 playback stalled after udp revert"
+pass "11t TCP transport: live switch to tcp audio (both rising), reverted to udp"
+
 # ---- 11b. dumb-client conformance: a protocol-minimal receiver plays --------
 # The group is mid-play, master=n1, codec=pcm (step 11) — a clean PCM window.
 # Launch the standalone reference client (cmd/dumbclient, no internal/ imports):
@@ -315,6 +330,37 @@ wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").playback.state' id
 # (it is present only while a source is actively running, D19).
 wait_for "$N2/api/status" '.source == null' true 8 || die "n2 source still active after stop"
 pass "14 stop → playback idle on both; n2 source goes idle"
+
+# ---- 15s. settings persistence (D47): custom settings survive a master restart
+# n2 is master (group id == ID2, D42). Set a distinctive bufferMs on its group,
+# confirm it lands on its OWN settings record (key == ID2) and is written to
+# cluster.json, then kill + relaunch n2 against the SAME data dir. At boot n2
+# loads its own settings record BEFORE gossip and re-forms its (solo) group, so
+# /api/cluster must still show bufferMs 250 — loaded from disk, not the default.
+post_retry "$N2/api/group/settings" '{"codec":"pcm","transport":"udp","bufferMs":250}' || die "settings POST (persist leg) failed"
+wait_for "$N2/api/cluster" '.groups[]|select(.id=="'"$ID2"'").settings.bufferMs' 250 || die "bufferMs not 250 before restart"
+sleep 3
+[ -f "$DATA2/cluster.json" ] || die "n2 cluster.json not written (D47)"
+grep -q 250 "$DATA2/cluster.json" || die "n2 cluster.json missing the settings bufferMs (D47)"
+kill "$PID2" 2>/dev/null || true; wait "$PID2" 2>/dev/null || true
+# n1 self-heals to solo while n2 is down.
+wait_for "$N1/api/status" '.role' solo 20 || die "n1 did not go solo while n2 down (persist leg)"
+# Relaunch n2 SAME data dir; it boots solo (master n1 absent / re-forms later).
+"$BIN" --data "$DATA2" --media "$ROOT/testdata/media" --name n2 --host 127.0.0.1 \
+       --http-port 28080 --stream-port 29090 --source-port 29200 --gossip-port 27946 \
+       --no-mdns --join 127.0.0.1:17946 >"$LOG2" 2>&1 &  PID2=$!
+wait_for "$N2/api/status" '.id|length' 32 30 || die "n2 did not restart (persist leg)"
+# n2's solo group is keyed by its own id (ID2); its persisted settings record
+# (key == ID2) loaded from cluster.json, so bufferMs is still 250 (not 150).
+wait_for "$N2/api/cluster" '.groups[]|select(.id=="'"$ID2"'").settings.bufferMs' 250 20 \
+  || die "n2 lost its group settings across restart (D47 persistence)"
+wait_for "$N2/api/cluster" '[.nodes[]|select(.alive)]|length' 2 30 || die "n2 did not rejoin (persist leg)"
+pass "15s settings persistence: bufferMs=250 survives n2 master restart (D47)"
+
+# Re-form the n1+n2 group (n1 follows n2 master) so the next leg's GID group
+# exists again — 15s left n1 self-healed to solo.
+post_retry "$N1/api/follow" "{\"target\":\"$ID2\"}" || die "re-follow after persist leg failed"
+wait_for "$N2/api/cluster" '.groups[]|select(.id=="'"$GID"'")|.members|length' 2 20 || die "group did not re-form after persist leg"
 
 # ---- 15. group-name persistence (D41): name a group, restart n2, name known -
 # Rename the group (the override is keyed by the n1+n2 member-set XOR), confirm

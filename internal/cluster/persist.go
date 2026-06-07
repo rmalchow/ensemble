@@ -11,27 +11,38 @@ import (
 	"ensemble/internal/id"
 )
 
-// clusterState is the persisted lookup table (D41, narrowed by D42): the group
-// override-NAMES map ONLY, with FULL records (incl. version + writer) so the
-// load-vs-gossip merge follows the exact same LWW rule. The names map is keyed by
-// the member-set XOR (an override names a specific COMBINATION of rooms, §4/§5).
-// Group settings are NOT persisted (D42: master-keyed live state), nor are node
-// records or playback (runtime/replicated).
+// clusterState is the persisted lookup table (D41, amended by D47): the group
+// override-NAMES map (keyed by the member-set XOR, §4/§5) PLUS this node's OWN
+// group-settings record (keyed by self id, D44: group id == master id), each as
+// a FULL record (incl. version + writer) so the load-vs-gossip merge follows the
+// exact same LWW rule. The own-settings record means a master that restarts
+// re-forms its solo group (id == self) with its last codec/transport/bufferMs
+// instead of cluster defaults. Node records + playback stay unpersisted
+// (runtime/replicated); peers' settings records are NOT persisted (only self's).
 type clusterState struct {
-	Groups map[id.ID]*GroupNameRecord `json:"groups"`
+	Groups   map[id.ID]*GroupNameRecord     `json:"groups"`
+	Settings map[id.ID]*GroupSettingsRecord `json:"settings"`
 }
 
-// snapshotState clones the doc's override-names map under the lock for an atomic
-// save. Caller must NOT hold c.mu.
+// snapshotState clones the doc's override-names map and this node's OWN settings
+// record under the lock for an atomic save. Caller must NOT hold c.mu.
 func (c *Cluster) snapshotState() clusterState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := clusterState{
-		Groups: make(map[id.ID]*GroupNameRecord, len(c.doc.Groups)),
+		Groups:   make(map[id.ID]*GroupNameRecord, len(c.doc.Groups)),
+		Settings: make(map[id.ID]*GroupSettingsRecord, 1),
 	}
 	for k, v := range c.doc.Groups {
 		cp := *v
 		st.Groups[k] = &cp
+	}
+	// D47: persist only the self-keyed settings record (this node's own group
+	// settings when it is a master); other groups' settings are master-keyed live
+	// state owned by other nodes and reload from gossip.
+	if v := c.doc.Settings[c.self]; v != nil {
+		cp := *v
+		st.Settings[c.self] = &cp
 	}
 	return st
 }
@@ -44,9 +55,12 @@ func (s clusterState) into(doc *Document) {
 	for g, r := range s.Groups {
 		doc.mergeGroupName(g, r)
 	}
+	for g, r := range s.Settings {
+		doc.mergeSettings(g, r)
+	}
 }
 
-// markDirty signals the save loop that the override-names table changed (D41/D42).
+// markDirty signals the save loop that the persisted lookup table changed (D41/D47).
 // Coalesced (buffer 1, non-blocking); a no-op when persistence is disabled.
 func (c *Cluster) markDirty() {
 	if c.statePath == "" || c.dirty == nil {
@@ -96,9 +110,9 @@ func (c *Cluster) saveLoop() {
 	}
 }
 
-// saveState writes the names + settings tables to statePath atomically (temp +
-// fsync + rename in the same dir), mirroring node.json's write (D41). No-op when
-// persistence is disabled.
+// saveState writes the names map + own settings record to statePath atomically
+// (temp + fsync + rename in the same dir), mirroring node.json's write (D41/D47).
+// No-op when persistence is disabled.
 func (c *Cluster) saveState() error {
 	if c.statePath == "" {
 		return nil

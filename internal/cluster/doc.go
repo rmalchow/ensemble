@@ -167,10 +167,11 @@ func (d *Document) mergeAll(self id.ID, remote *Document) bool {
 	return changed
 }
 
-// mergeAllTracked is mergeAll that additionally reports whether the long-lived
-// LOOKUP table — the group override-NAMES map — changed (D41/D42: the names map
-// is the only record persisted to cluster.json, so only its change triggers a
-// save; settings are master-keyed live state and are NOT persisted).
+// mergeAllTracked is mergeAll that additionally reports whether the persisted
+// LOOKUP table changed (D41/D47): the group override-NAMES map (any key) and this
+// node's OWN settings record (key == self). Only those records are written to
+// cluster.json, so only their change triggers a save; peers' settings records are
+// master-keyed live state and are NOT persisted.
 func (d *Document) mergeAllTracked(self id.ID, remote *Document) (changed, lookupChanged bool) {
 	if remote == nil {
 		return false, false
@@ -194,7 +195,9 @@ func (d *Document) mergeAllTracked(self id.ID, remote *Document) (changed, looku
 	for g, r := range remote.Settings {
 		if d.mergeSettings(g, r) {
 			changed = true
-			lookupChanged = true
+			if g == self {
+				lookupChanged = true // D47: only our own settings record persists
+			}
 		}
 	}
 	return changed, lookupChanged

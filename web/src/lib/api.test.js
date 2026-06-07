@@ -15,6 +15,7 @@ import {
   play,
   playOnNode,
   getMedia,
+  setGroupSettings,
 } from "./api.js";
 
 const SELF = "11111111111111111111111111111111";
@@ -199,6 +200,26 @@ describe("playOnNode (takeover-then-play)", () => {
     const paths = global.fetch.mock.calls.map((c) => c[0]);
     expect(paths).toContain("/api/" + REMOTE + "/group/master");
     expect(paths).not.toContain("/api/" + REMOTE + "/play");
+  });
+});
+
+describe("group settings (D47)", () => {
+  const MASTER = "33333333333333333333333333333333";
+  it("setGroupSettings POSTs the full trio to the master /group/settings", async () => {
+    global.fetch = mockFetch(204);
+    await setGroupSettings(MASTER, {
+      codec: "pcm",
+      transport: "tcp",
+      bufferMs: 250,
+    });
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/api/" + MASTER + "/group/settings");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({
+      codec: "pcm",
+      transport: "tcp",
+      bufferMs: 250,
+    });
   });
 });
 

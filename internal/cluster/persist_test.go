@@ -11,16 +11,20 @@ import (
 )
 
 // TestStateSaveLoadRoundTrip: a SetGroupName persists (debounced) and a fresh
-// cluster started against the same path loads it. D42: SetGroupSettings does NOT
-// persist (master-keyed live state) — only the override-names map is saved.
+// cluster started against the same path loads it. D47: SetGroupSettings persists
+// ONLY when keyed by self id (the node's OWN group-settings record, D44: group id
+// == master id) — a non-self settings write is master-keyed live state and does
+// NOT persist.
 func TestStateSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cluster.json")
-	g := id.New()
+	self := id.New()
+	g := id.New()     // a foreign group key (not self)
+	other := id.New() // a foreign settings key (not self)
 
 	saved := make(chan struct{}, 4)
 	c1, err := New(Config{
-		Self:         id.New(),
+		Self:         self,
 		GossipPort:   freeUDPPort(t),
 		BindAddr:     "127.0.0.1",
 		StatePath:    path,
@@ -34,26 +38,32 @@ func TestStateSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	c1.SetGroupName(g, "kitchen")
-	c1.SetGroupSettings(g, contracts.GroupSettings{Codec: "opus", Transport: "tcp", BufferMs: 200})
+	// OWN settings (key == self) persist; a foreign group's settings do NOT.
+	c1.SetGroupSettings(self, contracts.GroupSettings{Codec: "opus", Transport: "tcp", BufferMs: 250})
+	c1.SetGroupSettings(other, contracts.GroupSettings{Codec: "pcm", Transport: "udp", BufferMs: 100})
 	waitSave(t, saved)
 	_ = c1.Close()
 
-	// Fresh cluster, same path, no gossip: must load the NAME; settings are NOT
-	// persisted (D42), so they reload as absent.
-	c2, err := New(Config{Self: id.New(), GossipPort: 7946, StatePath: path})
+	// Fresh cluster, SAME self + path, no gossip: must load the NAME and the OWN
+	// settings record; the foreign settings record must NOT have persisted.
+	c2, err := New(Config{Self: self, GossipPort: 7946, StatePath: path})
 	if err != nil {
 		t.Fatalf("New2: %v", err)
 	}
 	defer c2.Close()
 	c2.mu.Lock()
 	gn := c2.doc.Groups[g]
-	gs := c2.doc.Settings[g]
+	own := c2.doc.Settings[self]
+	foreign := c2.doc.Settings[other]
 	c2.mu.Unlock()
 	if gn == nil || gn.Name != "kitchen" {
 		t.Fatalf("loaded name = %+v, want kitchen", gn)
 	}
-	if gs != nil {
-		t.Fatalf("settings must NOT persist (D42), got %+v", gs)
+	if own == nil || own.Codec != "opus" || own.Transport != "tcp" || own.BufferMs != 250 {
+		t.Fatalf("own settings = %+v, want opus/tcp/250 (D47)", own)
+	}
+	if foreign != nil {
+		t.Fatalf("foreign settings must NOT persist (D47), got %+v", foreign)
 	}
 }
 
@@ -95,6 +105,106 @@ func TestLoadedVsGossipedLWW(t *testing.T) {
 	c.mu.Unlock()
 	if got != "gossip-v9" {
 		t.Fatalf("newer gossip lost: name = %q, want gossip-v9", got)
+	}
+}
+
+// TestOwnSettingsLoadedVsGossipedLWW: a loaded OWN settings record reconciles
+// against a gossiped copy by the same LWW rule (older gossip loses, newer wins).
+func TestOwnSettingsLoadedVsGossipedLWW(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cluster.json")
+	self := id.New()
+
+	// Persist an own-settings record at version 5 (writer == self).
+	st := clusterState{
+		Settings: map[id.ID]*GroupSettingsRecord{
+			self: {Codec: "opus", Transport: "tcp", BufferMs: 250, Version: 5, UpdatedAt: 100, Writer: self},
+		},
+	}
+	writeSettingsStateFile(t, path, st)
+
+	c, err := New(Config{Self: self, GossipPort: 7946, StatePath: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+
+	// Loaded value present.
+	c.mu.Lock()
+	loaded := c.doc.Settings[self]
+	c.mu.Unlock()
+	if loaded == nil || loaded.BufferMs != 250 {
+		t.Fatalf("loaded own settings = %+v, want bufferMs 250", loaded)
+	}
+
+	// Older gossiped (v3) must LOSE.
+	c.mu.Lock()
+	c.doc.mergeSettings(self, &GroupSettingsRecord{Codec: "pcm", Transport: "udp", BufferMs: 100, Version: 3, UpdatedAt: 50, Writer: self})
+	got := c.doc.Settings[self].BufferMs
+	c.mu.Unlock()
+	if got != 250 {
+		t.Fatalf("older gossip won: bufferMs = %d, want 250", got)
+	}
+
+	// Newer gossiped (v9) must WIN.
+	c.mu.Lock()
+	c.doc.mergeSettings(self, &GroupSettingsRecord{Codec: "pcm", Transport: "udp", BufferMs: 80, Version: 9, UpdatedAt: 200, Writer: self})
+	got = c.doc.Settings[self].BufferMs
+	c.mu.Unlock()
+	if got != 80 {
+		t.Fatalf("newer gossip lost: bufferMs = %d, want 80", got)
+	}
+}
+
+// TestReconcileOwnSettingsVersion: after a restart loads our settings record at
+// version N, a peer holding version >= N bumps our local counter above it (D7/D47)
+// so our next local write wins.
+func TestReconcileOwnSettingsVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cluster.json")
+	self := id.New()
+
+	st := clusterState{
+		Settings: map[id.ID]*GroupSettingsRecord{
+			self: {Codec: "opus", Transport: "tcp", BufferMs: 250, Version: 4, UpdatedAt: 100, Writer: self},
+		},
+	}
+	writeSettingsStateFile(t, path, st)
+
+	c, err := New(Config{Self: self, GossipPort: freeUDPPort(t), BindAddr: "127.0.0.1", StatePath: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer c.Close()
+
+	// A peer holds our settings record at version 7 (> loaded 4).
+	c.reconcileOwnSettingsVersion(7)
+
+	c.mu.Lock()
+	v := c.doc.Settings[self].Version
+	c.mu.Unlock()
+	if v != 8 {
+		t.Fatalf("reconciled version = %d, want 8 (peer 7 + 1)", v)
+	}
+}
+
+func writeSettingsStateFile(t *testing.T, path string, st clusterState) {
+	t.Helper()
+	c := &Cluster{statePath: path}
+	c.doc = newDocument()
+	for k, v := range st.Groups {
+		c.doc.Groups[k] = v
+	}
+	// snapshotState only persists the SELF-keyed settings record, so stamp self.
+	for k, v := range st.Settings {
+		c.self = k
+		c.doc.Settings[k] = v
+	}
+	if err := c.saveState(); err != nil {
+		t.Fatalf("writeSettingsStateFile: %v", err)
 	}
 }
 

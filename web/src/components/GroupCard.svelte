@@ -6,7 +6,7 @@
     groupNameIsDerived,
     addTargets,
   } from "../lib/derive.js";
-  import { renameGroup, follow } from "../lib/api.js";
+  import { renameGroup, follow, setGroupSettings } from "../lib/api.js";
   import EditableText from "./EditableText.svelte";
   import PlaybackBar from "./PlaybackBar.svelte";
   import MemberRow from "./MemberRow.svelte";
@@ -24,6 +24,51 @@
     group.members.map((id) => nodeById(snapshot, id)).filter(Boolean),
   );
   let settings = $derived(group.settings || {});
+  let codec = $derived(settings.codec ?? "opus");
+  let transport = $derived(settings.transport ?? "udp");
+  // bufferMs tracks the slider thumb locally while dragging; a fresh snapshot
+  // re-syncs it once released (mirrors VolumeSlider).
+  let bufDragging = $state(false);
+  let bufMs = $state(150);
+  $effect(() => {
+    const v = settings.bufferMs ?? 150;
+    if (!bufDragging) bufMs = v;
+  });
+
+  // POST the FULL current trio with the one change applied, addressed to the
+  // group's MASTER (the endpoint is master-only; the proxy makes it work from
+  // anywhere). Live-applies via RECONFIG (D23).
+  function applySettings(change) {
+    const next = { codec, transport, bufferMs: bufMs, ...change };
+    return setGroupSettings(group.master, next).catch(() => {});
+  }
+
+  function onCodec(e) {
+    applySettings({ codec: e.target.value });
+  }
+  function onTransport(e) {
+    applySettings({ transport: e.target.value });
+  }
+
+  // bufferMs slider: debounce ~250ms while dragging; trailing commit on release.
+  let bufTimer = null;
+  function onBufInput(e) {
+    bufDragging = true;
+    bufMs = Number(e.target.value);
+    if (bufTimer) clearTimeout(bufTimer);
+    bufTimer = setTimeout(() => {
+      bufTimer = null;
+      applySettings({ bufferMs: bufMs });
+    }, 250);
+  }
+  function onBufCommit() {
+    if (bufTimer) {
+      clearTimeout(bufTimer);
+      bufTimer = null;
+    }
+    applySettings({ bufferMs: bufMs });
+    bufDragging = false;
+  }
 
   // alive nodes not already in this group → "Add node…" select.
   let candidates = $derived(addTargets(snapshot, group));
@@ -74,9 +119,38 @@
     </div>
   {/if}
 
-  <div class="hint">
-    codec {settings.codec ?? "opus"} · transport {settings.transport ?? "udp"} ·
-    buffer {settings.bufferMs ?? 150} ms
+  <div class="hint settings" title="group stream settings (applied on the master)">
+    <label>
+      codec
+      <select value={codec} onchange={onCodec} aria-label="codec">
+        <option value="pcm">pcm</option>
+        <option value="opus">opus</option>
+      </select>
+    </label>
+    <span class="dot">·</span>
+    <label>
+      transport
+      <select value={transport} onchange={onTransport} aria-label="transport">
+        <option value="udp">udp</option>
+        <option value="tcp">tcp</option>
+      </select>
+    </label>
+    <span class="dot">·</span>
+    <label class="buf">
+      buffer
+      <input
+        type="range"
+        min="50"
+        max="500"
+        step="25"
+        value={bufMs}
+        oninput={onBufInput}
+        onchange={onBufCommit}
+        onpointerup={onBufCommit}
+        aria-label="buffer ms"
+      />
+      <span class="bufval">{bufMs} ms</span>
+    </label>
   </div>
 </div>
 
@@ -86,5 +160,37 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  /* compact, muted inline controls — keep the settings row small + unobtrusive */
+  .settings {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .settings label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .settings .dot {
+    opacity: 0.5;
+  }
+  .settings select {
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    padding: 0 2px;
+  }
+  .settings .buf input[type="range"] {
+    width: 84px;
+    vertical-align: middle;
+  }
+  .settings .bufval {
+    min-width: 3.6em;
+    font-variant-numeric: tabular-nums;
   }
 </style>

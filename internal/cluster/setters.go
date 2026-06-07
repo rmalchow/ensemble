@@ -232,10 +232,16 @@ func (c *Cluster) SetGroupSettings(group id.ID, s contracts.GroupSettings) {
 	}
 	c.doc.Settings[group] = rec
 	snap := *rec
+	isOwn := group == c.self
 	c.mu.Unlock()
 	c.enqueueBroadcast(kindSettings, group, delta{Group: group, Settings: &snap})
-	// D42: group settings are NOT persisted (master-keyed live state); only the
-	// override-names map is persisted (no markDirty here).
+	// D47: persist this node's OWN group-settings record (key == self id, D44:
+	// group id == master id) so a restarting master re-forms its group with its
+	// last settings. Other groups' settings are master-keyed live state owned by
+	// other nodes — not ours to persist.
+	if isOwn {
+		c.markDirty()
+	}
 	c.notify()
 }
 

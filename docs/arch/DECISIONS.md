@@ -421,10 +421,13 @@ off three features locally: `playback` (output), `opus` (codec), `input`
 
 ## Persisted cluster config (user addition)
 
-**D41 — persisted cluster lookup tables**. The long-lived lookup state — the
-group **NAMES** map and the group **SETTINGS** map, each as FULL records (incl.
-`version` + `writer` so the LWW merge applies) — is persisted to
-`DATA_DIR/cluster.json`. NOT node records, NOT playback (runtime/replicated).
+**D41 — persisted cluster lookup tables** *(narrowed by D44, amended by D47)*. The
+long-lived lookup state persisted to `DATA_DIR/cluster.json` is the group
+override-**NAMES** map (XOR-keyed) PLUS this node's **OWN group-settings record**
+(keyed by self id, since group id == master id, D44/D47) — each as a FULL record
+(incl. `version` + `writer` so the LWW merge applies). NOT node records, NOT
+playback (runtime/replicated), and NOT peers' settings records (master-keyed live
+state owned by other nodes).
 - **Load** at cluster `New` (before memberlist join) into the doc; once gossip
   starts, the exact existing LWW rule reconciles loaded-vs-gossiped (an older
   loaded version loses to a newer gossiped record, and vice-versa).
@@ -536,6 +539,41 @@ unknown packet types; an incompatible revision changes the magic**. This makes
 the wire format forward-compatible (new optional types are additive) and lets a
 protocol-minimal, receive-only client (`docs/DUMB-CLIENT.md`, `cmd/dumbclient`)
 interoperate without cluster membership. (§8.4)
+
+## Editable + persisted group settings (user round)
+
+**D47 — group settings are editable per group in the UI and persist with the
+group's master** (amends D41; re-introduces settings persistence that D44 had
+removed, now keyed correctly by self).
+
+- **UI**. The group card replaces the static "codec · transport · buffer" line
+  with compact inline controls: `codec` select (`pcm`/`opus`), `transport` select
+  (`udp`/`tcp`), and a `bufferMs` slider (50–500, step 25, ~250 ms debounce like
+  VolumeSlider). A change POSTs the FULL current trio with the one field applied to
+  `POST /api/group/settings`, addressed to the group's master via the proxy
+  (`base(group.master)`) — the endpoint is master-only but the proxy makes it work
+  from any viewer. Changes apply live mid-session (RECONFIG, D23). `lib/api.js`
+  `setGroupSettings(masterId, settings)`.
+
+- **Persistence**. Because the group id == the master id (D44), a master's
+  settings record is keyed by its own node id. The cluster persists ONLY the
+  self-keyed settings record (full LWW record, incl. version+writer) to
+  `cluster.json` alongside the override-names map — loaded at `New` before gossip,
+  saved debounced + on `Close`, exactly like names. A peer's settings record is
+  master-keyed live state and is NOT persisted. `SetGroupSettings` marks the table
+  dirty only when `group == self`; a gossiped settings merge marks dirty only when
+  the changed key is `self`.
+
+- **Restart-version guard (D7 for settings)**. On restart the loaded own-settings
+  record may sit below a version a peer still holds (broadcast but not yet saved
+  before the crash). `reconcileOwnSettingsVersion` (called from the delegate's
+  `MergeRemoteState`, mirroring the node-record `reconcileOwnVersion`) jumps our
+  local counter above any peer copy with version ≥ ours, re-broadcasts, and
+  re-persists — so the next local `SetGroupSettings` wins.
+
+- **Effect**. A master that restarts against the same data dir re-forms its (solo)
+  group with its last codec/transport/bufferMs instead of cluster defaults
+  (spec §4/§8.4 updated). (C/H/I/J)
 
 ## Confirmed as designed (no change)
 

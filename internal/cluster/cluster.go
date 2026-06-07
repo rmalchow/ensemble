@@ -419,6 +419,27 @@ func (c *Cluster) reconcileOwnVersion(peerVer uint64) {
 	c.notify()
 }
 
+// reconcileOwnSettingsVersion is the D7 guard for our OWN group-settings record
+// (keyed by self id, D44/D47): if a peer holds it at version >= ours, jump our
+// counter above it, re-broadcast, and re-persist. Called by the delegate after
+// MergeRemoteState. A no-op when we hold no self-keyed settings record yet.
+func (c *Cluster) reconcileOwnSettingsVersion(peerVer uint64) {
+	c.mu.Lock()
+	cur := c.doc.Settings[c.self]
+	if cur == nil || peerVer < cur.Version {
+		c.mu.Unlock()
+		return
+	}
+	cur.Version = peerVer + 1
+	cur.UpdatedAt = c.clock().Unix()
+	cur.Writer = c.self
+	snap := *cur
+	c.mu.Unlock()
+	c.enqueueBroadcast(kindSettings, c.self, delta{Group: c.self, Settings: &snap})
+	c.markDirty()
+	c.notify()
+}
+
 // slogWriter adapts memberlist's io.Writer-based logging into slog at debug.
 type slogWriter struct{ log *slog.Logger }
 
