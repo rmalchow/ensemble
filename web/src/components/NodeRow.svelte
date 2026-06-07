@@ -263,7 +263,8 @@
   .feature-row,
   .format-row {
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    padding: 6px 0;
   }
   .feat-label {
     min-width: 3.6rem;
