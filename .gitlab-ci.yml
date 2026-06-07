@@ -1,5 +1,13 @@
 stages: [frontend, test, build, release]
 
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/   # release pipeline (vX.Y.Z)
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never                                  # no duplicate branch+MR pipelines
+    - if: $CI_COMMIT_BRANCH
+
 variables:
   CGO_ENABLED: "0"
   GOMODCACHE: "$CI_PROJECT_DIR/.gomodcache"
@@ -53,7 +61,9 @@ e2e:
     - shared
 
 # 3) Cross-compile every target in parallel → downloadable artifacts.
-build:
+# Branch/MR commits build 4-week dev artifacts (grab from the job page) and
+# publish NO release. Tag pipelines use build-release below (never expires).
+.build-template:
   stage: build
   image: golang:1.26
   needs: [frontend, test]
@@ -63,7 +73,7 @@ build:
       - { GOOS: linux, GOARCH: amd64 }
       - { GOOS: linux, GOARCH: arm64 }
   script:
-    - VER="$CI_COMMIT_SHORT_SHA"   # version IS the commit hash (no tags)
+    - VER="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"   # release tag, else dev sha
     - SUFFIX="${GOOS}-${GOARCH}"
     - go build -trimpath -ldflags "-s -w -X main.version=$VER"
         -o "bin/ensemble-$SUFFIX" ./cmd/ensemble
@@ -72,38 +82,93 @@ build:
     # branch/tag names only, never a commit SHA.
     - ARCH_KEY=$(echo "$GOARCH" | tr '[:lower:]' '[:upper:]')
     - echo "BUILD_JOB_ID_${ARCH_KEY}=$CI_JOB_ID" > build.env
+  tags:
+    - shared
+
+build:
+  extends: .build-template
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
   artifacts:
     name: "ensemble-${CI_COMMIT_REF_SLUG}"
     paths: [bin/]
     reports:
       dotenv: build.env
     expire_in: 4 weeks
+
+build-release:
+  extends: .build-template
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  artifacts:
+    name: "ensemble-${CI_COMMIT_TAG}"
+    paths: [bin/]
+    reports:
+      dotenv: build.env
+    expire_in: never
+
+# 4) Changelog for a tagged release: commits since the previous v* tag.
+changelog:
+  stage: build
+  image: golang:1.26   # any image with full git
+  needs: []
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  variables:
+    GIT_DEPTH: "0"     # full history so the previous tag is reachable
+  script:
+    - PREV=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -vx "$CI_COMMIT_TAG" | head -1 || true)
+    - |
+      {
+        echo "## $CI_COMMIT_TAG"
+        echo
+        if [ -n "$PREV" ]; then
+          echo "Changes since $PREV:"; echo
+          git log --no-merges --pretty='- %s' "$PREV..$CI_COMMIT_TAG"
+        else
+          echo "Initial release."; echo
+          git log --no-merges --pretty='- %s' "$CI_COMMIT_TAG" | head -50
+        fi
+        echo
+        echo "Static pure-Go binaries for linux/amd64 + linux/arm64."
+        echo "Optional libraries (libopus, libasound) are loaded at runtime."
+      } > release-notes.md
+    - cat release-notes.md
+  artifacts:
+    paths: [release-notes.md]
+    expire_in: 1 week
   tags:
     - shared
 
-# 4) Publish a GitLab Release identified by the COMMIT HASH (no manual tag):
-# every branch commit releases as v-<short-sha>. A GitLab release needs a tag
-# *ref* under the hood, so release-cli auto-creates one pinned to the commit —
-# the operator never tags by hand. Asset links address the exact build jobs by
-# id (dotenv from the build matrix): the by-ref artifacts endpoint accepts only
-# branch/tag names, so SHA-based links would 404.
+# 5) Publish a GitLab Release — TAGS ONLY (vX.Y.Z). The release process:
+#
+#     git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+#
+# That single push triggers this pipeline: full test + e2e gate, both
+# binaries built with -X main.version=v0.2.0, a changelog generated from the
+# commits since the previous tag, and a GitLab Release whose asset links
+# address the EXACT build jobs by id (dotenv from the build matrix — the
+# by-ref artifacts endpoint resolves branch/tag names only, never a SHA).
+# Tagged-build artifacts never expire. Ordinary branch commits still build
+# 4-week dev artifacts (grab them from the job page) but publish no release.
 release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
-  needs: [build]
+  needs: [build-release, changelog, test, e2e]
   rules:
-    - if: $CI_COMMIT_BRANCH
-  script: [ 'echo "Releasing $CI_COMMIT_SHORT_SHA (amd64 job $BUILD_JOB_ID_AMD64, arm64 job $BUILD_JOB_ID_ARM64)"' ]
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  script: [ 'echo "Releasing $CI_COMMIT_TAG (amd64 job $BUILD_JOB_ID_AMD64, arm64 job $BUILD_JOB_ID_ARM64)"' ]
   release:
-    tag_name: "v-$CI_COMMIT_SHORT_SHA"
-    ref: "$CI_COMMIT_SHA"
-    name: "Ensemble $CI_COMMIT_SHORT_SHA"
-    description: "Static pure-Go binaries for linux/amd64 and arm64 (commit $CI_COMMIT_SHA). Optional libs (libopus, libasound) load at runtime."
+    tag_name: "$CI_COMMIT_TAG"
+    name: "Ensemble $CI_COMMIT_TAG"
+    description: "./release-notes.md"
     assets:
       links:
-        - name: "ensemble-linux-amd64"
+        - name: "ensemble-linux-amd64 ($CI_COMMIT_TAG)"
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_AMD64/artifacts/raw/bin/ensemble-linux-amd64"
-        - name: "ensemble-linux-arm64"
+        - name: "ensemble-linux-arm64 ($CI_COMMIT_TAG)"
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARM64/artifacts/raw/bin/ensemble-linux-arm64"
   tags:
     - shared
