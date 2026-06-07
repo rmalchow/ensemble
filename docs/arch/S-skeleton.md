@@ -35,6 +35,13 @@ internal/stream/mux_test.go     loopback dispatch by type, unknown-type drop, Wr
 internal/netx/netx.go           BindTCPUDP (bind-or-increment, all-or-nothing), BindTCP, InterfaceCIDRs
 internal/netx/netx_test.go      increment-on-conflict, all-or-nothing rollback, CIDR shape
 
+internal/dl/dl.go               runtime shared-library probe (purego): Open(sonames, symbols) (*Lib, error)
+                                — dlopen with soname fallback list, dlsym-verifies EVERY listed symbol
+                                BEFORE any registration (missing symbol => soft error, never a panic),
+                                Lib.Func(name, &fnPtr) (purego.RegisterLibFunc), ErrUnavailable sentinel.
+internal/dl/dl_test.go          open libc by soname succeeds; bogus soname => ErrUnavailable; bogus
+                                symbol in list => ErrUnavailable without panic; Func binds a callable.
+
 internal/contracts/contracts.go cross-piece interfaces: Sink, Clock, StateStore + snapshot DTOs
 ```
 
@@ -459,7 +466,7 @@ type NodeView struct {
 // Capabilities mirror §1.
 type Capabilities struct {
 	Playback bool     `json:"playback"`
-	Codecs   []string `json:"codecs"`   // ["pcm"] (+ "opus" if built with it)
+	Codecs   []string `json:"codecs"`   // ["pcm"] (+ "opus" when libopus loads at runtime, D32/D33)
 	Backends []string `json:"backends"` // sink backends in this build/host (§8.5)
 	Sources  []string `json:"sources"`  // media-source schemes (§6.1): ["file","http","input"]
 	Formats  []string `json:"formats"`  // ["wav","mp3","flac"]
@@ -675,12 +682,15 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.x    // mp3 decode (D)
 	github.com/mewkiz/flac v1.x             // flac decode (D)
 	github.com/go-audio/wav v1.x            // wav decode (D; or hand-rolled)
+	github.com/ebitengine/purego v0.8.x     // runtime dlopen FFI (internal/dl; D opus, E alsa)
 )
 ```
 
-No opus dep in the default build (§8.3; `hraban/opus` is behind build tag
-`opus`, added by whoever implements that optional path — not in `go.mod`'s
-default requires until then). Exact patch versions are pinned by `go mod tidy`
+Additionally `github.com/ebitengine/purego` (runtime dlopen/dlsym FFI, no
+cgo) — consumed by `internal/dl` for the optional shared libraries
+(libopus, libasound): there are **no build tags and no cgo anywhere**; the
+one binary probes at runtime and degrades capabilities gracefully
+(DECISIONS.md D32). Exact patch versions are pinned by `go mod tidy`
 at integration; the list above is the allowed-deps closure from
 IMPLEMENTATION.md ground rules. Indirect deps (memberlist pulls
 `hashicorp/go-msgpack`, `armon/go-metrics`, etc.) land in `go.sum` via tidy.

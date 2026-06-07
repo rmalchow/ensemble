@@ -5,16 +5,18 @@ Source of truth: [docs/README.md](../README.md) (§8.5 sink/playout + rate servo
 [S-skeleton.md](S-skeleton.md) (`internal/contracts`: `Backend`, `DelayReporter`,
 `Sink`, `SinkStats` incl. `RatePPM`/`Buffered`, `Clock`; `internal/stream`:
 `FrameBytes`, `FrameSamples`, `FrameNanos`, `Channels`). Integrator decisions:
-[DECISIONS.md](DECISIONS.md) — **D25** (rate servo), **D27** (backend registry),
+[DECISIONS.md](DECISIONS.md) — **D25** (rate servo), **D27** (backend registry,
+amended), **D32** (`internal/dl` runtime loading), **D34** (alsa backend),
 D21 (live settings / `Synced` live / `Write` may block), D3/D2
 (`ENSEMBLE_OUTPUT`, capabilities assembled by K).
 
 This piece owns `internal/sink/*` only. It implements:
 
-1. a **named output-backend registry** (D27): `exec` (auto-pick pipe), `null`
-   (timed discard), `file` (debug append); an `alsa` slot reserved behind build
-   tag `alsa` (v1 ships only the registration seam + the optional
-   `DelayReporter` consumption — the alsa backend body is v1.1);
+1. a **named output-backend registry** (D27): `alsa` (raw device via
+   runtime-loaded libasound, also a `DelayReporter`), `exec` (auto-pick pipe),
+   `null` (timed discard), `file` (debug append). All four ship in the one and
+   only build (D32 — no build tags); `alsa` registers itself only when the
+   `internal/dl` dlopen probe of `libasound.so.2` succeeds (D34);
 2. the **playout pipeline** on every member: jitter buffer → playout scheduler
    (timestamp-driven coarse anchor, silence gaps, late drops, gen gating,
    unsynced gate) → **4-tap Catmull-Rom fractional resampler** → backend;
@@ -50,28 +52,31 @@ servo.go           rateServo: skew estimator + PI controller (±500 ppm clamp,
 resampler.go       resampler: 4-tap Catmull-Rom fractional resampler with a
                    fractional cursor across frame boundaries. Pure; no goroutine.
 registry.go        Backend registry (D27): Register(name, factory), Open(spec),
-                   built-in registrations exec/null/file, ENSEMBLE_OUTPUT parse,
-                   capability probe (BackendNames, HasPlayback).
+                   built-in registrations alsa/exec/null/file, ENSEMBLE_OUTPUT
+                   parse, capability probe (BackendNames, HasPlayback).
+backend_alsa.go    alsaBackend: raw device via runtime-loaded libasound (D34,
+                   internal/dl). Registers "alsa" only when dl.Open succeeds.
+                   Implements contracts.Backend + DelayReporter. No build tag.
 backend_exec.go    execBackend: pipes raw s16le 48k stereo into pw-play/pw-cat -p/
                    aplay/paplay (first on PATH). Stdin pipe, process lifecycle.
 backend_null.go    nullBackend: timed discard; optional 20 ms pacing.
 backend_file.go    fileBackend: append raw PCM to a debug file.
-backend_alsa.go    //go:build alsa — registers "alsa"; body is v1.1 (returns a
-                   not-implemented error in v1). NOT compiled in the default build.
-backend_noalsa.go  //go:build !alsa — empty (documents the seam). Default build.
 
 servo_test.go      rateServo convergence + clamp + slew (no goroutines).
 resampler_test.go  Catmull-Rom continuity across frame boundaries, rate==1 identity.
 jitter_test.go     jitterBuffer unit tests.
 registry_test.go   Open(null/file/exec/auto), BackendNames, HasPlayback.
-backend_test.go    null/file backend writes; exec skipped if no tool on PATH.
+backend_test.go    null/file backend writes; exec skipped if no tool on PATH;
+                   alsa skipped (t.Skip) when libasound is not loadable.
 sink_test.go       Playout scheduler + servo integration (fake clock, fake DAC).
 ```
 
-The alsa build-tag pair (`backend_alsa.go` / `backend_noalsa.go`) is the *only*
-registration seam shipping in v1 for alsa: in the default (`!alsa`) build the
-name "alsa" is simply absent from the registry, so `capabilities.backends` omits
-it and `ENSEMBLE_OUTPUT=alsa` errors cleanly.
+There is no build tag for alsa (D32 — build tags abolished). `backend_alsa.go`
+is always compiled; in its `init()` it attempts `dl.Open` of `libasound.so.2`
+and registers the name "alsa" only on success. On a host without the library the
+probe yields `dl.ErrUnavailable`, the name "alsa" is simply absent from the
+registry, so `capabilities.backends` omits it (D3) and `ENSEMBLE_OUTPUT=alsa`
+errors cleanly.
 
 ---
 
@@ -132,8 +137,10 @@ package sink
 type Factory func(arg string, log *slog.Logger) (contracts.Backend, error)
 
 // Register adds a named backend factory. Called from each backend file's init().
-// Replacing an existing name panics (programmer error). The default build
-// registers "exec", "null", "file"; an alsa-tagged build also registers "alsa".
+// Replacing an existing name panics (programmer error). "exec", "null", "file"
+// always register; "alsa" registers itself only when its dl.Open probe of
+// libasound.so.2 succeeds (D34) — so on a host without the library the name is
+// simply absent (no build tags, D32).
 func Register(name string, f Factory)
 
 // BackendNames returns the registered backend names, sorted, for
@@ -148,25 +155,29 @@ func HasPlayback() bool
 
 // Open resolves ENSEMBLE_OUTPUT-style spec into a backend (D2/D27):
 //
-//	"" | "auto" | "exec"  -> "exec": first of pw-play, pw-cat -p, aplay, paplay on
-//	                          $PATH; if none and spec was "auto", degrade to "null";
-//	                          if spec was explicit "exec" with no tool, degrade to
-//	                          "null" with a WARN (don't fail the node).
+//	"" | "auto"           -> best available, in order alsa -> exec -> null: "alsa"
+//	                          if registered (libasound loaded) and it opens; else
+//	                          "exec" if a player tool is on $PATH; else "null".
+//	"alsa"                -> alsaBackend; errors if "alsa" is not registered
+//	                          (libasound not loadable) or the device won't open.
+//	"exec"                -> first of pw-play, pw-cat -p, aplay, paplay on $PATH;
+//	                          explicit "exec" with no tool degrades to "null" with
+//	                          a WARN (don't fail the node).
 //	"null"                -> nullBackend (timed discard)
 //	"file:/abs/path"      -> fileBackend appending raw PCM
-//	"alsa"                -> registered only in an alsa-tagged build; else error
 //	"<name>" / "<name>:a" -> any registered factory, arg after the first colon
 //
 // Returns the backend and the resolved name (for /api/status + logging). An
-// explicit-but-broken request (bad file path, unknown name, alsa in a non-alsa
-// build) errors; "auto" never errors (degrades to null).
+// explicit-but-broken request (bad file path, unknown name, "alsa" when
+// libasound is not loadable) errors; "auto" never errors (degrades to null).
 func Open(spec string, log *slog.Logger) (contracts.Backend, string, error)
 ```
 
 `ENSEMBLE_OUTPUT` is read by K (D2/D3) and passed as `spec`; E does not read the
 environment itself except a thin `os.Getenv` convenience used by tests. The
 registry pattern keeps adding `alsa` (and any future backend) to one
-`Register("alsa", …)` call behind its build tag — no switch to touch.
+`Register("alsa", …)` call gated on its `dl.Open` probe — no switch to touch,
+no build tag (D32).
 
 ### 2.3 backends
 
@@ -221,11 +232,57 @@ All `Write` implementations reject `len(frame) != stream.FrameBytes` with an
 error (defensive; the resampler always emits exactly `FrameBytes`). Backends own
 their own mutex because `Close` may race the scheduler's last `Write`.
 
-`backend_alsa.go` (`//go:build alsa`) registers `"alsa"` with a factory that, in
-v1, returns `errors.New("sink: alsa backend not implemented in v1")` and — when
-implemented in v1.1 — will be the one backend that also satisfies
-`contracts.DelayReporter` via `snd_pcm_delay`, giving the servo an *exact* skew
-measurement (§3.5).
+```go
+// alsaBackend writes canonical PCM (s16le 48k stereo) straight to an ALSA PCM
+// device via runtime-loaded libasound (D34, internal/dl). It is the one v1
+// backend that also implements contracts.DelayReporter (snd_pcm_delay), giving
+// the servo an *exact* skew measurement (§3.5).
+type alsaBackend struct {
+	lib    *dl.Lib   // libasound handle (held for the device lifetime)
+	pcm    uintptr   // snd_pcm_t* from snd_pcm_open
+	log    *slog.Logger
+	closed bool
+
+	// bound symbols (purego); see init() / dl.Func.
+	open      func(pcmp *uintptr, name string, stream, mode int32) int32
+	setParams func(pcm uintptr, fmt, access, channels, rate, softResample, latencyUs int32) int32
+	writei    func(pcm uintptr, buf *byte, frames uint) int  // returns frames or -errno
+	recover   func(pcm uintptr, err, silent int32) int32
+	delay     func(pcm uintptr, delayp *int) int32           // delayp in frames
+	close      func(pcm uintptr) int32
+	strerror  func(err int32) string
+}
+
+func newAlsaBackend(log *slog.Logger) (*alsaBackend, error) // dl.Open + snd_pcm_open + set_params
+func (b *alsaBackend) Write(frame []byte) error             // snd_pcm_writei, recover on xrun
+func (b *alsaBackend) DeviceDelay() (int64, bool)           // snd_pcm_delay frames -> ns
+func (b *alsaBackend) Close() error                         // snd_pcm_close
+```
+
+`backend_alsa.go` carries **no build tag** (D32). Its `init()` calls
+`dl.Open([]string{"libasound.so.2","libasound.so"}, …)` to dlsym-verify the
+required symbols and, only on success, `Register("alsa", newAlsaBackend)`. A
+missing or wrong-version library yields `dl.ErrUnavailable` (soft), the name
+"alsa" is never registered, and the node degrades cleanly. The factory, when
+invoked:
+
+- **Open**: `snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0)`.
+- **Params**: `snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE,
+  SND_PCM_ACCESS_RW_INTERLEAVED, 2, 48000, 1 /*soft_resample*/,
+  latencyUs)` where `latencyUs ≈ bufferMs·1000` — the device buffer target
+  matches the playout lead.
+- **Write**: `snd_pcm_writei(pcm, &frame[0], 960)` per canonical 20 ms period
+  (`FrameSamples` = 960 frames/channel); on `-EPIPE` (underrun) or `-ESTRPIPE`
+  (suspend) call `snd_pcm_recover(pcm, err, 1)` and retry once, else log and
+  drop the frame (the scheduler keeps cadence, §3.4).
+- **DeviceDelay**: `snd_pcm_delay(pcm, &frames)` → `frames·FrameNanos/FrameSamples`
+  ns, `ok=true`; this is the `contracts.DelayReporter` path the servo prefers
+  (§3.5). On error return `ok=false` so the servo falls back to inference.
+- **Close**: `snd_pcm_close(pcm)`; idempotent via `closed`.
+
+All ALSA calls run on the scheduler goroutine (the only caller of `Write`),
+except `Close` which guards on `closed` under the Playout mutex like the other
+backends.
 
 ### 2.4 `jitter.go`
 
@@ -601,12 +658,14 @@ servo):
 
 The servo's accuracy depends on whether the backend reports queued audio:
 
-- **DelayReporter present** (alsa, v1.1 — `snd_pcm_delay`): `consumed` counts
+- **DelayReporter present** (alsa, v1 — `snd_pcm_delay`): `consumed` counts
   samples *written*, and `DeviceDelay()` gives the still-queued ns; subtracting
   the queued samples yields exactly what the speaker has *emitted*, so the skew
-  estimate is exact and absolute inter-room accuracy is tight.
-- **DelayReporter absent** (exec pipes, null, file — the default build): the
-  servo uses **backpressure inference** — it equates "samples consumed" with
+  estimate is exact and absolute inter-room accuracy is tight. This is now a
+  **real v1 path** taken whenever `auto` selects (or the user names) the
+  runtime-loaded alsa backend (D34) — not just a reserved seam.
+- **DelayReporter absent** (exec pipes, null, file — when alsa isn't the chosen
+  backend): the servo uses **backpressure inference** — it equates "samples consumed" with
   "samples written", treating the pipe/device buffer as a fixed latency. This is
   correct *in the rate domain* (the long-run write rate equals the DAC consume
   rate once the pipe is full, because a full pipe back-pressures `Write`), which
@@ -708,9 +767,9 @@ across two mutexes.
   advance. Never blocks.
 - **Duplicate seq (FEC double-delivery)**: `insert` overwrites idempotently; an
   already-popped seq is `< nextSeq` → dropped as late, never replayed.
-- **DelayReporter absent (default build)**: servo uses backpressure inference
+- **DelayReporter absent (exec/null/file)**: servo uses backpressure inference
   (§3.5); accuracy capped at ±10–20 ms absolute, drift still cancelled. The exec
-  backend deliberately omits `DeviceDelay`.
+  backend deliberately omits `DeviceDelay`; alsa supplies it (§3.5).
 - **Backend write error (player died)**: logged once; scheduler keeps advancing
   (cadence preserved, `Played` simply doesn't increment). Auto-respawn is out of
   scope (v1 simplicity). `consumed` still advances so the servo doesn't see a fake
@@ -730,9 +789,11 @@ across two mutexes.
 - **Null backend pacing vs scheduler sleep**: the scheduler already sleeps to each
   slot deadline; null pacing is a secondary 20 ms cadence guard for realism. Tests
   disable null pacing and drive a fake clock + fake `now` for determinism.
-- **`alsa` selected in default build**: `Open("alsa")` errors ("not registered");
-  K reports the error. In an alsa-tagged v1 build the factory still errors ("not
-  implemented in v1"); only v1.1 returns a working backend.
+- **`alsa` selected without libasound**: the `dl.Open` probe failed at `init()`,
+  so "alsa" is not registered; `Open("alsa")` errors ("not registered") and K
+  reports it. `auto` skips alsa and degrades to exec → null. Where libasound
+  loads, `Open("alsa")` returns a working backend; only a device-open failure
+  (`snd_pcm_open` error) makes an explicit `alsa` request error.
 
 ---
 
@@ -784,9 +845,12 @@ across two mutexes.
 - `TestOpenAutoDegradesToNull` — PATH emptied, `Open("auto")` → null, no error.
 - `TestOpenExecExplicitNoToolDegrades` — `Open("exec")` no tool → null + WARN.
 - `TestOpenUnknownErrors` — `Open("bogus")` → error.
-- `TestOpenAlsaDefaultBuildErrors` — default build: `Open("alsa")` → error
-  (not registered).
-- `TestBackendNamesSorted` — default build lists exactly {exec, file, null}.
+- `TestOpenAlsaUnloadableErrors` — when libasound is not loadable (the dl probe
+  failed, "alsa" unregistered): `Open("alsa")` → error (not registered), and
+  `Open("auto")` skips alsa, degrading to exec → null without error.
+- `TestBackendNamesIncludesAlsaWhenLoaded` — `t.Skip` unless libasound is
+  loadable; then `BackendNames()` contains "alsa". The base set is always
+  {exec, file, null}, sorted.
 - `TestHasPlayback` — boolean without spawning (smoke; value depends on PATH).
 
 `backend_test.go`
@@ -794,6 +858,11 @@ across two mutexes.
   `TestNullBackendPaceOff`, `TestFileBackendAppends`, `TestFileBackendBadPath`,
   `TestExecBackendSkippedIfNoTool` (t.Skip unless a tool on PATH; else spawn,
   write a few frames, Close cleanly).
+- `TestAlsaBackendSkippedIfNoLib` — `t.Skip` unless `dl.Open` of `libasound.so.2`
+  succeeds; else open "default", write a few 960-frame periods, assert
+  `DeviceDelay()` returns `ok=true`, Close cleanly. CI without libasound skips it;
+  the dl-probe-failure path (registry omits "alsa", auto degrades to exec) is
+  covered by `TestOpenAlsaUnloadableErrors`.
 
 `sink_test.go` (fake `contracts.Clock` + injected `now`; null backend, pace off)
 - `TestPlayoutBasicInOrder` — Reset, push 10 in-order frames → 10 written in
@@ -848,13 +917,14 @@ All tests use the null/file backends (or a fake `contracts.Backend`/
   0 until settled) and `Buffered` (jitter depth) in addition to
   Played/Silence/LateDrop/StaleGen/Synced — all produced exactly by the scheduler
   + servo (D25, §9.1 / D19 envelope).
-- `contracts.Backend` (Write/Close) is implemented by `exec`/`null`/`file`, plus
-  the build-tagged `alsa` seam; the registry (D27) keeps backend selection in one
-  place with `ENSEMBLE_OUTPUT` (D2/D3). `capabilities.backends` = `BackendNames()`,
-  `capabilities.playback` = `HasPlayback()` (assembled by K, D3).
-- `contracts.DelayReporter` is **consumed** here (type-asserted once at `New`),
-  not implemented in the default build; the alsa backend (v1.1) will be the one
-  implementer. The servo's `DelayReporter`-vs-backpressure split is §3.5.
+- `contracts.Backend` (Write/Close) is implemented by `alsa`/`exec`/`null`/`file`,
+  the alsa one runtime-loaded via `internal/dl` (D32/D34, no build tag); the
+  registry (D27) keeps backend selection in one place with `ENSEMBLE_OUTPUT`
+  (D2/D3). `capabilities.backends` = `BackendNames()` (includes "alsa" only when
+  libasound loaded), `capabilities.playback` = `HasPlayback()` (assembled by K, D3).
+- `contracts.DelayReporter` is **consumed** here (type-asserted once at `New`) and
+  **implemented** by the alsa backend (v1) via `snd_pcm_delay`; exec/null/file do
+  not implement it. The servo's `DelayReporter`-vs-backpressure split is §3.5.
 - `contracts.Clock.MasterToLocal` is the coarse scheduling primitive;
   `MasterNow` feeds the servo's master-elapsed term and the live `Synced` flag
   (cached from the latest `ok`, refreshed each tick and on `Stats()` via a
