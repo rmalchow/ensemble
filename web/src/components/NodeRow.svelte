@@ -275,18 +275,22 @@
 
   /* tri-state feature chips (D40): three UNMISTAKABLE states. */
   .chip.feat {
+    /* match the passive FORMATS chips exactly (app.css .chip: 11px / 0 8px),
+       with button UA defaults zeroed — the pills must not read "button". */
+    appearance: none;
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font: inherit;
-    font-size: 0.68rem;
-    line-height: 1.3;
+    margin: 0;
+    min-height: 0;
+    font-size: 11px;
+    line-height: 1.5;
     border: 1px solid transparent;
-    border-radius: 999px;
-    padding: 0 7px;
+    border-radius: 10px;
+    padding: 0 8px;
   }
   .chip.feat .glyph {
-    font-size: 0.75em;
+    font-size: 8px;
     line-height: 1;
   }
 
