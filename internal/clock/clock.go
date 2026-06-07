@@ -20,12 +20,20 @@ import (
 // for t4 when following localhost (so master-vs-self offset ~ 0).
 type nowFunc func() int64
 
-// monoEpoch anchors monoNow so it returns monotonic nanoseconds.
-var monoEpoch = time.Now()
+// monoEpoch anchors monoNow: WALL time at process start plus a monotonic
+// reading since. The clock ticks monotonically (immune to NTP steps — only
+// the start anchor comes from the wall), but cross-node offsets become the
+// real wall skew between hosts (µs–ms on a synced LAN) instead of arbitrary
+// process-start deltas (which read as alarming multi-second "offsets" in
+// logs while being perfectly harmless to the translation math).
+var (
+	monoEpoch = time.Now()
+	monoWall0 = monoEpoch.UnixNano()
+)
 
-// monoNow is the production clock: monotonic nanoseconds since process start.
+// monoNow is the production clock: wall-anchored monotonic nanoseconds.
 func monoNow() int64 {
-	return int64(time.Since(monoEpoch))
+	return monoWall0 + int64(time.Since(monoEpoch))
 }
 
 // MonoNow exposes the package's monotonic clock. EVERY local-time value that
