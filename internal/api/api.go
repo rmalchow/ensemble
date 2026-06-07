@@ -29,10 +29,16 @@ type Config struct {
 	// active backend kind is alsa (otherwise a no-op — persist+replicate still
 	// happen). nil makes the live-apply step a no-op.
 	ApplyOutputDevice func(device string)
-	Ports             PortsResp    // actually-bound ports (§2), surfaced by /api/status
-	Listener          net.Listener // HTTP listener from netx.BindTCP (K owns binding)
-	DistFS            fs.FS        // SPA build FS = web.DistFS (D15)
-	Log               *slog.Logger
+	// ApplyDisabled applies the operator-disabled feature list live (D40): when
+	// "playback" is (un)disabled it swaps the sink to the null backend (or back to
+	// the configured device/backend). Wired by main (K); nil makes the live-apply
+	// step a no-op (persist+replicate still happen). opus/input disabling needs no
+	// live swap — effective caps gate new sessions and the constructors refuse.
+	ApplyDisabled func(disabled []string)
+	Ports         PortsResp    // actually-bound ports (§2), surfaced by /api/status
+	Listener      net.Listener // HTTP listener from netx.BindTCP (K owns binding)
+	DistFS        fs.FS        // SPA build FS = web.DistFS (D15)
+	Log           *slog.Logger
 }
 
 // Server is the Echo HTTP server: REST + WebSocket + proxy + SPA.
@@ -86,6 +92,8 @@ func New(cfg Config) *Server {
 	g.POST("/group/master", s.handleGroupMaster)
 	g.POST("/play", s.handlePlay)
 	g.POST("/stop", s.handleStop)
+	g.POST("/pause", s.handlePause)
+	g.POST("/resume", s.handleResume)
 	g.GET("/group/settings", s.handleGetSettings)
 	g.POST("/group/settings", s.handleSetSettings)
 	g.POST("/tone", s.handleTone)

@@ -23,6 +23,8 @@ type Cluster interface {
 	SetOutputDelayMs(ms int)
 	// SetOutputDevice sets THIS node's selected ALSA output device (D37).
 	SetOutputDevice(device string)
+	// SetDisabled sets THIS node's operator-disabled feature list (D40).
+	SetDisabled(disabled []string)
 	// Observe records that we received traffic from peer at ip (§3.1).
 	Observe(peer id.ID, ip netip.Addr)
 	// DialCandidates returns dial IPs for peer, ordered best-first per §3.1.
@@ -48,6 +50,10 @@ type Group interface {
 	Play(ctx context.Context, uri string) error
 	// Stop stops THIS node's group playback; master only.
 	Stop(ctx context.Context) error
+	// Pause freezes THIS node's group playback; master only (D39).
+	Pause(ctx context.Context) error
+	// Resume un-freezes THIS node's paused group playback; master only (D39).
+	Resume(ctx context.Context) error
 	// Settings returns this node's group's settings (GET /api/group/settings).
 	Settings() contracts.GroupSettings
 	// SetSettings updates this node's group's settings; master only (POST).
@@ -67,9 +73,10 @@ type Media interface {
 // then replicates via the Cluster setters and applies live via SinkControl.
 type NodeConfig interface {
 	Rename(name string) error
-	SetVolume(v float64) error      // D35
-	SetOutputDelayMs(ms int) error  // D36
-	SetOutputDevice(d string) error // D37
+	SetVolume(v float64) error           // D35
+	SetOutputDelayMs(ms int) error       // D36
+	SetOutputDevice(d string) error      // D37
+	SetDisabled(disabled []string) error // D40
 }
 
 // SinkControl is the live-apply side of PATCH /api/node for volume/output-delay

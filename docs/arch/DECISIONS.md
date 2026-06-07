@@ -323,6 +323,88 @@ new device and calls `Playout.SwapBackend(b)` (under the sink mutex: close old,
 set new, re-assert `DelayReporter`, log `output backend swapped`). A brief audio
 blip is accepted; the session is **not** restarted. (A/C/E/I/J/K)
 
+## Per-group play/pause (user addition)
+
+**D39 — per-group play/pause toggle**. A new playback state `paused` joins
+`idle`/`playing`, written only by the master into the replicated playback record.
+- **Pause** (`POST /api/pause`, master-only; 409 `not_playing` when nothing is
+  playing or already paused): the master freezes the session — it stops releasing
+  frames (the 20 ms ticker keeps ticking but reads/publishes nothing) yet KEEPS
+  the media source open and the session/generation alive, with the position
+  frozen. It writes `playback.state="paused"`. The member-side session gating
+  (group/watch.go) already treats only `state=="playing"` as active, so flipping
+  to `paused` cleanly unsubscribes every member (BYE) and `Disarm()`s their sinks
+  through the existing path; the master leaves its own loopback subscription too
+  and broadcasts RECONFIG/stop so any still-attached subscriber drops.
+- **Resume** (`POST /api/resume`, master-only; 409 `not_paused` when not paused):
+  the master bumps the generation and re-anchors `sessionStart =
+  LocalToMaster(now)+lead`; the frame index resets to 0 and the source continues
+  from where it stopped, so **audio is contiguous though pts restart with the new
+  generation** (pts stay monotonic within a generation; the gen bump is the
+  re-anchor boundary that receivers already handle). It re-arms the source session
+  (`StartSession`), re-points local plumbing, resumes releasing, and writes
+  `playback.state="playing"`.
+- **Live sources** (`Live()==true`): pause discards whatever arrives meanwhile
+  (the live readahead already drops on overflow); resume returns at the live edge.
+- The UI playback bar is play/pause aware: ⏸ pause while playing, ▶ resume + a
+  paused indicator while paused; stop stays in both. (spec §4 playback record,
+  §9.1 routes, §11 updated.)
+
+## Tri-state feature display + per-node disable toggles (user addition)
+
+**D40 — operator-disabled features (effective capabilities)**. A node may turn
+off three features locally: `playback` (output), `opus` (codec), `input`
+(capture). Persistence + replication mirror D35/D37:
+- **node.json** gains `disabled:[…]` (presence-aware decode, default empty;
+  `config.Store.SetDisabled([]string)` / `config.Config.SetDisabled`, normalized
+  to the valid subset, deduped + sorted, via the same atomic temp+rename).
+- **Replicated node record** carries the operator's `disabled` list AND the
+  PROBED capabilities (K passes probed caps as today). Cluster setter
+  `SetDisabled([]string)` (a D14 extension) bumps version + broadcasts.
+- **Effective capabilities** = probed − disabled, computed in ONE place
+  (`cluster.effectiveCaps`, applied in `nodeView` when projecting `NodeView`):
+  disabling `playback` → `Playback:false`; `opus` → removed from `Codecs`;
+  `input` → removed from `Sources`. Backends/formats untouched; probed caps are
+  never mutated, so re-enabling restores them. `NodeView` also exposes the raw
+  `Disabled []string` so the UI can render tri-state.
+- **API**: `PATCH /api/node {disabled}` validates a subset of
+  `{playback,opus,input}` (400 `bad_disabled` otherwise), then persist → replicate
+  → apply. The live apply (`ApplyDisabled`, K) swaps the sink to the **null**
+  backend when `playback` is newly disabled and reopens the configured
+  device/backend when re-enabled (mirroring D37's `ApplyOutputDevice`); `opus`/
+  `input` need no swap. Belt-and-suspenders, the LOCAL constructors refuse too:
+  K's media factory rejects an `input:` URI and its opus factory returns
+  `dl.ErrUnavailable` (→ `ErrNoOpus`) while disabled, and the member deliver path
+  drops opus frames — but the primary gate is the effective-caps subtraction
+  (master-side D33 validation rejects an opus session including a node that lacks
+  the `opus` cap).
+- **UI**: capability chips for playback/opus/input are tri-state — available
+  (normal, click to disable), unavailable (dimmed + struck, from probing, NOT
+  clickable), disabled (amber/off, click to re-enable). pcm/wav/mp3/flac stay
+  plain non-toggleable. (spec §1, §9.1 PATCH row updated.)
+
+## Persisted cluster config (user addition)
+
+**D41 — persisted cluster lookup tables**. The long-lived lookup state — the
+group **NAMES** map and the group **SETTINGS** map, each as FULL records (incl.
+`version` + `writer` so the LWW merge applies) — is persisted to
+`DATA_DIR/cluster.json`. NOT node records, NOT playback (runtime/replicated).
+- **Load** at cluster `New` (before memberlist join) into the doc; once gossip
+  starts, the exact existing LWW rule reconciles loaded-vs-gossiped (an older
+  loaded version loses to a newer gossiped record, and vice-versa).
+- **Save** debounced — a `markDirty` from any names/settings change (setter or
+  gossiped merge) (re)arms a ~2 s timer; a change storm coalesces to a bounded
+  number of writes — plus a final save on `Close`. Atomic temp+fsync+rename in
+  the same dir, like `node.json`.
+- A **missing** file is a clean empty start; a **corrupt** file warns and starts
+  empty (never fatal). The path is wired via `cluster.Config.StatePath` (K passes
+  `filepath.Join(cfg.DataDir, "cluster.json")`); an empty path (tests) disables
+  persistence entirely. A `SaveDebounce` config + `saveNotify` test hook (injected
+  timing) make the debounce deterministic in tests.
+- **Purge horizon**: group names + settings are exempt from the 30-day purge
+  entirely — the lookup table is kept indefinitely (spec §4 updated). Node
+  records + playback still age out at 30 days.
+
 ## Confirmed as designed (no change)
 
 - C's two-mutex exception (doc + liveness) with a never-hold-both rule. (C)

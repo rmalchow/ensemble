@@ -94,6 +94,9 @@ export function setOutputDevice(nodeId, outputDevice) {
 export function testTone(nodeId) {
   return toasted(req("POST", base(nodeId) + "/tone"));
 }
+export function setDisabled(nodeId, disabled) {
+  return toasted(req("PATCH", base(nodeId) + "/node", { disabled }));
+}
 
 // --- group membership (issued ON the acting node) ---
 export function follow(nodeId, targetId) {
@@ -122,6 +125,12 @@ export function play(nodeId, uri) {
 }
 export function stop(masterId) {
   return toasted(req("POST", base(masterId) + "/stop"));
+}
+export function pause(masterId) {
+  return toasted(req("POST", base(masterId) + "/pause"));
+}
+export function resume(masterId) {
+  return toasted(req("POST", base(masterId) + "/resume"));
 }
 
 // --- group settings (master only for POST) ---

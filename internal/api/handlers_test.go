@@ -170,6 +170,48 @@ func TestRenameNode(t *testing.T) {
 	}
 }
 
+func TestPatchNodeDisabled(t *testing.T) {
+	self := id.New()
+	cfg, fc, _ := baseConfig(self)
+	nc := &fakeNodeConfig{}
+	cfg.NodeCfg = nc
+	var applied [][]string
+	cfg.ApplyDisabled = func(d []string) { applied = append(applied, d) }
+	_, ts := testServer(t, cfg)
+
+	resp := doJSON(t, ts, http.MethodPatch, "/api/node", map[string]any{"disabled": []string{"playback", "opus"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if len(nc.disabled) != 1 || len(nc.disabled[0]) != 2 {
+		t.Errorf("cfg disabled = %v", nc.disabled)
+	}
+	if len(fc.setDisabled) != 1 {
+		t.Errorf("cluster setDisabled = %v", fc.setDisabled)
+	}
+	if len(applied) != 1 {
+		t.Errorf("ApplyDisabled not called: %v", applied)
+	}
+}
+
+func TestPatchNodeDisabledRejectsBadFeature(t *testing.T) {
+	self := id.New()
+	cfg, fc, _ := baseConfig(self)
+	nc := &fakeNodeConfig{}
+	cfg.NodeCfg = nc
+	_, ts := testServer(t, cfg)
+
+	resp := doJSON(t, ts, http.MethodPatch, "/api/node", map[string]any{"disabled": []string{"playback", "bogus"}})
+	e := decodeErr(t, resp)
+	if resp.StatusCode != 400 || e.Error != "bad_disabled" {
+		t.Fatalf("status=%d err=%q", resp.StatusCode, e.Error)
+	}
+	if len(nc.disabled) != 0 || len(fc.setDisabled) != 0 {
+		t.Errorf("nothing should be persisted/replicated on invalid feature")
+	}
+}
+
 func TestRenameEmptyName(t *testing.T) {
 	self := id.New()
 	cfg, fc, _ := baseConfig(self)
@@ -616,6 +658,52 @@ func TestStopNonMaster(t *testing.T) {
 	resp := doJSON(t, ts, http.MethodPost, "/api/stop", nil)
 	e := decodeErr(t, resp)
 	if resp.StatusCode != 409 || e.Error != "not_master" {
+		t.Fatalf("status=%d err=%q", resp.StatusCode, e.Error)
+	}
+}
+
+func TestPauseOK(t *testing.T) {
+	self := id.New()
+	cfg, _, fg := baseConfig(self)
+	_, ts := testServer(t, cfg)
+	resp := doJSON(t, ts, http.MethodPost, "/api/pause", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || fg.pauseN != 1 {
+		t.Fatalf("status=%d n=%d", resp.StatusCode, fg.pauseN)
+	}
+}
+
+func TestPauseNotPlaying(t *testing.T) {
+	self := id.New()
+	cfg, _, fg := baseConfig(self)
+	fg.pauseErr = ErrNotPlaying
+	_, ts := testServer(t, cfg)
+	resp := doJSON(t, ts, http.MethodPost, "/api/pause", nil)
+	e := decodeErr(t, resp)
+	if resp.StatusCode != 409 || e.Error != "not_playing" {
+		t.Fatalf("status=%d err=%q", resp.StatusCode, e.Error)
+	}
+}
+
+func TestResumeOK(t *testing.T) {
+	self := id.New()
+	cfg, _, fg := baseConfig(self)
+	_, ts := testServer(t, cfg)
+	resp := doJSON(t, ts, http.MethodPost, "/api/resume", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || fg.resumeN != 1 {
+		t.Fatalf("status=%d n=%d", resp.StatusCode, fg.resumeN)
+	}
+}
+
+func TestResumeNotPaused(t *testing.T) {
+	self := id.New()
+	cfg, _, fg := baseConfig(self)
+	fg.resumeErr = ErrNotPaused
+	_, ts := testServer(t, cfg)
+	resp := doJSON(t, ts, http.MethodPost, "/api/resume", nil)
+	e := decodeErr(t, resp)
+	if resp.StatusCode != 409 || e.Error != "not_paused" {
 		t.Fatalf("status=%d err=%q", resp.StatusCode, e.Error)
 	}
 }

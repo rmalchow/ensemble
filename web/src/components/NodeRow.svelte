@@ -7,6 +7,7 @@
     setVolume,
     setOutputDelay,
     setOutputDevice,
+    setDisabled,
     testTone,
   } from "../lib/api.js";
   import EditableText from "./EditableText.svelte";
@@ -54,6 +55,40 @@
     if (dev === outputDevice) return;
     setOutputDevice(node.id, dev).catch(() => {});
   }
+
+  // Tri-state feature chips (D40): playback/opus/input are operator-toggleable.
+  // `capabilities` is EFFECTIVE (probed minus disabled); `disabled` lists what
+  // the operator turned off. For feature F:
+  //   - disabled    → F in node.disabled (amber, clickable to re-enable)
+  //   - available   → effective caps has F (normal, clickable to disable)
+  //   - unavailable → neither (probed off on this host; dimmed, NOT clickable)
+  let disabledSet = $derived(new Set(node.disabled ?? []));
+
+  function effHas(feature) {
+    if (feature === "playback") return !!caps.playback;
+    if (feature === "opus") return (caps.codecs ?? []).includes("opus");
+    if (feature === "input") return (caps.sources ?? []).includes("input");
+    return false;
+  }
+
+  // state(feature) → "disabled" | "available" | "unavailable"
+  function featState(feature) {
+    if (disabledSet.has(feature)) return "disabled";
+    return effHas(feature) ? "available" : "unavailable";
+  }
+
+  // Toggle a feature's disabled membership and PATCH the new list. Unavailable
+  // chips are inert (probed off — nothing to toggle).
+  function toggleFeature(feature) {
+    const st = featState(feature);
+    if (st === "unavailable") return;
+    const next = new Set(disabledSet);
+    if (st === "disabled") next.delete(feature);
+    else next.add(feature);
+    setDisabled(node.id, [...next]).catch(() => {});
+  }
+
+  let features = ["playback", "opus", "input"];
 </script>
 
 <div class="noderow card" class:stale={!node.alive}>
@@ -85,8 +120,26 @@
   {/if}
 
   <div class="row wrap">
-    <span class="chip">playback {caps.playback ? "yes" : "no"}</span>
-    {#each caps.codecs ?? [] as c}<span class="chip">{c}</span>{/each}
+    {#each features as f (f)}
+      {@const st = featState(f)}
+      <button
+        type="button"
+        class="chip feat {st}"
+        disabled={st === "unavailable"}
+        title={st === "unavailable"
+          ? `${f} not available on this host`
+          : st === "disabled"
+            ? `${f} disabled — click to enable`
+            : `${f} enabled — click to disable`}
+        onclick={() => toggleFeature(f)}
+      >
+        {f}{#if st === "disabled"} (off){/if}
+      </button>
+    {/each}
+    <span class="sep"></span>
+    {#each (caps.codecs ?? []).filter((c) => c !== "opus") as c}
+      <span class="chip">{c}</span>
+    {/each}
     {#each caps.formats ?? [] as f}<span class="chip">{f}</span>{/each}
   </div>
 
@@ -150,5 +203,32 @@
   }
   .device select {
     max-width: 16rem;
+  }
+  /* tri-state feature chips (D40) */
+  .chip.feat {
+    cursor: pointer;
+    border: 1px solid transparent;
+    font: inherit;
+  }
+  .chip.feat.available {
+    /* normal look; subtle affordance via hover */
+  }
+  .chip.feat.available:hover {
+    border-color: currentColor;
+  }
+  .chip.feat.disabled {
+    background: #b45309;
+    color: #fff;
+  }
+  .chip.feat.unavailable {
+    cursor: default;
+    opacity: 0.45;
+    text-decoration: line-through;
+  }
+  .sep {
+    width: 1px;
+    align-self: stretch;
+    background: var(--border, #ccc);
+    margin: 0 2px;
   }
 </style>

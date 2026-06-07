@@ -135,6 +135,81 @@ func TestSetOutputDeviceNoOpWhenUnchanged(t *testing.T) {
 	}
 }
 
+func TestSetDisabledSubtractsEffectiveCaps(t *testing.T) {
+	c, err := New(Config{
+		Self:       id.New(),
+		Name:       "n",
+		GossipPort: 7946,
+		Caps: contracts.Capabilities{
+			Playback: true,
+			Codecs:   []string{"pcm", "opus"},
+			Sources:  []string{"file", "http", "input"},
+			Backends: []string{"alsa", "exec", "null"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Probed (no disabled): full caps.
+	caps := c.Snapshot().Nodes[0].Capabilities
+	if !caps.Playback || !hasStr(caps.Codecs, "opus") || !hasStr(caps.Sources, "input") {
+		t.Fatalf("probed caps wrong: %+v", caps)
+	}
+
+	v0 := ownVersion(c)
+	c.SetDisabled([]string{"playback", "opus", "input"})
+	if ownVersion(c) != v0+1 {
+		t.Fatal("version not bumped")
+	}
+	nv := c.Snapshot().Nodes[0]
+	if !equalStr(nv.Disabled, []string{"playback", "opus", "input"}) {
+		t.Fatalf("disabled = %v", nv.Disabled)
+	}
+	eff := nv.Capabilities
+	if eff.Playback {
+		t.Error("playback not subtracted")
+	}
+	if hasStr(eff.Codecs, "opus") {
+		t.Error("opus not subtracted from codecs")
+	}
+	if hasStr(eff.Sources, "input") {
+		t.Error("input not subtracted from sources")
+	}
+	// Backends/formats unaffected; pcm stays.
+	if !hasStr(eff.Codecs, "pcm") || !hasStr(eff.Backends, "alsa") {
+		t.Errorf("unrelated caps disturbed: %+v", eff)
+	}
+
+	// Re-enable: full caps restored (probed never mutated).
+	c.SetDisabled(nil)
+	eff2 := c.Snapshot().Nodes[0].Capabilities
+	if !eff2.Playback || !hasStr(eff2.Codecs, "opus") || !hasStr(eff2.Sources, "input") {
+		t.Fatalf("re-enable did not restore: %+v", eff2)
+	}
+}
+
+func equalStr(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasStr(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func TestVolumeAndDelayMergeFromRemote(t *testing.T) {
 	self := id.New()
 	peer := id.New()

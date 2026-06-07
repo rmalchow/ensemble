@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"ensemble/internal/id"
@@ -27,6 +28,10 @@ const (
 // defaultOutputDevice is the ALSA device selected when node.json omits it (D37).
 const defaultOutputDevice = "default"
 
+// disableableFeatures is the set an operator may disable per node (D40). The
+// store normalizes any persisted list down to this set, deduped + sorted.
+var disableableFeatures = map[string]bool{"playback": true, "opus": true, "input": true}
+
 // maxOutputDeviceLen bounds a hand-edited device id (matches the API cap).
 const maxOutputDeviceLen = 64
 
@@ -46,22 +51,24 @@ var (
 // following, observed) is runtime/replicated state owned by the cluster piece
 // (C), NOT stored here.
 type NodeFile struct {
-	ID            id.ID   `json:"id"`            // immutable, 32-hex (id.ID TextMarshaler)
-	Name          string  `json:"name"`          // renameable
-	Volume        float64 `json:"volume"`        // playback gain 0.0–1.0, default 1.0 (D35)
-	OutputDelayMs int     `json:"outputDelayMs"` // hardware latency calibration, default 0, clamp ±500 (D36)
-	OutputDevice  string  `json:"outputDevice"`  // selected ALSA device id, default "default" (D37)
+	ID            id.ID    `json:"id"`            // immutable, 32-hex (id.ID TextMarshaler)
+	Name          string   `json:"name"`          // renameable
+	Volume        float64  `json:"volume"`        // playback gain 0.0–1.0, default 1.0 (D35)
+	OutputDelayMs int      `json:"outputDelayMs"` // hardware latency calibration, default 0, clamp ±500 (D36)
+	OutputDevice  string   `json:"outputDevice"`  // selected ALSA device id, default "default" (D37)
+	Disabled      []string `json:"disabled"`      // operator-disabled features (D40): subset of {playback,opus,input}
 }
 
 // rawNodeFile is the presence-aware decode shape: pointer fields tell "absent"
 // (→ default) from an explicit value (e.g. volume 0.0 is a real, muted setting,
 // D35) — the JSON zero value alone cannot distinguish the two.
 type rawNodeFile struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Volume        *float64 `json:"volume"`
-	OutputDelayMs *int     `json:"outputDelayMs"`
-	OutputDevice  *string  `json:"outputDevice"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Volume        *float64  `json:"volume"`
+	OutputDelayMs *int      `json:"outputDelayMs"`
+	OutputDevice  *string   `json:"outputDevice"`
+	Disabled      *[]string `json:"disabled"`
 }
 
 // Store owns a single node.json file. One Store per node. Methods are safe for
@@ -124,9 +131,13 @@ func (s *Store) LoadOrCreate(initialName string) (NodeFile, error) {
 	if raw.OutputDevice != nil {
 		nf.OutputDevice = *raw.OutputDevice
 	}
+	if raw.Disabled != nil {
+		nf.Disabled = *raw.Disabled
+	}
 	nf.Volume = clampVolume(nf.Volume)
 	nf.OutputDelayMs = clampDelayMs(nf.OutputDelayMs)
 	nf.OutputDevice = normalizeDevice(nf.OutputDevice)
+	nf.Disabled = normalizeDisabled(nf.Disabled)
 	return nf, nil
 }
 
@@ -187,6 +198,16 @@ func (s *Store) SetOutputDevice(nodeID id.ID, device string) (NodeFile, error) {
 	})
 }
 
+// SetDisabled writes the operator-disabled feature list while preserving the
+// other fields, via the same atomic replace (D40). The id argument MUST equal the
+// persisted id (ErrIDImmutable on mismatch). The list is normalized (subset of
+// {playback,opus,input}, deduped + sorted) before write.
+func (s *Store) SetDisabled(nodeID id.ID, disabled []string) (NodeFile, error) {
+	return s.writeAtomic(nodeID, func(nf *NodeFile) {
+		nf.Disabled = normalizeDisabled(disabled)
+	})
+}
+
 // writeAtomic re-reads the current NodeFile, asserts the id matches, applies the
 // single-field mutate, and atomically replaces node.json. On any error the old
 // file is untouched.
@@ -202,6 +223,7 @@ func (s *Store) writeAtomic(nodeID id.ID, mutate func(*NodeFile)) (NodeFile, err
 	cur.Volume = clampVolume(cur.Volume)
 	cur.OutputDelayMs = clampDelayMs(cur.OutputDelayMs)
 	cur.OutputDevice = normalizeDevice(cur.OutputDevice)
+	cur.Disabled = normalizeDisabled(cur.Disabled)
 	if err := s.write(cur); err != nil {
 		return NodeFile{}, err
 	}
@@ -272,6 +294,27 @@ func normalizeDevice(d string) string {
 		d = d[:maxOutputDeviceLen]
 	}
 	return d
+}
+
+// normalizeDisabled keeps only valid disableable features (D40), deduped and
+// sorted for a stable on-disk + replicated representation. Returns nil for an
+// empty result so the JSON encodes as a present-but-empty (or absent) list
+// without churn.
+func normalizeDisabled(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range in {
+		f = strings.TrimSpace(f)
+		if disableableFeatures[f] && !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func clampDelayMs(ms int) int {

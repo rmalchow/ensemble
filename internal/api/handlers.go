@@ -116,7 +116,8 @@ func (s *Server) handlePatchNode(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return failCode(c, http.StatusBadRequest, "bad_request", "")
 	}
-	if req.Name == nil && req.Volume == nil && req.OutputDelayMs == nil && req.OutputDevice == nil {
+	if req.Name == nil && req.Volume == nil && req.OutputDelayMs == nil &&
+		req.OutputDevice == nil && req.Disabled == nil {
 		return failCode(c, http.StatusBadRequest, "empty_patch", "")
 	}
 
@@ -134,6 +135,15 @@ func (s *Server) handlePatchNode(c echo.Context) error {
 		dev := strings.TrimSpace(*req.OutputDevice)
 		if dev == "" || len(dev) > 64 || !s.knownOutputDevice(dev) {
 			return failCode(c, http.StatusBadRequest, "bad_device", "")
+		}
+	}
+	if req.Disabled != nil {
+		for _, f := range *req.Disabled {
+			switch f {
+			case "playback", "opus", "input":
+			default:
+				return failCode(c, http.StatusBadRequest, "bad_disabled", "")
+			}
 		}
 	}
 
@@ -178,6 +188,18 @@ func (s *Server) handlePatchNode(c echo.Context) error {
 			s.cfg.ApplyOutputDevice(dev)
 		}
 		s.log.Info("node mutation", append(auditAttrs(c, "outputDevice"), "outputDevice", dev)...)
+	}
+	if req.Disabled != nil {
+		dis := *req.Disabled
+		if err := s.cfg.NodeCfg.SetDisabled(dis); err != nil {
+			s.log.Warn("disabled persist failed", "err", err)
+			return failCode(c, http.StatusInternalServerError, "internal_error", "")
+		}
+		s.cfg.Cluster.SetDisabled(dis)
+		if s.cfg.ApplyDisabled != nil {
+			s.cfg.ApplyDisabled(dis)
+		}
+		s.log.Info("node mutation", append(auditAttrs(c, "disabled"), "disabled", dis)...)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -355,6 +377,26 @@ func (s *Server) handleStop(c echo.Context) error {
 		return s.fail(c, err)
 	}
 	s.log.Info("ui mutation", auditAttrs(c, "stop")...)
+	return c.NoContent(http.StatusNoContent)
+}
+
+// handlePause freezes THIS node's group playback; master only (D39). 409 when
+// nothing is playing (or already paused).
+func (s *Server) handlePause(c echo.Context) error {
+	if err := s.cfg.Group.Pause(c.Request().Context()); err != nil {
+		return s.fail(c, err)
+	}
+	s.log.Info("ui mutation", auditAttrs(c, "pause")...)
+	return c.NoContent(http.StatusNoContent)
+}
+
+// handleResume un-freezes THIS node's paused group playback; master only (D39).
+// 409 when not currently paused.
+func (s *Server) handleResume(c echo.Context) error {
+	if err := s.cfg.Group.Resume(c.Request().Context()); err != nil {
+		return s.fail(c, err)
+	}
+	s.log.Info("ui mutation", auditAttrs(c, "resume")...)
 	return c.NoContent(http.StatusNoContent)
 }
 

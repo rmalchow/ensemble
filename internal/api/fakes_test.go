@@ -19,10 +19,11 @@ type fakeCluster struct {
 	dial     map[id.ID][]netip.Addr
 	observed []observeCall
 
-	setName   []string
-	setVolume []float64
-	setDelay  []int
-	setDevice []string
+	setName     []string
+	setVolume   []float64
+	setDelay    []int
+	setDevice   []string
+	setDisabled [][]string
 }
 
 type observeCall struct {
@@ -85,6 +86,12 @@ func (f *fakeCluster) SetOutputDevice(d string) {
 	f.mu.Unlock()
 }
 
+func (f *fakeCluster) SetDisabled(d []string) {
+	f.mu.Lock()
+	f.setDisabled = append(f.setDisabled, append([]string(nil), d...))
+	f.mu.Unlock()
+}
+
 func (f *fakeCluster) Observe(peer id.ID, ip netip.Addr) {
 	f.mu.Lock()
 	f.observed = append(f.observed, observeCall{peer, ip})
@@ -121,6 +128,10 @@ type fakeGroup struct {
 	playURI        string
 	stopErr        error
 	stopN          int
+	pauseErr       error
+	pauseN         int
+	resumeErr      error
+	resumeN        int
 	settings       contracts.GroupSettings
 	setSettingsErr error
 	setSettingsArg contracts.GroupSettings
@@ -169,6 +180,20 @@ func (g *fakeGroup) Stop(context.Context) error {
 	return g.stopErr
 }
 
+func (g *fakeGroup) Pause(context.Context) error {
+	g.mu.Lock()
+	g.pauseN++
+	g.mu.Unlock()
+	return g.pauseErr
+}
+
+func (g *fakeGroup) Resume(context.Context) error {
+	g.mu.Lock()
+	g.resumeN++
+	g.mu.Unlock()
+	return g.resumeErr
+}
+
 func (g *fakeGroup) Settings() contracts.GroupSettings {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -184,15 +209,17 @@ func (g *fakeGroup) SetSettings(_ context.Context, s contracts.GroupSettings) er
 
 // fakeNodeConfig implements NodeConfig.
 type fakeNodeConfig struct {
-	mu        sync.Mutex
-	renameErr error
-	volErr    error
-	delayErr  error
-	deviceErr error
-	names     []string
-	vols      []float64
-	delays    []int
-	devices   []string
+	mu          sync.Mutex
+	renameErr   error
+	volErr      error
+	delayErr    error
+	deviceErr   error
+	disabledErr error
+	names       []string
+	vols        []float64
+	delays      []int
+	devices     []string
+	disabled    [][]string
 }
 
 func (n *fakeNodeConfig) Rename(name string) error {
@@ -221,6 +248,13 @@ func (n *fakeNodeConfig) SetOutputDevice(d string) error {
 	n.devices = append(n.devices, d)
 	n.mu.Unlock()
 	return n.deviceErr
+}
+
+func (n *fakeNodeConfig) SetDisabled(d []string) error {
+	n.mu.Lock()
+	n.disabled = append(n.disabled, append([]string(nil), d...))
+	n.mu.Unlock()
+	return n.disabledErr
 }
 
 // fakeSink implements SinkControl.

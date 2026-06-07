@@ -38,18 +38,24 @@ func (d *delegate) NotifyMsg(msg []byte) {
 	}
 	c := d.c
 	changed := false
+	persist := false // D41: a names/settings change should re-persist the table
 	c.mu.Lock()
 	switch kind {
 	case kindNodeDelta:
 		changed = c.doc.mergeNode(c.self, dl.Node)
 	case kindGroupName:
 		changed = c.doc.mergeGroupName(dl.Group, dl.Name)
+		persist = changed
 	case kindPlayback:
 		changed = c.doc.mergePlayback(dl.Group, dl.Playback)
 	case kindSettings:
 		changed = c.doc.mergeSettings(dl.Group, dl.Settings)
+		persist = changed
 	}
 	c.mu.Unlock()
+	if persist {
+		c.markDirty()
+	}
 	if changed {
 		c.notify()
 	}
@@ -85,8 +91,11 @@ func (d *delegate) MergeRemoteState(buf []byte, join bool) {
 	}
 
 	c.mu.Lock()
-	changed := c.doc.mergeAll(c.self, &remote)
+	changed, lookupChanged := c.doc.mergeAllTracked(c.self, &remote)
 	c.mu.Unlock()
+	if lookupChanged {
+		c.markDirty() // D41: a gossiped name/settings change updates the table
+	}
 	if changed {
 		c.notify()
 	}

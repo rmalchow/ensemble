@@ -163,7 +163,12 @@ func TestPurgeOldRecords(t *testing.T) {
 	d.Nodes[old].UpdatedAt = 10
 	d.Nodes[fresh] = nodeRec(fresh, 1, "fresh")
 	d.Nodes[fresh].UpdatedAt = 10_000
+	// D41: group names + settings are the persisted lookup table — exempt from
+	// the purge entirely (kept indefinitely), even when ancient.
 	d.Groups[g] = &GroupNameRecord{Name: "g", Version: 1, UpdatedAt: 10}
+	d.Settings[g] = &GroupSettingsRecord{Codec: "pcm", Transport: "udp", BufferMs: 150, Version: 1, UpdatedAt: 10}
+	// Old playback IS still purged.
+	d.Playback[g] = &PlaybackRecord{State: "idle", Version: 1, UpdatedAt: 10}
 
 	alive := map[id.ID]bool{}
 	removed := d.purge(self, 1000, alive)
@@ -179,8 +184,14 @@ func TestPurgeOldRecords(t *testing.T) {
 	if _, ok := d.Nodes[fresh]; !ok {
 		t.Fatal("fresh node should remain")
 	}
-	if _, ok := d.Groups[g]; ok {
-		t.Fatal("old group name should be purged")
+	if _, ok := d.Groups[g]; !ok {
+		t.Fatal("D41: old group name must NOT be purged (lookup table kept indefinitely)")
+	}
+	if _, ok := d.Settings[g]; !ok {
+		t.Fatal("D41: old group settings must NOT be purged (lookup table kept indefinitely)")
+	}
+	if _, ok := d.Playback[g]; ok {
+		t.Fatal("old playback should be purged")
 	}
 }
 

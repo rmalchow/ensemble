@@ -6,6 +6,9 @@ import {
   renameNode,
   setVolume,
   setOutputDelay,
+  setDisabled,
+  pause,
+  resume,
   follow,
   unfollow,
   makeMaster,
@@ -62,6 +65,28 @@ describe("node actions", () => {
     expect(JSON.parse(global.fetch.mock.calls[0][1].body)).toEqual({
       outputDelayMs: 120,
     });
+  });
+  it("setDisabled sends {disabled} (D40)", async () => {
+    global.fetch = mockFetch(200, {});
+    await setDisabled(REMOTE, ["playback", "opus"]);
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/api/" + REMOTE + "/node");
+    expect(opts.method).toBe("PATCH");
+    expect(JSON.parse(opts.body)).toEqual({ disabled: ["playback", "opus"] });
+  });
+});
+
+describe("play/pause (D39)", () => {
+  it("pause posts to master /pause", async () => {
+    global.fetch = mockFetch(200, {});
+    await pause(REMOTE);
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/" + REMOTE + "/pause");
+    expect(global.fetch.mock.calls[0][1].method).toBe("POST");
+  });
+  it("resume posts to master /resume", async () => {
+    global.fetch = mockFetch(200, {});
+    await resume(REMOTE);
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/" + REMOTE + "/resume");
   });
 });
 

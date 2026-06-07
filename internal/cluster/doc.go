@@ -36,7 +36,8 @@ type NodeRecord struct {
 	StreamPort    int                      `json:"streamPort"`
 	SourcePort    int                      `json:"sourcePort"`
 	GossipPort    int                      `json:"gossipPort"`
-	Caps          contracts.Capabilities   `json:"caps"`
+	Caps          contracts.Capabilities   `json:"caps"`      // PROBED caps (host reality); effective = caps − disabled (D40)
+	Disabled      []string                 `json:"disabled"`  // operator-disabled features (D40); subset of {playback,opus,input}
 	Following     id.ID                    `json:"following"` // id.Zero == solo
 	Observed      map[id.ID]obsEntry       `json:"observed"`  // peerID -> {ip,lastSeen}
 	Version       uint64                   `json:"version"`
@@ -162,10 +163,17 @@ func (d *Document) mergeSettings(g id.ID, r *GroupSettingsRecord) bool {
 // mergeAll merges an entire remote Document (push/pull path). Returns true if
 // anything changed locally.
 func (d *Document) mergeAll(self id.ID, remote *Document) bool {
+	changed, _ := d.mergeAllTracked(self, remote)
+	return changed
+}
+
+// mergeAllTracked is mergeAll that additionally reports whether the long-lived
+// LOOKUP tables — group names + settings — changed (D41: those are the only
+// records persisted to cluster.json, so only their change need trigger a save).
+func (d *Document) mergeAllTracked(self id.ID, remote *Document) (changed, lookupChanged bool) {
 	if remote == nil {
-		return false
+		return false, false
 	}
-	changed := false
 	for _, r := range remote.Nodes {
 		if d.mergeNode(self, r) {
 			changed = true
@@ -174,6 +182,7 @@ func (d *Document) mergeAll(self id.ID, remote *Document) bool {
 	for g, r := range remote.Groups {
 		if d.mergeGroupName(g, r) {
 			changed = true
+			lookupChanged = true
 		}
 	}
 	for g, r := range remote.Playback {
@@ -184,9 +193,10 @@ func (d *Document) mergeAll(self id.ID, remote *Document) bool {
 	for g, r := range remote.Settings {
 		if d.mergeSettings(g, r) {
 			changed = true
+			lookupChanged = true
 		}
 	}
-	return changed
+	return changed, lookupChanged
 }
 
 // cloneNode deep-copies a NodeRecord (its Addrs slice and Observed map).
@@ -197,6 +207,9 @@ func cloneNode(r *NodeRecord) *NodeRecord {
 	}
 	if r.OutputDevices != nil {
 		cp.OutputDevices = append([]contracts.OutputDevice(nil), r.OutputDevices...)
+	}
+	if r.Disabled != nil {
+		cp.Disabled = append([]string(nil), r.Disabled...)
 	}
 	if r.Caps.Codecs != nil {
 		cp.Caps.Codecs = append([]string(nil), r.Caps.Codecs...)
@@ -242,6 +255,11 @@ func (d *Document) clone() *Document {
 
 // purge deletes any record older than maxAgeUnix, except self's node record and
 // any node currently alive. Returns true if anything was removed.
+//
+// D41: the group NAMES and SETTINGS maps are the persisted lookup table and are
+// exempt from the purge entirely — kept indefinitely so a node that rejoins (or
+// re-forms a specific member combination) still knows every group name/setting it
+// ever saw. Only node records and playback status are aged out.
 func (d *Document) purge(self id.ID, maxAgeUnix int64, alive map[id.ID]bool) bool {
 	removed := false
 	for k, v := range d.Nodes {
@@ -253,21 +271,9 @@ func (d *Document) purge(self id.ID, maxAgeUnix int64, alive map[id.ID]bool) boo
 			removed = true
 		}
 	}
-	for k, v := range d.Groups {
-		if v.UpdatedAt < maxAgeUnix {
-			delete(d.Groups, k)
-			removed = true
-		}
-	}
 	for k, v := range d.Playback {
 		if v.UpdatedAt < maxAgeUnix {
 			delete(d.Playback, k)
-			removed = true
-		}
-	}
-	for k, v := range d.Settings {
-		if v.UpdatedAt < maxAgeUnix {
-			delete(d.Settings, k)
 			removed = true
 		}
 	}

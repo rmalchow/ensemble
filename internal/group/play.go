@@ -116,7 +116,6 @@ func (e *Engine) Play(uri string) error {
 		src:         src,
 		srv:         e.p.Source,
 		enc:         enc,
-		startMaster: startMaster + int64(e.p.LeadMs)*1_000_000,
 		startedUnix: e.now().Unix(),
 		transport:   settings.Transport,
 		bufferMs:    settings.BufferMs,
@@ -126,6 +125,7 @@ func (e *Engine) Play(uri string) error {
 		onEnd:       e.onSessionEnd,
 		now:         e.now,
 	}
+	sess.startMaster.Store(startMaster + int64(e.p.LeadMs)*1_000_000)
 	sess.gen.Store(gen)
 	e.sess = sess
 
@@ -166,6 +166,86 @@ func (e *Engine) Stop() error {
 	e.stopLocked()
 	e.p.Cluster.SetPlayback(groupID, contracts.Playback{State: "idle"})
 	e.log.Info("playback stopped", "uri", uri, "reason", "user")
+	return nil
+}
+
+// Pause freezes the running session (D39). Master-only. The media source and the
+// session/gen stay alive; the release loop stops emitting (position frozen). The
+// replicated playback record flips to state="paused", which the member-side
+// session gating (watch.go) treats as NOT playing — so members BYE the source and
+// Disarm their sinks, and the master leaves its own loopback subscription too. The
+// release ticker keeps ticking purely to keep the goroutine alive; no frames flow.
+// 409 ErrNotPlaying if nothing is playing or it is already paused.
+func (e *Engine) Pause() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return ErrClosed
+	}
+	if e.sess == nil || e.sess.paused.Load() {
+		return ErrNotPlaying
+	}
+	s := e.sess
+	s.pausedSec = float64(e.now().Unix() - s.startedUnix)
+	if s.pausedSec < 0 {
+		s.pausedSec = 0
+	}
+	s.paused.Store(true)
+	// Re-point local plumbing now (playing=false): the master leaves its own
+	// source + Disarms its sink immediately rather than waiting for a reconcile.
+	snap := e.p.Cluster.Snapshot()
+	mv := myGroup(snap, e.self)
+	if mv.found {
+		e.repointLocked(mv.master, e.curGen, mv.group.Settings.Transport, false)
+	}
+	e.p.Source.StopSession() // tell any still-attached subscribers to drop (RECONFIG/stop)
+	e.p.Cluster.SetPlayback(s.groupID, s.playbackRecord(e.now(), contracts.SourceStats{}))
+	e.lastBeat = e.now()
+	e.log.Info("playback paused", "uri", s.uri, "positionSec", s.pausedSec)
+	return nil
+}
+
+// Resume un-freezes a paused session (D39). Master-only. It bumps the generation
+// and re-anchors sessionStart to LocalToMaster(now)+lead — pts restart contiguous-
+// monotonic under the NEW gen (the frame index resets; the source continues from
+// where it stopped, so audio is contiguous though pts restart with the gen). For
+// LIVE sources the readahead already dropped what arrived while paused, so resume
+// returns at the live edge. Re-arms the source session, re-points local plumbing,
+// resumes the ticker, and writes state="playing". 409 ErrNotPaused if not paused.
+func (e *Engine) Resume() error {
+	// Clock readiness for the fresh sessionStart (master follows localhost; ~ms).
+	startMaster, ok := e.waitForClock()
+	if !ok {
+		return ErrNotSynced
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return ErrClosed
+	}
+	if e.sess == nil || !e.sess.paused.Load() {
+		return ErrNotPaused
+	}
+	s := e.sess
+	snap := e.p.Cluster.Snapshot()
+	mv := myGroup(snap, e.self)
+	if !mv.found || mv.role == roleFollower {
+		return ErrNotMaster
+	}
+
+	e.gen++
+	gen := e.gen
+	s.gen.Store(gen)
+	s.startMaster.Store(startMaster + int64(e.p.LeadMs)*1_000_000)
+	s.anchorSeq.Add(1) // signal run() to reset its frame index to 0 under the new gen
+	s.paused.Store(false)
+
+	e.p.Source.StartSession(gen, stream.ParseTransport(s.transport), s.bufferMs)
+	e.repointLocked(mv.master, gen, s.transport, true)
+	e.p.Cluster.SetPlayback(s.groupID, s.playbackRecord(e.now(), e.p.Source.Stats()))
+	e.lastBeat = e.now()
+	e.log.Info("playback resumed", "uri", s.uri, "gen", gen)
 	return nil
 }
 

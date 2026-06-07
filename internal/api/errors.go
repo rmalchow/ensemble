@@ -20,6 +20,8 @@ var (
 	ErrTargetNotMaster = errors.New("target not a master")
 	ErrUnknownNode     = errors.New("unknown node")
 	ErrNoCodec         = errors.New("unsupported codec")
+	ErrNotPlaying      = errors.New("nothing is playing")
+	ErrNotPaused       = errors.New("not paused")
 	ErrMediaNotFound   = errors.New("media not found")
 	ErrBadScheme       = errors.New("bad scheme")
 	ErrBadPath         = errors.New("bad path")
@@ -43,6 +45,10 @@ func errStatus(err error) (int, string, string) {
 		return http.StatusNotFound, "unknown_node", ""
 	case errors.Is(err, ErrNoCodec):
 		return http.StatusBadRequest, "unsupported_codec", ""
+	case errors.Is(err, ErrNotPlaying):
+		return http.StatusConflict, "not_playing", ""
+	case errors.Is(err, ErrNotPaused):
+		return http.StatusConflict, "not_paused", ""
 	case errors.Is(err, ErrMediaNotFound):
 		return http.StatusNotFound, "media_not_found", ""
 	case errors.Is(err, ErrBadScheme):

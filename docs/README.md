@@ -41,6 +41,15 @@ no database, no PKI. State is replicated via gossip; everything heals itself.
     e.g. `["file","http","input"]`
   - `formats`: local media formats it can decode (`["wav","mp3","flac"]`)
 
+  The reported capabilities are **effective** = probed minus operator-disabled
+  (D40): a node may turn off `playback` (output), `opus` (codec), or `input`
+  (capture) via `PATCH /api/node {disabled}`, persisted in `node.json`
+  (`disabled:[…]`) and replicated. Disabling `playback` swaps the sink to the
+  null backend live; disabling `opus` drops it from `codecs` (opus sessions
+  including the node are then rejected); disabling `input` drops it from
+  `sources`. Re-enabling restores the probed capability. The UI shows these as
+  tri-state chips (available / unavailable / disabled).
+
 ## 2. Ports
 
 Four configurable base ports. **Bind-or-increment**: try the base port; if it
@@ -125,12 +134,23 @@ Records:
 - **Group names** — map `groupId → {name, version, updatedAt}`; written by
   whichever node renames the group (LWW).
 - **Playback status** — per group, written only by that group's master:
-  `groupId → {state: idle|playing, uri, startedAt, positionSec, codec,
-  transport, version, updatedAt}`.
+  `groupId → {state: idle|playing|paused, uri, startedAt, positionSec, codec,
+  transport, version, updatedAt}`. `paused` (D39) is a frozen session: the
+  master keeps the media source + session/gen alive but stops releasing frames;
+  members treat anything other than `playing` as inactive and unsubscribe.
 
 Liveness (`lastSeen`) comes from memberlist itself; alive/dead is not part of
-the replicated doc. Node records, group names, and playback entries not
-updated for **30 days** are purged (checked hourly).
+the replicated doc. Node records and playback entries not updated for **30 days**
+are purged (checked hourly). **Group names and group settings are exempt from the
+purge entirely** (D41): they are a lookup table kept indefinitely, so a specific
+member combination keeps its name/settings whenever it reforms.
+
+The group **names** and **settings** maps are additionally persisted to
+`DATA_DIR/cluster.json` (D41) — full records incl. version+writer so the LWW
+merge applies on reload — loaded at start before joining gossip and saved
+debounced (and on clean shutdown). A node that was offline therefore still knows
+every group name + setting it ever saw. Node records and playback are NOT
+persisted (runtime/replicated).
 
 ## 5. Groups
 
@@ -420,7 +440,7 @@ All under `/api`. JSON. No auth (trusted LAN, v1).
 | Method/path | Action |
 |---|---|
 | `GET  /api/status` | this node: id, name, ports, role, group, sink/clock stats, and — when this node runs a source — `source: {clients, connects, restarts, primes}` |
-| `PATCH /api/node` | `{name?, volume?, outputDelayMs?, outputDevice?}` → rename / set live volume (§8.5) / set output-delay calibration (re-anchors playout) / select the ALSA output device (§8.5, live backend swap) on this node |
+| `PATCH /api/node` | `{name?, volume?, outputDelayMs?, outputDevice?, disabled?}` → rename / set live volume (§8.5) / set output-delay calibration (re-anchors playout) / select the ALSA output device (§8.5, live backend swap) / toggle operator-disabled features (D40: subset of `playback`/`opus`/`input`) on this node |
 | `GET  /api/cluster` | replicated state, resolved: nodes (alive/dead, addrs, observed), derived groups (id, name, master, members, playback, source stats) |
 | `GET  /api/media` | list this node's local media |
 | `POST /api/follow` | `{target}` → this node follows target (§5.1) |
@@ -429,6 +449,8 @@ All under `/api`. JSON. No auth (trusted LAN, v1).
 | `POST /api/group/master` | `{node}` → takeover (§5.2) |
 | `POST /api/play` | `{uri}` (back-compat: `{file}` ≡ `file:` URI) → master only: serve that source to the group. Non-masters reject with a hint to use takeover. |
 | `POST /api/stop` | master only: stop group playback |
+| `POST /api/pause` | master only: freeze the running session (D39); 409 when nothing is playing |
+| `POST /api/resume` | master only: resume a paused session (D39); 409 when not paused |
 | `GET  /api/group/settings` / `POST` | `{codec, transport, bufferMs}` for this node's group (master only for POST; applies live via RECONFIG §8.7) |
 
 Sink stats in `/api/status` include `played, silence, lateDrop, staleGen,
@@ -473,9 +495,9 @@ Screens (single page, sections):
 
 ## 11. Out of scope (v1)
 
-Pause/seek, auth/TLS, internet-facing operation, playlists, album
+Seek, auth/TLS, internet-facing operation, playlists, album
 art/metadata, multiple simultaneous streams per group, hardware mixer volume
-(volume is software gain in v1).
+(volume is software gain in v1). (Per-group play/pause IS supported, D39.)
 
 ## 12. Repository layout
 

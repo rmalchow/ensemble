@@ -251,7 +251,7 @@ func (f *fakeSink) Close() error               { return nil }
 
 func TestNewDeliverPCMResetsOnGenChange(t *testing.T) {
 	fs := &fakeSink{}
-	d := newDeliver(fs, newLogger("error"))
+	d := newDeliver(fs, newDisableState(nil), newLogger("error"))
 	pcm := make([]byte, stream.FrameBytes)
 
 	d(stream.Header{Gen: 7, Seq: 0, PTS: 0}, pcm)

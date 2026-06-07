@@ -75,11 +75,14 @@ func (e *Engine) reconcile() {
 	// the master automatically", §3.2). Subscribe/arm only while the group has an
 	// active session: an idle node must not HELLO, must not arm its sink (no
 	// boot-time starvation warnings), and must BYE when the session ends.
+	// A paused session (D39) is frozen: not "playing" for plumbing purposes, so
+	// members unsubscribe + Disarm and the master leaves its own source too.
+	activeSess := e.sess != nil && !e.sess.paused.Load()
 	gen := e.curGen
-	if isMaster && e.sess != nil {
+	if isMaster && activeSess {
 		gen = e.sess.gen.Load() // our own running session
 	}
-	playing := mv.group.Playback.State == "playing" || (isMaster && e.sess != nil)
+	playing := mv.group.Playback.State == "playing" || (isMaster && activeSess)
 	e.repointLocked(mv.master, gen, mv.group.Settings.Transport, playing)
 
 	// Heartbeat (D28): master, while playing, every Heartbeat interval.

@@ -49,9 +49,10 @@ type Config struct {
 
 	// Live per-node knobs (from node.json; see Store). Defaulted on a
 	// back-compat load when absent (§1, D35/D36).
-	Volume        float64 // playback software gain 0.0–1.0; default 1.0 (D35)
-	OutputDelayMs int     // hardware latency calibration; default 0, clamped ±500 (D36)
-	OutputDevice  string  // selected ALSA output device id; default "default" (D37)
+	Volume        float64  // playback software gain 0.0–1.0; default 1.0 (D35)
+	OutputDelayMs int      // hardware latency calibration; default 0, clamped ±500 (D36)
+	OutputDevice  string   // selected ALSA output device id; default "default" (D37)
+	Disabled      []string // operator-disabled features; subset of {playback,opus,input} (D40)
 
 	// Resolved, absolute directories (§2).
 	DataDir  string // e.g. /abs/data; contains node.json
@@ -170,6 +171,7 @@ func Load(opts Options) (*Config, error) {
 	cfg.Volume = nf.Volume
 	cfg.OutputDelayMs = nf.OutputDelayMs
 	cfg.OutputDevice = nf.OutputDevice
+	cfg.Disabled = nf.Disabled
 
 	return cfg, nil
 }
@@ -217,6 +219,18 @@ func (c *Config) SetOutputDevice(device string) error {
 		return err
 	}
 	c.OutputDevice = nf.OutputDevice
+	return nil
+}
+
+// SetDisabled persists the operator-disabled feature list (D40) and atomically
+// rewrites node.json, updating c.Disabled on success only. The list is normalized
+// (subset of {playback,opus,input}, deduped + sorted) before write.
+func (c *Config) SetDisabled(disabled []string) error {
+	nf, err := c.store.SetDisabled(c.NodeID, disabled)
+	if err != nil {
+		return err
+	}
+	c.Disabled = nf.Disabled
 	return nil
 }
 

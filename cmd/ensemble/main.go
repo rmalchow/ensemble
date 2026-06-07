@@ -14,7 +14,9 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"ensemble/internal/config"
 	"ensemble/internal/contracts"
 	"ensemble/internal/discovery"
+	"ensemble/internal/dl"
 	"ensemble/internal/group"
 	"ensemble/internal/id"
 	"ensemble/internal/netx"
@@ -278,6 +281,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		OutputDevice:  cfg.OutputDevice,
 		OutputDevices: outputDevices,
 		Caps:          caps,
+		Disabled:      cfg.Disabled,
 		Addrs:         addrs,
 		HTTPPort:      httpPort,
 		StreamPort:    streamPort,
@@ -285,6 +289,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		GossipPort:    gossipPort,
 		BindAddr:      opt.Host,
 		Peers:         peers,
+		StatePath:     filepath.Join(cfg.DataDir, "cluster.json"),
 		Logger:        base,
 	})
 	if err != nil {
@@ -322,17 +327,22 @@ func run(ctx context.Context, opt options) (rerr error) {
 	// 10. Subscriber client (member-side). The deliver closure decodes opus when
 	//     the payload is a compressed packet (not a full PCM frame), re-arms the
 	//     sink on a generation change, and pushes canonical PCM to the sink.
+	// Operator-disabled features (D40): a live, atomic set the local media/opus
+	// factories + deliver path consult so disabling opus/input refuses locally too
+	// (effective caps already gate new sessions cluster-wide).
+	disabled := newDisableState(cfg.Disabled)
+
 	subClient := stream.NewClient(stream.ClientConfig{
 		Mux:     mux,
-		Deliver: newDeliver(theSink, base),
+		Deliver: newDeliver(theSink, disabled, base),
 		Log:     base,
 	})
 
 	// 11. Media + opus factories (D's audio package), bound to MediaDir.
-	media := mediaFactory{mediaDir: cfg.MediaDir}
+	media := mediaFactory{mediaDir: cfg.MediaDir, disabled: disabled}
 	var opusFac group.OpusFactory
 	if audio.OpusAvailable() {
-		opusFac = opusFactory{log: log}
+		opusFac = opusFactory{log: log, disabled: disabled}
 	} else {
 		log.Debug("opus unavailable (libopus not loadable)")
 	}
@@ -367,6 +377,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		Stats:             statusStats(theSink, clockFol, engine),
 		Sink:              func() api.SinkControl { return theSink },
 		ApplyOutputDevice: applyOutputDevice(backendName, opt.Output, theSink, base),
+		ApplyDisabled:     applyDisabled(disabled, opt.Output, cfg.OutputDevice, theSink, base),
 		Ports: api.PortsResp{
 			HTTP:   httpPort,
 			Stream: streamPort,
@@ -583,7 +594,7 @@ func outputLabel(output string) string {
 // gen bump keeps playing, and pushes canonical PCM to the sink. A single decoder
 // is reused across the subscription (one goroutine: the mux read loop, serialized
 // by the stream client).
-func newDeliver(sk contracts.Sink, log *slog.Logger) stream.DeliverFunc {
+func newDeliver(sk contracts.Sink, disabled *disableState, log *slog.Logger) stream.DeliverFunc {
 	var dec *audio.OpusDecoder
 	var curGen uint32
 	haveGen := false
@@ -600,7 +611,14 @@ func newDeliver(sk contracts.Sink, log *slog.Logger) stream.DeliverFunc {
 
 		pcm := payload
 		if len(payload) != stream.FrameBytes {
-			// Compressed (opus) payload. Lazily build the decoder.
+			// Compressed (opus) payload. Locally-disabled opus (D40) refuses to
+			// decode — drop the frame (the master should not have picked opus for a
+			// group including us; effective caps gate it).
+			if disabled.has("opus") {
+				dl.Debug("opus disabled on this node, dropping frame")
+				return
+			}
+			// Lazily build the decoder.
 			if dec == nil {
 				d, err := audio.NewOpusDecoder()
 				if err != nil {
@@ -664,9 +682,16 @@ func memberStatsLoop(ctx context.Context, sk *sink.Playout, fol *clock.Follower,
 }
 
 // mediaFactory adapts audio.Open (ctx + mediaDir bound) to group.MediaFactory.
-type mediaFactory struct{ mediaDir string }
+// It refuses to open an input: source when "input" is operator-disabled (D40).
+type mediaFactory struct {
+	mediaDir string
+	disabled *disableState
+}
 
 func (m mediaFactory) Open(uri string) (group.MediaSource, error) {
+	if m.disabled.has("input") && uriScheme(uri) == "input" {
+		return nil, errInputDisabled
+	}
 	src, err := audio.Open(context.Background(), uri, m.mediaDir)
 	if err != nil {
 		return nil, err
@@ -674,15 +699,97 @@ func (m mediaFactory) Open(uri string) (group.MediaSource, error) {
 	return src, nil
 }
 
-// opusFactory adapts audio.NewOpusEncoder to group.OpusFactory.
-type opusFactory struct{ log *slog.Logger }
+// uriScheme returns the lowercased scheme of a URI ("file" when none).
+func uriScheme(uri string) string {
+	i := strings.IndexByte(uri, ':')
+	if i <= 0 {
+		return "file"
+	}
+	return strings.ToLower(uri[:i])
+}
+
+var errInputDisabled = errors.New("audio: input capture disabled on this node")
+
+// opusFactory adapts audio.NewOpusEncoder to group.OpusFactory. It refuses when
+// "opus" is operator-disabled on this node (D40) — dl.ErrUnavailable so the group
+// engine surfaces ErrNoOpus exactly as it does for a host without libopus.
+type opusFactory struct {
+	log      *slog.Logger
+	disabled *disableState
+}
 
 func (f opusFactory) NewEncoder() (group.OpusEncoder, error) {
+	if f.disabled.has("opus") {
+		return nil, dl.ErrUnavailable
+	}
 	enc, err := audio.NewOpusEncoder()
 	if err == nil && f.log != nil {
 		f.log.With("comp", "audio").Info("opus encoder created", "bitrate", audio.OpusBitrate, "rate", 48000, "channels", 2)
 	}
 	return enc, err
+}
+
+// ---- disable state (D40) ----------------------------------------------------
+
+// disableState is the live set of operator-disabled features on this node (D40).
+// Updated atomically by PATCH /api/node {disabled}; read by the media/opus
+// factories and the deliver path. Cheap reads (a pointer load + small map).
+type disableState struct {
+	v atomic.Pointer[map[string]bool]
+}
+
+func newDisableState(initial []string) *disableState {
+	d := &disableState{}
+	d.set(initial)
+	return d
+}
+
+func (d *disableState) set(features []string) {
+	m := make(map[string]bool, len(features))
+	for _, f := range features {
+		m[f] = true
+	}
+	d.v.Store(&m)
+}
+
+func (d *disableState) has(feature string) bool {
+	m := d.v.Load()
+	return m != nil && (*m)[feature]
+}
+
+// applyDisabled returns the PATCH /api/node {disabled} live-apply closure (D40).
+// It updates the shared disable set and, when "playback" toggles, swaps the live
+// sink backend: disabling playback swaps to the null backend; re-enabling reopens
+// the configured device/backend (mirroring applyOutputDevice). opus/input need no
+// swap — the factories/deliver read the set directly.
+func applyDisabled(state *disableState, outputSpec, device string, sk *sink.Playout, log *slog.Logger) func([]string) {
+	return func(features []string) {
+		wasPlayback := state.has("playback")
+		state.set(features)
+		nowPlayback := state.has("playback")
+		if wasPlayback == nowPlayback {
+			return
+		}
+		if nowPlayback {
+			// Newly disabled: swap to the null backend (timed discard).
+			nb, _, err := sink.OpenDevice("null", device, log)
+			if err != nil {
+				log.Warn("playback disable: null backend open failed", "err", err)
+				return
+			}
+			sk.SwapBackend(nb)
+			log.Info("playback disabled; sink swapped to null backend")
+			return
+		}
+		// Re-enabled: reopen the configured device/backend.
+		nb, name, err := sink.OpenDevice(outputSpec, device, log)
+		if err != nil {
+			log.Warn("playback re-enable: backend reopen failed; keeping null", "err", err)
+			return
+		}
+		sk.SwapBackend(nb)
+		log.Info("playback re-enabled; sink swapped back", "backend", name)
+	}
 }
 
 // statusStats builds the GET /api/status closure from the sink (E), clock
@@ -742,6 +849,14 @@ func (g *groupAdapter) Stop(ctx context.Context) error {
 	return mapErr(g.e.Stop())
 }
 
+func (g *groupAdapter) Pause(ctx context.Context) error {
+	return mapErr(g.e.Pause())
+}
+
+func (g *groupAdapter) Resume(ctx context.Context) error {
+	return mapErr(g.e.Resume())
+}
+
 func (g *groupAdapter) Settings() contracts.GroupSettings {
 	return g.e.Settings()
 }
@@ -774,6 +889,10 @@ func mapErr(err error) error {
 		return translated{api.ErrNoCodec, err}
 	case errors.Is(err, group.ErrNotSynced):
 		return translated{api.ErrNotMaster, err}
+	case errors.Is(err, group.ErrNotPlaying):
+		return translated{api.ErrNotPlaying, err}
+	case errors.Is(err, group.ErrNotPaused):
+		return translated{api.ErrNotPaused, err}
 	default:
 		return err
 	}

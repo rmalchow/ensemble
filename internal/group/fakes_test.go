@@ -345,6 +345,11 @@ func (s *fakeSink) snapshotResets() []uint32 {
 	defer s.mu.Unlock()
 	return append([]uint32(nil), s.resets...)
 }
+func (s *fakeSink) disarmCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.disarms
+}
 
 // --- fakeClock ---------------------------------------------------------------
 

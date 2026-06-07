@@ -27,6 +27,7 @@ const (
 // without a data race.
 type session struct {
 	gen     atomic.Uint32 // current session generation (§8.4); SetSettings may bump
+	paused  atomic.Bool   // D39: frozen — run() stops reading/releasing while set
 	uri     string
 	groupID id.ID
 	codec   string
@@ -36,8 +37,10 @@ type session struct {
 	srv SourceServer
 	enc OpusEncoder // nil for pcm
 
-	startMaster int64 // sessionStart in master-clock ns (LocalToMaster(now)+leadMs)
-	startedUnix int64 // wall-clock unix for positionSec
+	startMaster atomic.Int64  // sessionStart in master-clock ns; re-anchored on resume (read each tick)
+	anchorSeq   atomic.Uint64 // D39: bumped on resume so run() resets its frame index
+	startedUnix int64         // wall-clock unix for positionSec
+	pausedSec   float64       // D39: position frozen at pause (positionSec while paused)
 	transport   string
 	bufferMs    int
 	leadMs      int
@@ -69,6 +72,7 @@ func (s *session) run() {
 
 	buf := make([]byte, stream.FrameBytes)
 	var idx int64
+	curAnchor := s.anchorSeq.Load()
 	draining := false
 	var drainUntil time.Time
 
@@ -78,6 +82,18 @@ func (s *session) run() {
 			s.onEnd(s, endStop)
 			return
 		case <-tick.C:
+		}
+
+		// D39: while paused the release ticker keeps ticking but reads/releases
+		// nothing — the session, gen, and media source stay alive (position
+		// frozen). Resume re-anchors startMaster and bumps anchorSeq so the frame
+		// index restarts from 0 under the new generation (pts restart with the gen).
+		if s.paused.Load() {
+			continue
+		}
+		if a := s.anchorSeq.Load(); a != curAnchor {
+			curAnchor = a
+			idx = 0
 		}
 
 		if draining {
@@ -112,7 +128,7 @@ func (s *session) run() {
 			payload = append([]byte(nil), pkt...)
 		}
 
-		pts := s.startMaster + idx*stream.FrameNanos
+		pts := s.startMaster.Load() + idx*stream.FrameNanos
 		s.srv.ReleaseFrame(pts, payload)
 		idx++
 	}
@@ -136,13 +152,20 @@ func (s *session) closeSrc() {
 }
 
 // playbackRecord assembles the replicated playback record for this session.
+// While paused (D39) the state is "paused" and the position is frozen at the
+// pause point (pausedSec); otherwise it tracks wall-clock elapsed since start.
 func (s *session) playbackRecord(now time.Time, st contracts.SourceStats) contracts.Playback {
+	state := "playing"
 	pos := float64(now.Unix() - s.startedUnix)
 	if pos < 0 {
 		pos = 0
 	}
+	if s.paused.Load() {
+		state = "paused"
+		pos = s.pausedSec
+	}
 	return contracts.Playback{
-		State:       "playing",
+		State:       state,
 		URI:         s.uri,
 		StartedUnix: s.startedUnix,
 		PositionSec: pos,

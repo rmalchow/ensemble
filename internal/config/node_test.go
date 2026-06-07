@@ -184,6 +184,53 @@ func TestRenamePreservesID(t *testing.T) {
 	}
 }
 
+func TestSetDisabledRoundTripAndNormalize(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	orig, err := s.LoadOrCreate("")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if orig.Disabled != nil {
+		t.Errorf("default disabled = %v, want nil", orig.Disabled)
+	}
+	// Includes a bogus feature + a dup; normalize keeps only valid, deduped, sorted.
+	nf, err := s.SetDisabled(orig.ID, []string{"opus", "bogus", "input", "opus"})
+	if err != nil {
+		t.Fatalf("SetDisabled: %v", err)
+	}
+	if want := []string{"input", "opus"}; !equalStr(nf.Disabled, want) {
+		t.Fatalf("disabled = %v, want %v", nf.Disabled, want)
+	}
+	reloaded, err := s.LoadOrCreate("")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !equalStr(reloaded.Disabled, []string{"input", "opus"}) {
+		t.Errorf("reloaded disabled = %v", reloaded.Disabled)
+	}
+	// Clearing.
+	nf, err = s.SetDisabled(orig.ID, nil)
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if nf.Disabled != nil {
+		t.Errorf("cleared disabled = %v, want nil", nf.Disabled)
+	}
+}
+
+func equalStr(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRenameAtomicTrailingNewlineValidJSON(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir)

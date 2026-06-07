@@ -56,11 +56,12 @@ func TestSessionStartFromLocalToMaster(t *testing.T) {
 		t.Fatal("session gone")
 	}
 	first := r.srv.snapshotReleases()[0].pts
-	if first != sess.startMaster {
-		t.Fatalf("first pts = %d, want startMaster %d", first, sess.startMaster)
+	startMaster := sess.startMaster.Load()
+	if first != startMaster {
+		t.Fatalf("first pts = %d, want startMaster %d", first, startMaster)
 	}
-	if sess.startMaster <= r.clk.offset {
-		t.Fatalf("startMaster %d should exceed offset %d (lead added)", sess.startMaster, r.clk.offset)
+	if startMaster <= r.clk.offset {
+		t.Fatalf("startMaster %d should exceed offset %d (lead added)", startMaster, r.clk.offset)
 	}
 }
 

@@ -50,6 +50,12 @@ type Cluster struct {
 	purgeEvery time.Duration
 	maxAge     time.Duration
 
+	// D41 persistence of the group names + settings lookup tables.
+	statePath    string
+	saveDebounce time.Duration
+	dirty        chan struct{} // coalesced "save soon" signal (buffer 1)
+	saveNotify   chan struct{} // test hook (nil in production)
+
 	done chan struct{}
 	wg   sync.WaitGroup
 }
@@ -73,7 +79,8 @@ type Config struct {
 	OutputDelayMs int
 	OutputDevice  string                   // selected ALSA device id (D37)
 	OutputDevices []contracts.OutputDevice // enumerated devices on this node (D37)
-	Caps          contracts.Capabilities
+	Caps          contracts.Capabilities   // PROBED caps (D40: effective = caps − disabled)
+	Disabled      []string                 // operator-disabled features (D40)
 	Addrs         []string
 	HTTPPort      int
 	StreamPort    int
@@ -83,10 +90,17 @@ type Config struct {
 	Peers         <-chan discovery.Peer
 	Logger        *slog.Logger
 
+	// StatePath persists the long-lived lookup tables — group NAMES + SETTINGS —
+	// to this file (D41), loaded at New (before any join/merge) and saved debounced
+	// + on Close. Empty (tests) disables persistence entirely.
+	StatePath string
+
 	// Optional test hooks (nil → production defaults).
-	Now        func() time.Time
-	PurgeEvery time.Duration
-	MaxAge     time.Duration
+	Now          func() time.Time
+	PurgeEvery   time.Duration
+	MaxAge       time.Duration
+	SaveDebounce time.Duration // D41 save debounce; default 2s (test override)
+	saveNotify   chan struct{} // D41 test hook: signaled after each save
 }
 
 // New builds the Cluster and its memberlist config, seeding this node's own
@@ -117,6 +131,10 @@ func New(cfg Config) (*Cluster, error) {
 	if maxAge == 0 {
 		maxAge = 30 * 24 * time.Hour
 	}
+	saveDebounce := cfg.SaveDebounce
+	if saveDebounce == 0 {
+		saveDebounce = 2 * time.Second
+	}
 	bindAddr := cfg.BindAddr
 	if bindAddr == "" {
 		bindAddr = "0.0.0.0"
@@ -137,23 +155,41 @@ func New(cfg Config) (*Cluster, error) {
 		SourcePort:    cfg.SourcePort,
 		GossipPort:    cfg.GossipPort,
 		Caps:          cfg.Caps,
+		Disabled:      append([]string(nil), cfg.Disabled...),
 		Following:     id.Zero,
 		Observed:      map[id.ID]obsEntry{},
 		Version:       1,
 		UpdatedAt:     nowUnix,
 	}
 
+	// D41: load the persisted group names + settings lookup tables into the doc
+	// BEFORE any memberlist join/merge, so a node that was offline still knows
+	// every group name + setting it ever saw. A missing/corrupt file is non-fatal
+	// (warn + start empty); the exact LWW merge rules apply against gossiped peers.
+	if cfg.StatePath != "" {
+		if st, err := loadState(cfg.StatePath); err != nil {
+			log.Warn("cluster state load failed; starting with empty lookup tables", "path", cfg.StatePath, "err", err)
+		} else {
+			st.into(doc)
+			log.Info("cluster state loaded", "path", cfg.StatePath, "groups", len(doc.Groups), "settings", len(doc.Settings))
+		}
+	}
+
 	c := &Cluster{
-		self:       cfg.Self,
-		log:        log,
-		doc:        doc,
-		observed:   observedTable{},
-		live:       newLiveness(cfg.Self, nowUnix),
-		peers:      cfg.Peers,
-		clock:      now,
-		purgeEvery: purgeEvery,
-		maxAge:     maxAge,
-		done:       make(chan struct{}),
+		self:         cfg.Self,
+		log:          log,
+		doc:          doc,
+		observed:     observedTable{},
+		live:         newLiveness(cfg.Self, nowUnix),
+		peers:        cfg.Peers,
+		clock:        now,
+		purgeEvery:   purgeEvery,
+		maxAge:       maxAge,
+		statePath:    cfg.StatePath,
+		saveDebounce: saveDebounce,
+		dirty:        make(chan struct{}, 1),
+		saveNotify:   cfg.saveNotify,
+		done:         make(chan struct{}),
 	}
 
 	c.deleg = &delegate{c: c}
@@ -195,6 +231,10 @@ func (c *Cluster) Start() error {
 	}
 	c.wg.Add(1)
 	go c.purgeLoop()
+	if c.statePath != "" {
+		c.wg.Add(1)
+		go c.saveLoop()
+	}
 	return nil
 }
 
@@ -223,6 +263,14 @@ func (c *Cluster) Close() error {
 	}
 
 	c.wg.Wait()
+
+	// D41: final save on Close so a clean shutdown never loses the last change
+	// (the debounce window may not have elapsed). saveLoop has already exited.
+	if c.statePath != "" {
+		if err := c.saveState(); err != nil {
+			c.log.Warn("cluster state save on close failed", "path", c.statePath, "err", err)
+		}
+	}
 
 	c.mu.Lock()
 	for _, ch := range c.subs {

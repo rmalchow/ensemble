@@ -20,6 +20,8 @@ var (
 	ErrNoOpus         = errors.New("group: opus codec not supported")            // §8.3/D33
 	ErrBadSettings    = errors.New("group: invalid group settings")              // §9.1
 	ErrNotSynced      = errors.New("group: clock not synced yet, retry")         // §7 transient
+	ErrNotPlaying     = errors.New("group: nothing is playing")                  // D39 pause
+	ErrNotPaused      = errors.New("group: not paused")                          // D39 resume
 	ErrClosed         = errors.New("group: engine closed")
 )
 

@@ -57,7 +57,8 @@ func nodeView(nid id.ID, r *NodeRecord, alive map[id.ID]bool, seen map[id.ID]int
 		StreamPort:    r.StreamPort,
 		SourcePort:    r.SourcePort,
 		GossipPort:    r.GossipPort,
-		Capabilities:  r.Caps,
+		Capabilities:  effectiveCaps(r.Caps, r.Disabled),
+		Disabled:      append([]string(nil), r.Disabled...),
 		Following:     r.Following,
 		Observed:      obs,
 		Alive:         alive[nid],
@@ -66,6 +67,47 @@ func nodeView(nid id.ID, r *NodeRecord, alive map[id.ID]bool, seen map[id.ID]int
 		UpdatedAt:     r.UpdatedAt,
 		Version:       r.Version,
 	}
+}
+
+// effectiveCaps subtracts the operator-disabled features (D40) from the node's
+// PROBED capabilities — the single place the subtraction happens. Disabling:
+//   - "playback" → Playback:false (the sink swaps to the null backend live, K);
+//   - "opus"     → "opus" removed from Codecs (master-side D33 validation then
+//     rejects opus sessions including this node; the local constructors refuse);
+//   - "input"    → "input" removed from Sources.
+//
+// Backends/Formats are unaffected. The probed caps are never mutated (a copy is
+// returned) so re-enabling restores them.
+func effectiveCaps(probed contracts.Capabilities, disabled []string) contracts.Capabilities {
+	if len(disabled) == 0 {
+		return probed
+	}
+	off := map[string]bool{}
+	for _, d := range disabled {
+		off[d] = true
+	}
+	eff := probed
+	if off["playback"] {
+		eff.Playback = false
+	}
+	if off["opus"] {
+		eff.Codecs = without(probed.Codecs, "opus")
+	}
+	if off["input"] {
+		eff.Sources = without(probed.Sources, "input")
+	}
+	return eff
+}
+
+// without returns a copy of in with every occurrence of v removed.
+func without(in []string, v string) []string {
+	out := make([]string, 0, len(in))
+	for _, x := range in {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // DeriveGroups projects derived groups (§5) from a document snapshot and a

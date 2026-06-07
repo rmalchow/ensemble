@@ -115,41 +115,65 @@ wait_for "$N2/api/status" '.sink.played>0' true 8 || die "n2 sink not playing"
 wait_for "$N1/api/status" '.source.clients' 2 8 || die "n1 source.clients != 2"
 pass "5 play → both sinks playing; n1 source.clients=2"
 
-# ---- 6. clock synced on both ------------------------------------------------
+# ---- 6. pause (D39): both sinks STOP advancing; state=="paused" --------------
+# Snapshot both played counters, pause, allow the in-flight tail to drain, then
+# assert neither counter advances any further and the cluster shows "paused".
+post "$N1/api/pause"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").playback.state' paused 8 || die "playback not paused"
+sleep 1  # let any in-flight buffered frames drain out of both sinks
+P1A=$(api "$N1/api/status" | jq .sink.played)
+P2A=$(api "$N2/api/status" | jq .sink.played)
+sleep 1
+P1B=$(api "$N1/api/status" | jq .sink.played)
+P2B=$(api "$N2/api/status" | jq .sink.played)
+[ "$P1A" = "$P1B" ] || die "n1 sink kept advancing while paused ($P1A -> $P1B)"
+[ "$P2A" = "$P2B" ] || die "n2 sink kept advancing while paused ($P2A -> $P2B)"
+# Resume when not paused would be a 409; pause when paused too.
+curl -fsS -X POST "$N1/api/pause" >/dev/null 2>&1 && die "second pause should 409" || true
+pass "6 pause → both sinks frozen; state=paused"
+
+# ---- 7. resume (D39): both sinks advance again; state=="playing" -------------
+post_retry "$N1/api/resume" '' || die "resume kept failing"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").playback.state' playing 8 || die "playback not playing after resume"
+rising "$N1/api/status" '.sink.played' 1 || die "n1 sink not advancing after resume"
+rising "$N2/api/status" '.sink.played' 1 || die "n2 sink not advancing after resume"
+pass "7 resume → both sinks advancing again; state=playing"
+
+# ---- 8. clock synced on both ------------------------------------------------
 wait_for "$N1/api/status" '.sink.synced' true 8 || die "n1 not synced"
 wait_for "$N2/api/status" '.sink.synced' true 8 || die "n2 not synced"
-pass "6 clock synced on both"
+pass "8 clock synced on both"
 
-# ---- 7. proxy: n1 /api/<n2id>/status returns n2's id ------------------------
+# ---- 9. proxy: n1 /api/<n2id>/status returns n2's id ------------------------
 PROXIED=$(api "$N1/api/$ID2/status" | jq -r .id)
 [ "$PROXIED" = "$ID2" ] || die "proxy returned $PROXIED want $ID2"
-pass "7 proxy n1→n2 status returns n2 id"
+pass "9 proxy n1→n2 status returns n2 id"
 
-# ---- 8. volume: PATCH n2 {volume:0.5} → cluster shows 0.5 -------------------
+# ---- 10. volume: PATCH n2 {volume:0.5} → cluster shows 0.5 ------------------
 patchj "$N2/api/node" '{"volume":0.5}'
 wait_for "$N1/api/cluster" '.nodes[]|select(.id=="'"$ID2"'").volume' 0.5 || die "n2 volume not 0.5"
-pass "8 volume PATCH n2=0.5 replicated"
+pass "10 volume PATCH n2=0.5 replicated"
 
-# ---- 9. settings change mid-play → resubscribe, playback continues ----------
-# N1 is still master at this point (takeover is step 10), so settings go to N1.
+# ---- 11. settings change mid-play → resubscribe, playback continues ---------
+# N1 is still master at this point (takeover is step 12), so settings go to N1.
 post_retry "$N1/api/group/settings" '{"codec":"pcm","transport":"udp","bufferMs":200}' || die "settings POST failed"
 wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID1"'").settings.bufferMs' 200 || die "bufferMs not 200"
 rising "$N1/api/status" '.sink.played' 1 || die "n1 playback stalled after settings change"
 rising "$N2/api/status" '.sink.played' 1 || die "n2 playback stalled after settings change"
-pass "9 live settings change (bufferMs=200), playback continues on both"
+pass "11 live settings change (bufferMs=200), playback continues on both"
 
-# ---- 10. takeover: make n2 master; group id unchanged -----------------------
+# ---- 12. takeover: make n2 master; group id unchanged -----------------------
 post "$N1/api/group/master" "{\"node\":\"$ID2\"}"
 wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").master' "$ID2" 15 || die "takeover: master not n2"
 wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'")|.members|length' 2 || die "takeover: members != 2"
-pass "10 takeover → master n2, group id unchanged"
+pass "12 takeover → master n2, group id unchanged"
 
 # n2 is master now; restart playback on the new master so both sinks subscribe.
 post_retry "$N2/api/play" '{"uri":"file:tone.wav"}' || die "play on n2 (new master) kept failing"
 wait_for "$N1/api/status" '.sink.played>0' true 8 || die "n1 not playing after takeover"
 wait_for "$N2/api/status" '.sink.played>0' true 8 || die "n2 not playing after takeover"
 
-# ---- 11. opus leg (only when both nodes report opus) ------------------------
+# ---- 13. opus leg (only when both nodes report opus) ------------------------
 o2=$(api "$N2/api/cluster" | jq -r --arg id "$ID2" '[.nodes[]|select(.id==$id).capabilities.codecs[]]|index("opus")!=null')
 if [ "$o1" = true ] && [ "$o2" = true ]; then
   P1=$(api "$N1/api/status" | jq .sink.played)
@@ -161,23 +185,54 @@ if [ "$o1" = true ] && [ "$o2" = true ]; then
   api "$N2/api/status" | jq -e '.sink.played > '"$P2" >/dev/null || die "n2 opus playback stalled"
   post "$N2/api/group/settings" '{"codec":"pcm","transport":"udp","bufferMs":200}'
   wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID2"'").settings.codec' pcm || die "codec not reset to pcm"
-  pass "11 opus leg: both sinks play through opus; reset to pcm"
+  pass "13 opus leg: both sinks play through opus; reset to pcm"
 else
-  pass "11 opus leg skipped (codecs opus not present on both: n1=$o1 n2=$o2)"
+  pass "13 opus leg skipped (codecs opus not present on both: n1=$o1 n2=$o2)"
 fi
 
-# ---- 12. stop → playback idle on both ---------------------------------------
+# ---- 14. stop → playback idle on both ---------------------------------------
 post "$N2/api/stop"
 wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").playback.state' idle || die "playback not idle after stop"
 # Once the session ends the source goes idle: /api/status omits .source entirely
 # (it is present only while a source is actively running, D19).
 wait_for "$N2/api/status" '.source == null' true 8 || die "n2 source still active after stop"
-pass "12 stop → playback idle on both; n2 source goes idle"
+pass "14 stop → playback idle on both; n2 source goes idle"
 
-# ---- 13. kill the master (n2) → n1 reverts to solo within ~15s --------------
+# ---- 15. group-name persistence (D41): name a group, restart n2, name known -
+# Name the group (keyed by the n1+n2 XOR id), confirm n2 sees it, then kill +
+# relaunch n2 against the SAME data dir. n2 reloads cluster.json (group names +
+# settings) BEFORE rejoining gossip, so after rejoin + group re-form the name is
+# still attached. (Pure persistence-vs-gossip isolation is covered by the cluster
+# unit tests; here we assert the end-to-end "name survives a restart" guarantee.)
+post "$N2/api/group/name" "{\"group\":\"$GID\",\"name\":\"persisted-room\"}"
+wait_for "$N2/api/cluster" '.groups[]|select(.id=="'"$GID"'").name' persisted-room || die "n2 did not see group name"
+# Confirm cluster.json was actually written on n2's data dir, then stop n2
+# cleanly (SIGTERM → graceful Close force-saves too).
+sleep 3
+[ -f "$DATA2/cluster.json" ] || die "n2 cluster.json not written (D41)"
+grep -q persisted-room "$DATA2/cluster.json" || die "n2 cluster.json missing the name (D41)"
+kill "$PID2" 2>/dev/null || true
+wait "$PID2" 2>/dev/null || true
+# n1 self-heals to solo while n2 is down; the GID combination dissolves.
+wait_for "$N1/api/status" '.role' solo 20 || die "n1 did not go solo while n2 down"
+# Relaunch n2 against the SAME DATA2 dir + ports; rejoin via n1 seed.
+"$BIN" --data "$DATA2" --media "$ROOT/testdata/media" --name n2 --host 127.0.0.1 \
+       --http-port 28080 --stream-port 29090 --source-port 29200 --gossip-port 27946 \
+       --no-mdns --join 127.0.0.1:17946 >"$LOG2" 2>&1 &  PID2=$!
+wait_for "$N2/api/status" '.id|length' 32 30 || die "n2 did not restart"
+wait_for "$N2/api/cluster" '[.nodes[]|select(.alive)]|length' 2 30 || die "n2 did not rejoin"
+# Re-form the SAME group (n1 follows n2) so the GID combination reappears; the
+# persisted name must attach to it.
+post_retry "$N1/api/follow" "{\"target\":\"$ID2\"}" || die "re-follow failed"
+wait_for "$N2/api/cluster" '.groups[]|select(.id=="'"$GID"'")|.members|length' 2 20 || die "group did not re-form"
+wait_for "$N2/api/cluster" '.groups[]|select(.id=="'"$GID"'").name' persisted-room 20 \
+  || die "n2 lost the group name across restart (D41 persistence)"
+pass "15 group-name persistence: name survives n2 restart (D41)"
+
+# ---- 16. kill the master (n2) → n1 reverts to solo within ~15s --------------
 kill "$PID2" 2>/dev/null || true
 wait_for "$N1/api/status" '.role' solo 20 || die "n1 did not revert to solo after master death"
-pass "13 master (n2) killed → n1 self-heals to solo"
+pass "16 master (n2) killed → n1 self-heals to solo"
 
 echo
 echo "e2e OK ($PASS passed, $FAIL failed)"

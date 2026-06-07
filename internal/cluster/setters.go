@@ -87,6 +87,22 @@ func (c *Cluster) SetOutputDevice(device string) {
 	c.broadcastOwn(snap)
 }
 
+// SetDisabled replaces this node's operator-disabled feature list (D40, a D14
+// extension). Caller validates the subset; C stores verbatim and re-projects
+// effective caps (probed − disabled) in the NodeView. No-op when unchanged.
+func (c *Cluster) SetDisabled(disabled []string) {
+	c.mu.Lock()
+	if c.closed || equalStrings(c.own().Disabled, disabled) {
+		c.mu.Unlock()
+		return
+	}
+	r := c.bumpOwn()
+	r.Disabled = append([]string(nil), disabled...)
+	snap := cloneNode(r)
+	c.mu.Unlock()
+	c.broadcastOwn(snap)
+}
+
 // SetFollowing sets this node's following target (§5). id.Zero == solo master.
 func (c *Cluster) SetFollowing(target id.ID) {
 	c.mu.Lock()
@@ -188,6 +204,7 @@ func (c *Cluster) SetGroupName(group id.ID, name string) {
 	snap := *rec
 	c.mu.Unlock()
 	c.enqueueBroadcast(kindGroupName, group, delta{Group: group, Name: &snap})
+	c.markDirty() // D41: persist the names table
 	c.notify()
 }
 
@@ -217,6 +234,7 @@ func (c *Cluster) SetGroupSettings(group id.ID, s contracts.GroupSettings) {
 	snap := *rec
 	c.mu.Unlock()
 	c.enqueueBroadcast(kindSettings, group, delta{Group: group, Settings: &snap})
+	c.markDirty() // D41: persist the settings table
 	c.notify()
 }
 

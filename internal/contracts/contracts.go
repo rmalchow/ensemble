@@ -138,10 +138,11 @@ type NodeView struct {
 	StreamPort    int                `json:"streamPort"`
 	SourcePort    int                `json:"sourcePort"`
 	GossipPort    int                `json:"gossipPort"`
-	Capabilities  Capabilities       `json:"capabilities"`
-	Following     id.ID              `json:"following"` // Zero == solo master
-	Observed      map[id.ID]Observed `json:"observed"`  // peerID -> last observation
-	Alive         bool               `json:"alive"`     // from memberlist liveness
+	Capabilities  Capabilities       `json:"capabilities"` // EFFECTIVE caps: probed minus disabled (D40)
+	Disabled      []string           `json:"disabled"`     // operator-disabled features (D40); subset of {playback,opus,input}
+	Following     id.ID              `json:"following"`    // Zero == solo master
+	Observed      map[id.ID]Observed `json:"observed"`     // peerID -> last observation
+	Alive         bool               `json:"alive"`        // from memberlist liveness
 	LastSeenUnix  int64              `json:"lastSeen"`
 	Stale         bool               `json:"stale"` // not updated recently (UI hint)
 	UpdatedAt     int64              `json:"updatedAt"`
