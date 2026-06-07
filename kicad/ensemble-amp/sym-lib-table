@@ -1,4 +1,0 @@
-(sym_lib_table
-  (version 7)
-  (lib (name "ensemble")(type "KiCad")(uri "${KIPRJMOD}/ensemble.kicad_sym")(options "")(descr "ensemble-amp project symbols"))
-)
