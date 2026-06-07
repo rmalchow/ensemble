@@ -88,6 +88,18 @@ func (s *rateServo) observe(consumedSamples, masterNanos, deviceDelayNs int64, o
 	wantSamples := float64(elapsed) * float64(stream.SampleRate) / 1e9
 	gotSamples := emitted - s.baseEmit
 	rawSkew := 1e6 * (gotSamples - wantSamples) / wantSamples
+	// Outlier rejection: no crystal is >800ppm off — a spike that size is a
+	// SCHEDULER artifact (late-skipped slots remove whole frames from 'got';
+	// e.g. 4 skips in one window read as −9300ppm and whipsawed the output).
+	// Measure-and-discard: re-seed the window, keep the controller state.
+	if s.seeded && (rawSkew > 800 || rawSkew < -800) {
+		s.lastSkew = rawSkew
+		s.lastGot = gotSamples
+		s.lastWant = wantSamples
+		s.baseEmit = emitted
+		s.baseMaster = masterNanos
+		return s.outPPM
+	}
 	// EMA across window steps: on high-RTT links (Wi-Fi) the clock offset
 	// jitters by hundreds of µs, which reads as ±200ppm of fake per-window
 	// skew. True crystal skew is constant — smooth before the PI step.

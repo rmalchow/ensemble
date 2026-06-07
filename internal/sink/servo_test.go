@@ -67,8 +67,11 @@ func TestServoConvergesNegative(t *testing.T) {
 }
 
 func TestServoClampsPPM(t *testing.T) {
+	// 700ppm: above the ±500 test clamp but below the 800ppm outlier
+	// rejection (skew beyond that is treated as a scheduler artifact, not a
+	// crystal — see TestServoRejectsOutlierWindows).
 	s := newRateServo(fastServoCfg())
-	out := driveServo(s, 5000, 2000, false)
+	out := driveServo(s, 700, 2000, false)
 	if out < -500.0001 || out > 500.0001 {
 		t.Fatalf("output %.1f outside ±500 clamp", out)
 	}
@@ -147,5 +150,21 @@ func TestServoUsesDeviceDelay(t *testing.T) {
 	}
 	if math.Abs(out) > 20 {
 		t.Fatalf("with device delay subtracted, expected ≈0 ppm, got %.1f", out)
+	}
+}
+
+// TestServoRejectsOutlierWindows pins the artifact guard: a window whose raw
+// skew exceeds ±800ppm (late-skipped slots removing whole frames from the
+// consumed count) must be measured-and-discarded — controller output
+// unchanged — instead of whipsawing the rate.
+func TestServoRejectsOutlierWindows(t *testing.T) {
+	s := newRateServo(fastServoCfg())
+	out := driveServo(s, 100, 600, false) // settle near -100
+	before := out
+	// One poisoned window: a burst of "late skips" — consumed freezes while
+	// master time advances a full window.
+	s.observe(int64(600*960), int64(600)*stream.FrameNanos+3_000_000_000, 0, false)
+	if got := s.ratePPM(); got != before {
+		t.Fatalf("outlier window changed output: %v -> %v", before, got)
 	}
 }
