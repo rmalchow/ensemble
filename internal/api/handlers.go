@@ -1,7 +1,14 @@
 package api
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -290,10 +297,71 @@ func (s *Server) handleGroupMaster(c echo.Context) error {
 		return failCode(c, http.StatusBadRequest, "bad_node", "")
 	}
 	if err := s.cfg.Group.MakeMaster(c.Request().Context(), node); err != nil {
+		// §5.2/D17: takeover may be requested on ANY group member; the API
+		// layer forwards it to the CURRENT master (one hop, never re-forwarded).
+		if errors.Is(err, ErrNotMaster) && c.Request().Header.Get(proxiedHeader) == "" {
+			if ferr := s.forwardMakeMaster(c, node); ferr == nil {
+				s.log.Info("ui mutation", append(auditAttrs(c, "makeMaster"), "node", node.String(), "forwarded", true)...)
+				return c.NoContent(http.StatusNoContent)
+			} else {
+				s.log.Warn("takeover forward to master failed", "node", node.String(), "err", ferr)
+			}
+		}
 		return s.fail(c, err)
 	}
 	s.log.Info("ui mutation", append(auditAttrs(c, "makeMaster"), "node", node.String())...)
 	return c.NoContent(http.StatusNoContent)
+}
+
+// forwardMakeMaster re-issues POST /api/group/master {node} at the current
+// master of the group containing node (§5.2 step 1: "the receiving node
+// forwards the request to the current master"). One hop: the forwarded
+// request carries the proxied header, so the master never re-forwards.
+func (s *Server) forwardMakeMaster(c echo.Context, node id.ID) error {
+	snap := s.cfg.Cluster.Snapshot()
+	var master id.ID
+	for _, g := range snap.Groups {
+		for _, m := range g.Members {
+			if m == node {
+				master = g.Master
+				break
+			}
+		}
+	}
+	if master.IsZero() || master == s.cfg.Cluster.Self() {
+		return fmt.Errorf("no forwardable master for %s", node)
+	}
+	port := s.httpPortOf(master)
+	addrs := s.cfg.Cluster.DialCandidates(master)
+	if port == 0 || len(addrs) == 0 {
+		return fmt.Errorf("master %s unreachable", master)
+	}
+	body, _ := json.Marshal(MasterReq{Node: node.String()})
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 5*time.Second)
+	defer cancel()
+	var lastErr error
+	for _, a := range addrs {
+		url := "http://" + net.JoinHostPort(a.String(), strconv.Itoa(port)) + "/api/group/master"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(proxiedHeader, "1")
+		req.Header.Set(fromHeader, s.cfg.Cluster.Self().String())
+		resp, err := proxyHTTP.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("master answered %d", resp.StatusCode)
+	}
+	return lastErr
 }
 
 // handlePlay serves a media-source URI to THIS node's group; master only
