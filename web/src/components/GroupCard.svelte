@@ -1,6 +1,11 @@
 <script>
   // One derived group (J arch §4): name, playback bar, members, settings text.
-  import { nodeById, groupLabel, addTargets } from "../lib/derive.js";
+  import {
+    nodeById,
+    groupLabel,
+    groupNameIsDerived,
+    addTargets,
+  } from "../lib/derive.js";
   import { renameGroup, follow } from "../lib/api.js";
   import EditableText from "./EditableText.svelte";
   import PlaybackBar from "./PlaybackBar.svelte";
@@ -8,7 +13,13 @@
 
   let { group, snapshot, self } = $props();
 
-  let label = $derived(groupLabel(group));
+  // The server resolves the display label (D42): an explicit override or a
+  // DERIVED label from member names. Derived labels render muted/italic; the
+  // editor edits the OVERRIDE (empty when derived), and clearing it (commit
+  // empty) resets back to the derived label.
+  let derived = $derived(groupNameIsDerived(group));
+  let derivedLabel = $derived(groupLabel(group));
+  let override = $derived(derived ? "" : group.name || "");
   let members = $derived(
     group.members.map((id) => nodeById(snapshot, id)).filter(Boolean),
   );
@@ -34,7 +45,13 @@
 <div class="card">
   <div class="row between">
     <h3>
-      <EditableText value={label} onsave={(n) => renameGroup(group.id, n)} />
+      <EditableText
+        value={override}
+        placeholder={derivedLabel}
+        muted={derived}
+        allowEmpty={true}
+        onsave={(n) => renameGroup(group.id, n)}
+      />
     </h3>
   </div>
 

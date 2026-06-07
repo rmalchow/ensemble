@@ -11,32 +11,27 @@ import (
 	"ensemble/internal/id"
 )
 
-// clusterState is the persisted lookup table (D41): the group NAMES + SETTINGS
-// maps with their FULL records (incl. version + writer) so the load-vs-gossip
-// merge follows the exact same LWW rule. Node records and playback are NOT
-// persisted (runtime/replicated). Maps are keyed by group id (hex via the
-// id.ID TextMarshaler).
+// clusterState is the persisted lookup table (D41, narrowed by D42): the group
+// override-NAMES map ONLY, with FULL records (incl. version + writer) so the
+// load-vs-gossip merge follows the exact same LWW rule. The names map is keyed by
+// the member-set XOR (an override names a specific COMBINATION of rooms, §4/§5).
+// Group settings are NOT persisted (D42: master-keyed live state), nor are node
+// records or playback (runtime/replicated).
 type clusterState struct {
-	Groups   map[id.ID]*GroupNameRecord     `json:"groups"`
-	Settings map[id.ID]*GroupSettingsRecord `json:"settings"`
+	Groups map[id.ID]*GroupNameRecord `json:"groups"`
 }
 
-// snapshotState clones the doc's names + settings maps under the lock for an
-// atomic save. Caller must NOT hold c.mu.
+// snapshotState clones the doc's override-names map under the lock for an atomic
+// save. Caller must NOT hold c.mu.
 func (c *Cluster) snapshotState() clusterState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := clusterState{
-		Groups:   make(map[id.ID]*GroupNameRecord, len(c.doc.Groups)),
-		Settings: make(map[id.ID]*GroupSettingsRecord, len(c.doc.Settings)),
+		Groups: make(map[id.ID]*GroupNameRecord, len(c.doc.Groups)),
 	}
 	for k, v := range c.doc.Groups {
 		cp := *v
 		st.Groups[k] = &cp
-	}
-	for k, v := range c.doc.Settings {
-		cp := *v
-		st.Settings[k] = &cp
 	}
 	return st
 }
@@ -49,12 +44,9 @@ func (s clusterState) into(doc *Document) {
 	for g, r := range s.Groups {
 		doc.mergeGroupName(g, r)
 	}
-	for g, r := range s.Settings {
-		doc.mergeSettings(g, r)
-	}
 }
 
-// markDirty signals the save loop that the names/settings tables changed (D41).
+// markDirty signals the save loop that the override-names table changed (D41/D42).
 // Coalesced (buffer 1, non-blocking); a no-op when persistence is disabled.
 func (c *Cluster) markDirty() {
 	if c.statePath == "" || c.dirty == nil {

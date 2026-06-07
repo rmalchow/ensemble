@@ -10,8 +10,9 @@ import (
 	"ensemble/internal/id"
 )
 
-// TestStateSaveLoadRoundTrip: a SetGroupName/SetGroupSettings persists (debounced)
-// and a fresh cluster started against the same path loads the records.
+// TestStateSaveLoadRoundTrip: a SetGroupName persists (debounced) and a fresh
+// cluster started against the same path loads it. D42: SetGroupSettings does NOT
+// persist (master-keyed live state) — only the override-names map is saved.
 func TestStateSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cluster.json")
@@ -37,7 +38,8 @@ func TestStateSaveLoadRoundTrip(t *testing.T) {
 	waitSave(t, saved)
 	_ = c1.Close()
 
-	// Fresh cluster, same path, no gossip: must load both records.
+	// Fresh cluster, same path, no gossip: must load the NAME; settings are NOT
+	// persisted (D42), so they reload as absent.
 	c2, err := New(Config{Self: id.New(), GossipPort: 7946, StatePath: path})
 	if err != nil {
 		t.Fatalf("New2: %v", err)
@@ -50,8 +52,8 @@ func TestStateSaveLoadRoundTrip(t *testing.T) {
 	if gn == nil || gn.Name != "kitchen" {
 		t.Fatalf("loaded name = %+v, want kitchen", gn)
 	}
-	if gs == nil || gs.Codec != "opus" || gs.Transport != "tcp" || gs.BufferMs != 200 {
-		t.Fatalf("loaded settings = %+v", gs)
+	if gs != nil {
+		t.Fatalf("settings must NOT persist (D42), got %+v", gs)
 	}
 }
 
@@ -110,7 +112,7 @@ func TestCorruptStateFileNonFatal(t *testing.T) {
 	}
 	defer c.Close()
 	c.mu.Lock()
-	n := len(c.doc.Groups) + len(c.doc.Settings)
+	n := len(c.doc.Groups)
 	c.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("corrupt file should start empty, got %d records", n)
@@ -184,9 +186,6 @@ func writeStateFile(t *testing.T, path string, st clusterState) {
 	c.doc = newDocument()
 	for k, v := range st.Groups {
 		c.doc.Groups[k] = v
-	}
-	for k, v := range st.Settings {
-		c.doc.Settings[k] = v
 	}
 	if err := c.saveState(); err != nil {
 		t.Fatalf("writeStateFile: %v", err)

@@ -5,7 +5,6 @@ import (
 	"net/netip"
 	"time"
 
-	"ensemble/internal/contracts"
 	"ensemble/internal/id"
 	"ensemble/internal/stream"
 )
@@ -72,23 +71,10 @@ func (e *Engine) reconcile() {
 		e.stopLocked()
 	}
 
-	// Follow our group ID across membership changes (§5: group ID = XOR of the
-	// member set, so it changes whenever a member joins/leaves). The session was
-	// created under the group ID at Play time; when it drifts (e.g. the Pis
-	// disconnect), the master must re-point its playback record to the CURRENT
-	// derived group ID — otherwise it keeps writing under the stale id, the new
-	// group has no playback record, and every member (incl. the local secondary)
-	// sees state="idle" and stops. Clear the old record to idle so a viewer of the
-	// vanished group sees nothing playing.
-	if isMaster && e.sess != nil && e.sess.groupID != mv.group.ID {
-		old := e.sess.groupID
-		e.sess.groupID = mv.group.ID
-		e.p.Cluster.SetPlayback(old, contracts.Playback{State: "idle"})
-		e.p.Cluster.SetPlayback(mv.group.ID, e.sess.playbackRecord(now, e.p.Source.Stats()))
-		e.lastBeat = now
-		e.log.Info("group id changed mid-session; playback re-pointed",
-			"from", old.String(), "to", mv.group.ID.String())
-	}
+	// D42: the group id is the MASTER's node id, so it no longer drifts on
+	// membership churn (a member joining/leaving keeps the master, hence the id +
+	// playback record). It changes only on a master move, which is a takeover that
+	// stops the session first — so no mid-session playback re-point is needed.
 
 	// Re-point local plumbing at the current master (the heart of "members follow
 	// the master automatically", §3.2). Subscribe/arm only while the group has an

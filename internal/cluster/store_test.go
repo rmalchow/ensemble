@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"ensemble/internal/id"
@@ -79,8 +80,8 @@ func TestDeriveGroupsFollowerJoins(t *testing.T) {
 	if len(g.Members) != 2 {
 		t.Fatalf("want 2 members, got %d", len(g.Members))
 	}
-	if g.ID != id.XOR(a, b) {
-		t.Fatal("group id should be XOR(a,b)")
+	if g.ID != a {
+		t.Fatal("group id should be the master id (D42)")
 	}
 }
 
@@ -151,8 +152,8 @@ func TestDeriveGroupsStableOrder(t *testing.T) {
 
 func TestDeriveGroupsJoinsNamePlaybackSettings(t *testing.T) {
 	a := id.New()
-	nodes := map[id.ID]*NodeRecord{a: {ID: a, Following: id.Zero}}
-	gid := a // solo group id == node id
+	nodes := map[id.ID]*NodeRecord{a: {ID: a, Name: "alpha", Following: id.Zero}}
+	gid := a // solo: group id == master id == node id; member XOR == node id too
 	names := map[id.ID]*GroupNameRecord{gid: {Name: "Kitchen"}}
 	playback := map[id.ID]*PlaybackRecord{gid: {State: "playing", URI: "file:s.wav"}}
 	settings := map[id.ID]*GroupSettingsRecord{gid: {Codec: "opus", Transport: "tcp", BufferMs: 200}}
@@ -161,11 +162,106 @@ func TestDeriveGroupsJoinsNamePlaybackSettings(t *testing.T) {
 	if g.Name != "Kitchen" {
 		t.Fatalf("name = %q", g.Name)
 	}
+	if g.NameIsDerived {
+		t.Fatal("an explicit override must not be flagged derived")
+	}
 	if g.Playback.State != "playing" || g.Playback.URI != "file:s.wav" {
 		t.Fatalf("playback = %+v", g.Playback)
 	}
 	if g.Settings.Codec != "opus" || g.Settings.BufferMs != 200 {
 		t.Fatalf("settings = %+v", g.Settings)
+	}
+}
+
+// TestDeriveGroupsIDIsMasterPlaybackSettingsKeyed verifies D42: a MULTI-member
+// group is keyed by the master id for playback + settings, while the explicit
+// name OVERRIDE is keyed by the member-set XOR.
+func TestDeriveGroupsIDIsMasterPlaybackSettingsKeyed(t *testing.T) {
+	a := id.New() // master
+	b := id.New() // follower
+	nodes := map[id.ID]*NodeRecord{
+		a: {ID: a, Name: "alpha", Following: id.Zero},
+		b: {ID: b, Name: "bravo", Following: a},
+	}
+	alive := map[id.ID]bool{a: true, b: true}
+	xor := id.XOR(a, b)
+	names := map[id.ID]*GroupNameRecord{xor: {Name: "Den"}}        // override keyed by XOR
+	playback := map[id.ID]*PlaybackRecord{a: {State: "playing"}}   // keyed by master id
+	settings := map[id.ID]*GroupSettingsRecord{a: {Codec: "opus"}} // keyed by master id
+	groups := DeriveGroups(nodes, names, playback, settings, alive, a)
+	if len(groups) != 1 {
+		t.Fatalf("want 1 group, got %d", len(groups))
+	}
+	g := groups[0]
+	if g.ID != a {
+		t.Fatalf("group id must be master id, got %s", g.ID)
+	}
+	if g.Name != "Den" || g.NameIsDerived {
+		t.Fatalf("override (XOR-keyed) name not resolved: %q derived=%v", g.Name, g.NameIsDerived)
+	}
+	if g.Playback.State != "playing" {
+		t.Fatalf("playback (master-keyed) not resolved: %+v", g.Playback)
+	}
+	if g.Settings.Codec != "opus" {
+		t.Fatalf("settings (master-keyed) not resolved: %+v", g.Settings)
+	}
+}
+
+// TestDeriveGroupsDerivedLabel verifies the server-side derived label: sorted
+// member names joined with " + ", solo = node name, " +N more" past the cap,
+// short-id fallback for a member missing from the snapshot.
+func TestDeriveGroupsDerivedLabel(t *testing.T) {
+	a := id.New()
+	b := id.New()
+	nodes := map[id.ID]*NodeRecord{
+		a: {ID: a, Name: "kitchen", Following: id.Zero},
+		b: {ID: b, Name: "bedroom", Following: a},
+	}
+	alive := map[id.ID]bool{a: true, b: true}
+	groups := DeriveGroups(nodes, nil, nil, nil, alive, a)
+	g := groups[0]
+	if g.Name != "bedroom + kitchen" { // names sorted, master-independent
+		t.Fatalf("derived label = %q", g.Name)
+	}
+	if !g.NameIsDerived {
+		t.Fatal("derived label must be flagged NameIsDerived")
+	}
+
+	// Solo derived label == node name.
+	solo := DeriveGroups(map[id.ID]*NodeRecord{a: {ID: a, Name: "kitchen", Following: id.Zero}},
+		nil, nil, nil, map[id.ID]bool{a: true}, a)
+	if solo[0].Name != "kitchen" || !solo[0].NameIsDerived {
+		t.Fatalf("solo derived label = %q derived=%v", solo[0].Name, solo[0].NameIsDerived)
+	}
+}
+
+// TestDeriveGroupsDerivedLabelCapAndFallback exercises the " +N more" truncation
+// and the short-id fallback for a member missing from the snapshot.
+func TestDeriveGroupsDerivedLabelCapAndFallback(t *testing.T) {
+	master := id.New()
+	nodes := map[id.ID]*NodeRecord{master: {ID: master, Name: "m", Following: id.Zero}}
+	followers := make([]id.ID, 0, 5)
+	for i := 0; i < 5; i++ {
+		f := id.New()
+		followers = append(followers, f)
+		nodes[f] = &NodeRecord{ID: f, Name: "", Following: master} // empty name → short-id fallback
+	}
+	// give names to a few so the label is deterministic-ish; leave the rest empty.
+	alive := map[id.ID]bool{master: true}
+	for _, f := range followers {
+		alive[f] = true
+	}
+	groups := DeriveGroups(nodes, nil, nil, nil, alive, master)
+	g := groups[0]
+	if len(g.Members) != 6 {
+		t.Fatalf("want 6 members, got %d", len(g.Members))
+	}
+	// 6 names → first 3 shown + " +3 more".
+	if !strings.Contains(g.Name, "+3 more") {
+		t.Fatalf("expected truncation in label, got %q", g.Name)
+	}
+	if !g.NameIsDerived {
+		t.Fatal("derived label must be flagged NameIsDerived")
 	}
 }
 

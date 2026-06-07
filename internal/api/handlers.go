@@ -259,7 +259,10 @@ func (s *Server) handleUnfollow(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-// handleGroupName names a group (§4/§9.1; any node may write, LWW).
+// handleGroupName names a group (§4/§9.1; any node may write, LWW). The request's
+// `group` is the current group id (= master id, D42); the override is stored under
+// the group's CURRENT member-set XOR (resolved server-side). An empty `name`
+// CLEARS the override, reverting the group to its derived label.
 func (s *Server) handleGroupName(c echo.Context) error {
 	var req GroupNameReq
 	if err := c.Bind(&req); err != nil {

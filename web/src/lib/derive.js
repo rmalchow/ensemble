@@ -44,12 +44,20 @@ export function joinTargets(snapshot, node) {
   );
 }
 
-// groupLabel returns the group's name or a short fallback.
+// groupLabel returns the group's display label. The server always supplies a
+// label in `group.name` (D42): either an explicit override or a derived label
+// computed from member names. A short-id fallback only covers a transient empty.
 export function groupLabel(group) {
   if (!group) return "";
   return group.name && group.name.length > 0
     ? group.name
     : "Group " + shortId(group.id);
+}
+
+// groupNameIsDerived reports whether the group's label is the server-DERIVED
+// label (no explicit override) — the UI renders those muted/italic (D42).
+export function groupNameIsDerived(group) {
+  return !!group && group.nameDerived === true;
 }
 
 // selfNode returns this node's NodeView, or undefined.

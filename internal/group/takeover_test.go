@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"ensemble/internal/contracts"
 	"ensemble/internal/id"
 )
 
@@ -64,6 +65,30 @@ func TestMakeMasterSelfUsesLocalUnfollow(t *testing.T) {
 	}
 	if !followedB {
 		t.Error("missing Follow(b -> self)")
+	}
+}
+
+// TestMakeMasterCarriesSettings verifies D42: on takeover the current master's
+// settings record is copied to the NEW master's key (records are master-keyed),
+// so the group keeps its codec/transport/bufferMs across the handoff.
+func TestMakeMasterCarriesSettings(t *testing.T) {
+	self, b := idN(1), idN(2)
+	r := newRig(self, 0, false)
+	custom := contracts.GroupSettings{Codec: "pcm", Transport: "tcp", BufferMs: 222}
+	r.cl.setSnap(masterSnap(self, custom, b))
+
+	if err := r.e.MakeMaster(context.Background(), b); err != nil {
+		t.Fatalf("MakeMaster: %v", err)
+	}
+	sc, ok := r.cl.lastSettings()
+	if !ok {
+		t.Fatal("takeover did not write any settings record")
+	}
+	if sc.group != b {
+		t.Fatalf("settings written under %v, want new master %v", sc.group, b)
+	}
+	if sc.s.Codec != "pcm" || sc.s.Transport != "tcp" || sc.s.BufferMs != 222 {
+		t.Fatalf("settings not carried over: %+v", sc.s)
 	}
 }
 

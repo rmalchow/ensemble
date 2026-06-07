@@ -165,13 +165,24 @@ type Observed struct {
 }
 
 // GroupView is one derived group (§5) with its name + playback status.
+//
+// ID is the MASTER's node id (D42): playback + settings records are keyed by it,
+// so membership churn no longer orphans them. A solo group's ID equals the node's
+// own id.
+//
+// Name is the resolved display label: the EXPLICIT override (the XOR-of-members-
+// keyed name map, §4) when one exists for the current member set, else a DERIVED
+// label computed server-side from the member NAMES (DeriveGroups). NameIsDerived
+// reports which: true = no override, the derived label; false = an operator
+// override.
 type GroupView struct {
-	ID       id.ID         `json:"id"` // XOR of member IDs
-	Name     string        `json:"name"`
-	Master   id.ID         `json:"master"`
-	Members  []id.ID       `json:"members"`
-	Playback Playback      `json:"playback"`
-	Settings GroupSettings `json:"settings"`
+	ID            id.ID         `json:"id"`          // master node id (D42)
+	Name          string        `json:"name"`        // override, else derived label
+	NameIsDerived bool          `json:"nameDerived"` // true when Name is the derived label (no override)
+	Master        id.ID         `json:"master"`
+	Members       []id.ID       `json:"members"`
+	Playback      Playback      `json:"playback"`
+	Settings      GroupSettings `json:"settings"`
 }
 
 // Playback mirrors the replicated playback-status record (§4), written only by

@@ -204,7 +204,7 @@ func (c *Cluster) SetGroupName(group id.ID, name string) {
 	snap := *rec
 	c.mu.Unlock()
 	c.enqueueBroadcast(kindGroupName, group, delta{Group: group, Name: &snap})
-	c.markDirty() // D41: persist the names table
+	c.markDirty() // D41/D42: persist the override-names table
 	c.notify()
 }
 
@@ -234,7 +234,8 @@ func (c *Cluster) SetGroupSettings(group id.ID, s contracts.GroupSettings) {
 	snap := *rec
 	c.mu.Unlock()
 	c.enqueueBroadcast(kindSettings, group, delta{Group: group, Settings: &snap})
-	c.markDirty() // D41: persist the settings table
+	// D42: group settings are NOT persisted (master-keyed live state); only the
+	// override-names map is persisted (no markDirty here).
 	c.notify()
 }
 

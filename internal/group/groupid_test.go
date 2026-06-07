@@ -3,15 +3,14 @@ package group
 import (
 	"testing"
 	"time"
-
-	"ensemble/internal/id"
 )
 
-// TestMasterRePointsPlaybackOnGroupIDChange is the regression test for the
-// fan-out bug: when members leave, the group ID (XOR of the member set) changes;
-// the master must re-write its playback record under the NEW group id and clear
-// the OLD one, so the surviving members don't see state="idle" and stop.
-func TestMasterRePointsPlaybackOnGroupIDChange(t *testing.T) {
+// TestGroupIDStableAcrossMembershipChurn verifies D42: the group id is the
+// MASTER's node id, so it does NOT drift when members join/leave. The master's
+// session keeps its groupID and never re-points the playback record across churn
+// (the old XOR-id re-point block is removed). This supersedes the former
+// TestMasterRePointsPlaybackOnGroupIDChange regression.
+func TestGroupIDStableAcrossMembershipChurn(t *testing.T) {
 	self, b, c := idN(1), idN(2), idN(3)
 	r := newRig(self, 1_000_000, true) // endless live source
 	r.now = time.Unix(1_700_000_000, 0)
@@ -24,42 +23,26 @@ func TestMasterRePointsPlaybackOnGroupIDChange(t *testing.T) {
 	}
 	defer r.e.Close()
 
-	fullGID := id.XOR(self, b, c)
-	if r.e.sess.groupID != fullGID {
-		t.Fatalf("session groupID = %v, want full %v", r.e.sess.groupID, fullGID)
+	if r.e.sess.groupID != self {
+		t.Fatalf("session groupID = %v, want master id %v", r.e.sess.groupID, self)
 	}
 
-	// b and c disconnect → group is now just {self}; its ID changes.
+	// b and c disconnect → group is now just {self}. Master is unchanged, so the
+	// group id (master id) and playback record must be unchanged.
 	r.cl.setSnap(withPlaying(soloSnap(self)))
-	soloGID := id.XOR(self)
-
-	// Advance the heartbeat clock so the reconcile-driven re-point fires and is
-	// distinguishable, then reconcile.
 	r.advance(100 * time.Millisecond)
 	r.e.reconcile()
 
-	if r.e.sess.groupID != soloGID {
-		t.Fatalf("session groupID after members left = %v, want solo %v", r.e.sess.groupID, soloGID)
+	if r.e.sess.groupID != self {
+		t.Fatalf("session groupID changed across churn = %v, want stable %v", r.e.sess.groupID, self)
 	}
 
-	// The most recent playback write must be PLAYING under the NEW (solo) group id.
-	pc, ok := r.cl.lastPlayback()
-	if !ok {
-		t.Fatal("no playback written")
-	}
-	if pc.group != soloGID || pc.pb.State != "playing" {
-		t.Fatalf("last playback = group %v state %q, want solo playing", pc.group, pc.pb.State)
-	}
-
-	// The OLD group id must have been cleared to idle (somewhere in the history).
-	clearedOld := false
+	// No playback record was ever written under any id OTHER than the master id —
+	// in particular, nothing was cleared to idle by a churn re-point.
 	for _, p := range r.cl.playbackHistory() {
-		if p.group == fullGID && p.pb.State == "idle" {
-			clearedOld = true
+		if p.group != self {
+			t.Fatalf("playback written under non-master id %v (churn re-point should be gone)", p.group)
 		}
-	}
-	if !clearedOld {
-		t.Fatal("old group id playback not cleared to idle")
 	}
 }
 

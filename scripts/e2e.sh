@@ -101,12 +101,31 @@ b1=$(api "$N1/api/cluster" | jq -r --arg id "$ID1" '[.nodes[]|select(.id==$id).c
 [ "$b1" = "$HAS_ALSA" ] || die "n1 backends/alsa=$b1 want $HAS_ALSA"
 pass "3 capabilities reflect host (opus=$o1 alsa=$b1)"
 
-# ---- 4. follow forms a 2-node group with XOR id -----------------------------
+# ---- 4. follow forms a 2-node group; id = master id (D42) -------------------
+# Before forming the group, the two solo groups carry server-DERIVED labels
+# (nameDerived=true) — each just the node's own name (n1 / n2).
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$ID1"'").nameDerived' true || die "solo n1 label not derived"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$ID1"'").name' n1 || die "solo n1 derived label != n1"
 post "$N2/api/follow" "{\"target\":\"$ID1\"}"
-GID=$(xor16 "$ID1" "$ID2")
+# D42: the group id is the MASTER's node id (was XOR-of-members). With n1 master,
+# the group id == ID1. (XOR of the member set is kept only as the override-name
+# key, exercised via /api/group/name below.)
+GID=$ID1
 wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID1"'")|.members|length' 2 || die "group not formed (master n1)"
-wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID1"'").id' "$GID" || die "group id != XOR"
-pass "4 follow → 2-node group, master n1, id=XOR ($GID)"
+wait_for "$N1/api/cluster" '.groups[]|select(.master=="'"$ID1"'").id' "$GID" || die "group id != master id"
+# Fresh unnamed 2-node group → server-DERIVED label "n1 + n2" (names sorted).
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").nameDerived' true || die "fresh group label not derived"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").name' "n1 + n2" || die "derived label != 'n1 + n2'"
+pass "4 follow → 2-node group, master n1, id=master id ($GID); derived label 'n1 + n2'"
+
+# ---- 4b. name override: explicit name beats the derived label ---------------
+# The override is keyed by the member-set XOR server-side (an override names a
+# COMBINATION of rooms), so it survives the takeover in step 12. nameDerived
+# flips to false.
+post "$N1/api/group/name" "{\"group\":\"$GID\",\"name\":\"the-lab\"}"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").name' the-lab || die "override name not applied"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").nameDerived' false || die "override still flagged derived"
+pass "4b explicit name override 'the-lab' (nameDerived=false)"
 
 # ---- 5. play → BOTH sinks play; n1 source.clients == 2 ----------------------
 post_retry "$N1/api/play" '{"uri":"file:tone.wav"}' || die "play on n1 kept failing"
@@ -162,11 +181,24 @@ rising "$N1/api/status" '.sink.played' 1 || die "n1 playback stalled after setti
 rising "$N2/api/status" '.sink.played' 1 || die "n2 playback stalled after settings change"
 pass "11 live settings change (bufferMs=200), playback continues on both"
 
-# ---- 12. takeover: make n2 master; group id unchanged -----------------------
+# ---- 12. takeover: make n2 master; group id MOVES to n2 (D42) ---------------
+# D42: the group id is the master's node id, so takeover changes it from ID1 to
+# ID2. The membership (hence the XOR override key) is unchanged, so the explicit
+# name "the-lab" CARRIES OVER (nameDerived stays false), and group SETTINGS carry
+# over too (one extra SetGroupSettings during the handoff). Playback does NOT.
+GID2=$ID2
 post "$N1/api/group/master" "{\"node\":\"$ID2\"}"
-wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'").master' "$ID2" 15 || die "takeover: master not n2"
-wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID"'")|.members|length' 2 || die "takeover: members != 2"
-pass "12 takeover → master n2, group id unchanged"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID2"'").master' "$ID2" 15 || die "takeover: master not n2"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID2"'")|.members|length' 2 || die "takeover: members != 2"
+# Name override survives the master change (XOR-keyed), still non-derived.
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID2"'").name' the-lab 15 || die "takeover: name override not carried"
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID2"'").nameDerived' false || die "takeover: name flagged derived"
+# Settings carried over to the new master's key (bufferMs=200 from step 11).
+wait_for "$N1/api/cluster" '.groups[]|select(.id=="'"$GID2"'").settings.bufferMs' 200 15 || die "takeover: settings not carried"
+pass "12 takeover → master n2, group id moves to n2; name + settings carry over"
+
+# The group id is now ID2 for the rest of the flow.
+GID=$GID2
 
 # n2 is master now; restart playback on the new master so both sinks subscribe.
 post_retry "$N2/api/play" '{"uri":"file:tone.wav"}' || die "play on n2 (new master) kept failing"
@@ -199,11 +231,12 @@ wait_for "$N2/api/status" '.source == null' true 8 || die "n2 source still activ
 pass "14 stop → playback idle on both; n2 source goes idle"
 
 # ---- 15. group-name persistence (D41): name a group, restart n2, name known -
-# Name the group (keyed by the n1+n2 XOR id), confirm n2 sees it, then kill +
-# relaunch n2 against the SAME data dir. n2 reloads cluster.json (group names +
-# settings) BEFORE rejoining gossip, so after rejoin + group re-form the name is
-# still attached. (Pure persistence-vs-gossip isolation is covered by the cluster
-# unit tests; here we assert the end-to-end "name survives a restart" guarantee.)
+# Rename the group (the override is keyed by the n1+n2 member-set XOR), confirm
+# n2 sees it, then kill + relaunch n2 against the SAME data dir. n2 reloads
+# cluster.json (the override-NAMES map ONLY, D42) BEFORE rejoining gossip, so
+# after rejoin + group re-form the name is still attached. (Pure persistence-vs-
+# gossip isolation is covered by the cluster unit tests; here we assert the
+# end-to-end "name survives a restart" guarantee.)
 post "$N2/api/group/name" "{\"group\":\"$GID\",\"name\":\"persisted-room\"}"
 wait_for "$N2/api/cluster" '.groups[]|select(.id=="'"$GID"'").name' persisted-room || die "n2 did not see group name"
 # Confirm cluster.json was actually written on n2's data dir, then stop n2

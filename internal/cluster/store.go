@@ -1,8 +1,10 @@
 package cluster
 
 import (
+	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 
 	"ensemble/internal/contracts"
 	"ensemble/internal/id"
@@ -171,7 +173,12 @@ func DeriveGroups(
 	groups := make([]contracts.GroupView, 0, len(members))
 	for master, mem := range members {
 		sort.Slice(mem, func(i, j int) bool { return idLess(mem[i], mem[j]) })
-		gid := id.XOR(mem...)
+		// D42: the group id is the MASTER's node id — playback + settings records
+		// are keyed by it, so membership churn no longer orphans them. The explicit
+		// name OVERRIDE map stays keyed by the member-set XOR (an override names a
+		// specific COMBINATION of rooms; survives master changes + re-forming).
+		gid := master
+		memberXOR := id.XOR(mem...)
 		gv := contracts.GroupView{
 			ID:       gid,
 			Master:   master,
@@ -179,13 +186,45 @@ func DeriveGroups(
 			Settings: resolveSettings(settings[gid]),
 			Playback: resolvePlayback(playback[gid]),
 		}
-		if nm := names[gid]; nm != nil {
+		if nm := names[memberXOR]; nm != nil && nm.Name != "" {
 			gv.Name = nm.Name
+			gv.NameIsDerived = false
+		} else {
+			gv.Name = derivedLabel(mem, nodes)
+			gv.NameIsDerived = true
 		}
 		groups = append(groups, gv)
 	}
 	sort.Slice(groups, func(i, j int) bool { return idLess(groups[i].ID, groups[j].ID) })
 	return groups
+}
+
+// derivedLabelMax caps how many member names a derived label spells out before
+// summarising the remainder as " +N more" (§5).
+const derivedLabelMax = 3
+
+// derivedLabel computes the server-side DERIVED group label (§5/D42): the sorted
+// member NAMES joined with " + ". A member missing from the snapshot falls back
+// to its 8-char short id. A solo group (one member) is just that node's name.
+// More than derivedLabelMax names are truncated to the first few then " +N more"
+// (e.g. "bedroom + kitchen + living room +2 more"). mem is already id-sorted, so
+// the label is stable; the NAMES themselves are then sorted for a deterministic,
+// master-independent label.
+func derivedLabel(mem []id.ID, nodes map[id.ID]*NodeRecord) string {
+	names := make([]string, 0, len(mem))
+	for _, m := range mem {
+		if r, ok := nodes[m]; ok && r.Name != "" {
+			names = append(names, r.Name)
+		} else {
+			names = append(names, m.String()[:8])
+		}
+	}
+	sort.Strings(names)
+	if len(names) <= derivedLabelMax {
+		return strings.Join(names, " + ")
+	}
+	shown := strings.Join(names[:derivedLabelMax], " + ")
+	return fmt.Sprintf("%s +%d more", shown, len(names)-derivedLabelMax)
 }
 
 func appendUnique(s []id.ID, vs ...id.ID) []id.ID {

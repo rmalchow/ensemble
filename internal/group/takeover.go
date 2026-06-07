@@ -40,8 +40,18 @@ func (e *Engine) MakeMaster(ctx context.Context, node id.ID) error {
 	// Stop any running playback session before mastership moves (§5.2 step 2).
 	members := append([]id.ID(nil), mv.group.Members...)
 	hadSession := e.sess != nil
+	curSettings := fillDefaults(mv.group.Settings)
+	oldMaster := mv.group.ID // D42: group id == current master id
 	e.stopLocked()
 	e.mu.Unlock()
+
+	// D42: settings carry over on takeover. Records are keyed by the master id, so
+	// the new master would otherwise inherit defaults. Copy the group's current
+	// settings to the new master's key (one extra SetGroupSettings). Playback does
+	// NOT carry — takeover stops the session (above), as today.
+	if node != oldMaster {
+		e.p.Cluster.SetGroupSettings(node, curSettings)
+	}
 
 	e.log.Info("takeover: orchestrating", "newMaster", node.String(),
 		"group", mv.group.ID.String(), "members", len(members), "stoppedSession", hadSession)

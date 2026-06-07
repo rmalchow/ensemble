@@ -433,6 +433,39 @@ id). Fix: each reconcile, a master with a running session compares
 OLD record to `idle` and immediately writes the live record under the NEW id
 (then `sess.groupID` tracks it). Membership churn no longer stalls playout.
 
+## Group id = master id + hybrid naming (user round)
+
+**D44 — the group id is the MASTER's node id; hybrid naming; settings carry over
+on takeover**. A redesign of group keying that kills membership-churn orphaning by
+construction. **This supersedes the XOR-of-members group-id wording of D5/§5 and
+the §4 group-id record keying, and REPLACES the D43 churn re-point** (the re-point
+patch from 2a8bab7 is removed). D41 is narrowed to names-only.
+
+- **Group id = master id**. `DeriveGroups` keys the group — and its master-written
+  PLAYBACK + SETTINGS records — by the master's node id (solo group id = the
+  node's own id). Membership churn (a member joining/leaving, master unchanged)
+  no longer changes the id, so those records are never orphaned; the id changes
+  only on a master move (a takeover, which stops the session first). `GroupView.ID
+  = master`. The former D43 reconcile-time playback re-point is deleted (the bug
+  it patched can no longer occur).
+- **Hybrid naming**. The explicit name OVERRIDE map stays keyed by the member-set
+  **XOR** (an override names a specific COMBINATION of rooms; survives master
+  changes + re-forming). When no override exists, `DeriveGroups` computes a
+  server-side **DERIVED** label from the member NAMES: sorted, joined with `" + "`,
+  capped at the first 3 then `" +N more"`; solo = the node's name; missing member →
+  8-char short id. `GroupView.NameIsDerived` (json `nameDerived`) reports which.
+  `POST /api/group/name` resolves the group's CURRENT member set, computes its XOR,
+  and writes the override there; an **empty name CLEARS** it (back to derived). The
+  UI renders derived labels muted/italic and clears on an empty rename.
+- **Settings carry over on takeover**. Because settings are now master-keyed,
+  `group.MakeMaster` copies the current master's settings record to the new
+  master's key during the handoff (one extra `SetGroupSettings`). Playback does
+  NOT carry (takeover stops the session, as today).
+- **Persistence (amends D41)**. `cluster.json` persists the override-NAMES map
+  ONLY (XOR-keyed, purge-exempt, kept forever). Group settings are NO LONGER
+  persisted (master-keyed live state); node records + playback stay unpersisted.
+  (spec §4/§5/§9.1 updated.)
+
 ## Confirmed as designed (no change)
 
 - C's two-mutex exception (doc + liveness) with a never-hold-both rule. (C)
