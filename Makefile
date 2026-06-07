@@ -3,7 +3,7 @@
 # the go:embed compile, and `ui` is a separate target. `check` = vet + test +
 # gofmt.
 
-.PHONY: build ui test vet check dev clean
+.PHONY: build ui test vet check dev e2e clean
 
 build:
 	go build -o ensemble ./cmd/ensemble
@@ -25,6 +25,9 @@ check: vet test
 
 dev:
 	./scripts/dev2.sh
+
+e2e: build
+	./scripts/e2e.sh
 
 clean:
 	rm -f ensemble coverage.out
