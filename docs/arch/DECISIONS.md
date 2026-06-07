@@ -531,6 +531,12 @@ group it was in, without operator action.
   still propagating. Verified: `heal.go` already keys off `mv.stale` per reconcile
   and arms `now + Grace` only on the first stale tick — no change needed.
 
+**D46 — wire protocol v1: magic `0xE5` is the version marker; receivers ignore
+unknown packet types; an incompatible revision changes the magic**. This makes
+the wire format forward-compatible (new optional types are additive) and lets a
+protocol-minimal, receive-only client (`docs/DUMB-CLIENT.md`, `cmd/dumbclient`)
+interoperate without cluster membership. (§8.4)
+
 ## Confirmed as designed (no change)
 
 - C's two-mutex exception (doc + liveness) with a never-hold-both rule. (C)
