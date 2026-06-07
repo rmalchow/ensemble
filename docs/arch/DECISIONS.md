@@ -180,7 +180,7 @@ terminates. (G)
 **D25 — rate servo (E)**: skew estimator — cumulative samples consumed vs
 master-clock elapsed, ~3 s averaging window; backend `DelayReporter`
 (`DeviceDelay()`) used when implemented, backpressure inference otherwise —
-feeding a PI controller, output clamped ±2000 ppm and slew-limited (tuned aggressive per user testing), driving a
+feeding a PI controller, output clamped ±300 ppm and slew-limited, driving a
 4-tap Catmull-Rom fractional resampler between jitter buffer and backend.
 Runs continuously (drift *prevention*); underruns stay silence + watchdog →
 RESTART (§8.6: starved > 2 s → RESTART to the source; still starved →

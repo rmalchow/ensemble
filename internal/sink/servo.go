@@ -17,10 +17,12 @@ func defaultServoConfig() servoConfig {
 	return servoConfig{
 		Window:   3_000_000_000, // 3 s
 		WarmUp:   200_000_000,   // 200 ms
-		Kp:       0.6,           // user-requested: more aggressive correction
-		Ki:       0.1,
-		ClampPPM: 2000, // ±0.2% — still far below audibility
-		SlewPPM:  20,   // reaches the clamp in ~2s of slots instead of ~20s
+		Kp:       0.4,
+		Ki:       0.08,
+		ClampPPM: 300, // ±0.03% — covers any real crystal; a railed servo
+		//                here can't audibly wreck pitch (the ±2000 it was at
+		//                on the Pis WAS audible and was the bug's symptom).
+		SlewPPM: 15,
 	}
 }
 
@@ -29,17 +31,19 @@ func defaultServoConfig() servoConfig {
 // on generation change. Pure: no goroutine, no clock, no locking (the Playout
 // mutex guards it).
 type rateServo struct {
-	cfg        servoConfig
-	have       bool    // a baseline has been established
-	baseEmit   float64 // cumulative emitted (queue-adjusted) samples at window start
-	baseMaster int64   // master-clock ns at window start
-	integ      float64 // PI integral accumulator, ppm·s
-	seeded     bool    // the window has fully slid once: startup transient aged out
-	skewEMA    float64 // smoothed windowed skew (Wi-Fi clock jitter damping)
-	lastSkew   float64 // most recent measured skew, ppm (debug telemetry)
-	lastGot    float64 // window emitted samples (debug)
-	lastWant   float64 // window expected samples (debug)
-	outPPM     float64 // last emitted correction, ppm (slew-limited, clamped)
+	cfg         servoConfig
+	have        bool    // a baseline has been established
+	baseEmit    float64 // cumulative emitted (queue-adjusted) samples at window start
+	baseMaster  int64   // master-clock ns at window start
+	integ       float64 // PI integral accumulator, ppm·s
+	seeded      bool    // the window has fully slid once: startup transient aged out
+	skewEMA     float64 // smoothed windowed skew (Wi-Fi clock jitter damping)
+	ddSamples   float64 // heavily-smoothed device-queue depth, samples
+	windowsDone int     // full windows completed (startup-ramp gate when ok)
+	lastSkew    float64 // most recent measured skew, ppm (debug telemetry)
+	lastGot     float64 // window emitted samples (debug)
+	lastWant    float64 // window expected samples (debug)
+	outPPM      float64 // last emitted correction, ppm (slew-limited, clamped)
 }
 
 func newRateServo(cfg servoConfig) *rateServo {
@@ -59,13 +63,20 @@ func newRateServo(cfg servoConfig) *rateServo {
 //
 // A positive return means "produce samples faster" (resample ratio > 1).
 func (s *rateServo) observe(consumedSamples, masterNanos, deviceDelayNs int64, ok bool) float64 {
-	// "emitted" is what the speaker has actually heard: written samples minus the
-	// still-queued audio (when the backend reports its delay). Baselining on
-	// emitted (not raw consumed) keeps a constant device queue from biasing the
-	// skew — only the rate matters (§3.5).
+	// "emitted" is what the speaker has actually heard: written samples minus
+	// the still-queued audio. The queue-depth TREND is the crystal-drift
+	// signal; its NOISE is pure harm. snd_pcm_delay on a Pi swings ±10ms
+	// (~±480 samples) per read — heavily EMA the queue depth before
+	// subtracting so only its slow trend reaches the rate measurement.
 	emitted := float64(consumedSamples)
 	if ok {
-		emitted -= float64(deviceDelayNs) * float64(stream.SampleRate) / 1e9
+		dd := float64(deviceDelayNs) * float64(stream.SampleRate) / 1e9
+		if s.ddSamples == 0 {
+			s.ddSamples = dd
+		} else {
+			s.ddSamples += 0.02 * (dd - s.ddSamples) // tau ~ 50 windows
+		}
+		emitted -= s.ddSamples
 	}
 
 	if !s.have {
@@ -118,9 +129,18 @@ func (s *rateServo) observe(consumedSamples, masterNanos, deviceDelayNs int64, o
 	s.baseMaster = masterNanos
 
 	// The FIRST window contains the session-start transient (deadline hold,
-	// catch-up burst): measure-and-discard.
+	// catch-up burst, device-queue fill 0->full): measure-and-discard. With a
+	// DelayReporter backend also wait for the queue-depth EMA to settle past
+	// the fill ramp, or the ramp reads as a huge fake deficit and poisons the
+	// integral (the +2000ppm rail seen on every Pi).
 	if !s.seeded {
 		s.seeded = true
+		return s.outPPM
+	}
+	if ok && s.windowsDone < 2 { // queue-fill ramp: discard the first 2 windows
+		s.windowsDone++
+		s.baseEmit = emitted
+		s.baseMaster = masterNanos
 		return s.outPPM
 	}
 
@@ -173,6 +193,8 @@ func (s *rateServo) reset() {
 	s.baseMaster = 0
 	s.seeded = false
 	s.skewEMA = 0
+	s.ddSamples = 0
+	s.windowsDone = 0
 	s.integ = 0
 	s.outPPM = 0
 }

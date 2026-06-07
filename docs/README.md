@@ -444,7 +444,7 @@ writes are paced by the DAC, not by the scheduler — and crystal skew of
 pull rooms audibly apart. So every sink runs a **continuous rate servo**: a
 skew estimator (cumulative samples consumed vs master-clock elapsed time,
 averaged over ~3 s) feeds a small PI controller whose output — clamped to
-±2000 ppm (still inaudible) and slewed — drives a **4-tap (Catmull-Rom) fractional
+±300 ppm and slewed — drives a **4-tap (Catmull-Rom) fractional
 resampler** between jitter buffer and backend. The correction magnitudes are
 far below audibility. This is *not* an underrun reaction; it runs at all
 times to prevent drift. Real underruns are handled by silence insertion and,

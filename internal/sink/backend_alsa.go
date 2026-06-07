@@ -124,7 +124,11 @@ func newAlsaBackend(device string, log *slog.Logger) (*alsaBackend, error) {
 	// counters). Tunable per host without rebuild via ENSEMBLE_ALSA_LATENCY_MS
 	// (20..500); a constant inter-device difference is what the per-node
 	// outputDelayMs calibration is for (D36).
-	latencyMs := 100
+	// 200ms default: the user's Pis ran the device queue at ~90ms against a
+	// 100ms buffer — barely 10ms of headroom, so any Wi-Fi/scheduler stall
+	// underran it (xruns = audible chop with otherwise-clean pipeline
+	// counters). 200ms gives ~110ms headroom; capable hardware can lower it.
+	latencyMs := 200
 	if v := os.Getenv("ENSEMBLE_ALSA_LATENCY_MS"); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil && ms >= 20 && ms <= 500 {
 			latencyMs = ms
