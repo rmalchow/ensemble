@@ -58,10 +58,10 @@ func TestProxyByNodeID(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	var got MediaResp
+	var got []MediaFile
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
-	if len(got.Files) != 1 || got.Files[0].Path != "node2.flac" {
+	if len(got) != 1 || got[0].Path != "node2.flac" {
 		t.Errorf("expected node2 media, got %+v", got)
 	}
 }

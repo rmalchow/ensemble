@@ -555,7 +555,7 @@ export default defineConfig({
 });
 ```
 
-- `npm run build` (from `Makefile` `make ui`) produces `web/dist/{index.html,
+- `npm run build` (via `scripts/ui.sh`) produces `web/dist/{index.html,
   assets/*}` with **relative** URLs. The API piece (I) does `//go:embed web/dist`
   and serves `index.html` at `/` plus `assets/*`. The committed placeholder
   `web/dist/index.html` (owned by S) is overwritten by a real build and restored
@@ -588,7 +588,7 @@ Hand-written, dark, ~150 lines, no framework:
 The SPA is plain JS + Svelte; v1 keeps tests light and dependency-free (the
 heavy correctness lives server-side and is covered by I/K). Unit tests target
 the **pure modules**, which need no DOM and no server. Runner: `vitest`
-(node env) as a dev dependency; `make ui` does not require tests to pass for the
+(node env) as a dev dependency; `scripts/ui.sh` does not require tests to pass for the
 embed, but `npm test` is wired for CI.
 
 `web/src/lib/fmt.test.js`

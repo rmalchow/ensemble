@@ -15,9 +15,11 @@ func (e *Engine) follow(target id.ID) error {
 	}
 	snap := e.p.Cluster.Snapshot()
 	if err := validateFollowTarget(snap, e.self, target); err != nil {
+		e.log.Warn("follow rejected", "target", target.String(), "err", err)
 		return err
 	}
 	e.p.Cluster.SetFollowing(target)
+	e.log.Info("following", "target", target.String(), "reason", "user")
 	return nil
 }
 

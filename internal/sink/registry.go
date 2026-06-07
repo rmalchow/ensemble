@@ -104,6 +104,7 @@ func Open(spec string, log *slog.Logger) (contracts.Backend, string, error) {
 			nb, _ := openFactory("null", "", log)
 			return nb, "null", nil
 		}
+		log.Info("backend selected", "backend", "exec", "reason", "explicit")
 		return b, "exec", nil
 	}
 
@@ -111,12 +112,14 @@ func Open(spec string, log *slog.Logger) (contracts.Backend, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	log.Info("backend selected", "backend", name, "reason", "explicit")
 	return b, name, nil
 }
 
 func openAuto(log *slog.Logger) (contracts.Backend, string, error) {
 	if isRegistered("alsa") {
 		if b, err := openFactory("alsa", "", log); err == nil {
+			log.Info("backend selected", "backend", "alsa", "reason", "auto")
 			return b, "alsa", nil
 		} else {
 			log.Warn("alsa registered but failed to open, trying exec", "err", err)
@@ -124,12 +127,14 @@ func openAuto(log *slog.Logger) (contracts.Backend, string, error) {
 	}
 	if _, _, ok := lookExecTool(); ok {
 		if b, err := openFactory("exec", "", log); err == nil {
+			log.Info("backend selected", "backend", "exec", "reason", "auto")
 			return b, "exec", nil
 		} else {
 			log.Warn("exec backend failed to open, falling back to null", "err", err)
 		}
 	}
 	b, _ := openFactory("null", "", log)
+	log.Info("backend selected", "backend", "null", "reason", "auto (no playback device)")
 	return b, "null", nil
 }
 

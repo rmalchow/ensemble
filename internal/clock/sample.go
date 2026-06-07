@@ -48,8 +48,15 @@ func (e *estimator) add(s sample) {
 // ok is false until at least one sample exists (the *unsynced* gate, §7).
 // With 1..bestN samples it medians whatever it has; with more, the bestN by RTT.
 func (e *estimator) offset() (offsetNanos int64, ok bool) {
+	off, _, ok := e.estimate()
+	return off, ok
+}
+
+// estimate returns the median offset of the best-RTT samples, the smallest RTT
+// in the window, and whether an estimate exists.
+func (e *estimator) estimate() (offsetNanos, bestRTTNanos int64, ok bool) {
 	if len(e.ring) == 0 {
-		return 0, false
+		return 0, 0, false
 	}
 	// Copy and sort by RTT ascending to pick the best-RTT samples.
 	byRTT := make([]sample, len(e.ring))
@@ -66,7 +73,7 @@ func (e *estimator) offset() (offsetNanos int64, ok bool) {
 	}
 	sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
 	// Lower-middle median (deterministic, integer-only; avoids int64 averaging).
-	return offsets[(len(offsets)-1)/2], true
+	return offsets[(len(offsets)-1)/2], byRTT[0].rtt, true
 }
 
 // reset discards all samples (resync on generation / master change, §7/§8.4).

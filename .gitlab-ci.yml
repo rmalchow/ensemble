@@ -4,24 +4,24 @@ variables:
   CGO_ENABLED: "0"
   GOMODCACHE: "$CI_PROJECT_DIR/.gomodcache"
 
-# 1) Build the embedded UI; pass internal/web/dist to later stages as an artifact.
+# 1) Build the embedded UI; pass web/dist to later stages as an artifact.
 frontend:
   stage: frontend
-  image: node:22-alpine
+  image: node:24-alpine
   cache:
     key: { files: [web/package-lock.json] }
     paths: [web/node_modules]
   script:
     - cd web
     - npm ci
-    - npm run build          # emits ../internal/web/dist
+    - npm run build          # emits web/dist
   artifacts:
-    paths: [internal/web/dist]
+    paths: [web/dist]
     expire_in: 1 day
   tags:
     - shared
 
-# 2) Vet + unit tests + a cross-build smoke (no toolchain needed).
+# 2) Vet + unit tests + gofmt + an arm64 cross-build smoke (pure Go, no toolchain).
 test:
   stage: test
   image: golang:1.26
@@ -32,7 +32,23 @@ test:
   script:
     - go vet ./...
     - go test ./...
+    - out="$(gofmt -l . | grep -v node_modules || true)"; if [ -n "$out" ]; then echo "gofmt:"; echo "$out"; exit 1; fi
     - GOOS=linux GOARCH=arm64 go build ./...   # proves the arm64 cross-build stays clean
+  tags:
+    - shared
+
+# 2b) Loopback end-to-end smoke: two nodes, gossip via --join (no multicast),
+# null sinks, the full scripts/e2e.sh. Opus/alsa dlopen probes simply report
+# the capability off inside the container; e2e's capability leg reads the
+# container's own ldconfig, so it stays truthful either way.
+e2e:
+  stage: test
+  image: golang:1.26
+  needs: [frontend]
+  cache: { key: gomod, paths: [.gomodcache], policy: pull }
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends jq python3 > /dev/null
+    - ./scripts/e2e.sh
   tags:
     - shared
 
@@ -48,7 +64,7 @@ build:
       - { GOOS: linux, GOARCH: arm64 }
   script:
     - VER="$CI_COMMIT_SHORT_SHA"   # version IS the commit hash (no tags)
-    - SUFFIX="${GOOS}-${GOARCH}${GOARM:+v$GOARM}"
+    - SUFFIX="${GOOS}-${GOARCH}"
     - go build -trimpath -ldflags "-s -w -X main.version=$VER"
         -o "bin/ensemble-$SUFFIX" ./cmd/ensemble
     # Hand this job's id to the release stage (dotenv): release asset links
@@ -82,7 +98,7 @@ release:
     tag_name: "v-$CI_COMMIT_SHORT_SHA"
     ref: "$CI_COMMIT_SHA"
     name: "Ensemble $CI_COMMIT_SHORT_SHA"
-    description: "Static pure-Go binaries for linux/amd64 and arm64 (commit $CI_COMMIT_SHA)."
+    description: "Static pure-Go binaries for linux/amd64 and arm64 (commit $CI_COMMIT_SHA). Optional libs (libopus, libasound) load at runtime."
     assets:
       links:
         - name: "ensemble-linux-amd64"

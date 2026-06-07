@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -18,12 +19,21 @@ func TestRunReconcilesOnClusterChange(t *testing.T) {
 	defer cancel()
 	go r.e.Run(ctx)
 
-	// Initial reconcile points at self (loopback). Wait for it.
-	waitFor(t, time.Second, func() bool { return len(r.sub.snapshotSubs()) >= 1 }, "initial repoint")
+	// Initial reconcile points the CLOCK at self (loopback). The stream
+	// subscription is session-gated: an idle group must not HELLO.
+	waitFor(t, time.Second, func() bool { return len(r.cc.snapshot()) >= 1 }, "initial clock repoint")
+	if subs := r.sub.snapshotSubs(); len(subs) != 0 {
+		t.Fatalf("idle group must not subscribe; got %d subs", len(subs))
+	}
 
-	// Change to following a master and signal.
-	r.cl.dialResults[master] = nil
-	r.cl.setSnap(masterSnap(master, defaultSettings(), self))
+	// Change to following a master WITH AN ACTIVE SESSION and signal: now the
+	// member subscribes.
+	r.cl.dialResults[master] = []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 9})}
+	snap := masterSnap(master, defaultSettings(), self)
+	for i := range snap.Groups {
+		snap.Groups[i].Playback.State = "playing"
+	}
+	r.cl.setSnap(snap)
 	r.cl.signal()
 
 	waitFor(t, time.Second, func() bool {

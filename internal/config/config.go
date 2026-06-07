@@ -36,6 +36,7 @@ const (
 	EnvMediaDir   = "ENSEMBLE_MEDIA_DIR"
 	EnvOutput     = "ENSEMBLE_OUTPUT" // named sink backend: "", "auto", "exec", "null", "file:<path>", "alsa"
 	EnvJoin       = "ENSEMBLE_JOIN"   // dev seed list: comma-separated host:gossipPort (§2, D20)
+	EnvNoMDNS     = "ENSEMBLE_NO_MDNS" // "1"/"true": disable mDNS register+browse (tests; gossip via --join)
 )
 
 // Config is the fully-resolved startup configuration. All fields are final:
@@ -72,6 +73,11 @@ type Config struct {
 	// cluster.Join for hermetic loopback e2e tests; config only carries it.
 	Join []string
 
+	// NoMDNS disables mDNS discovery entirely (register + browse). Dev/test
+	// only: hermetic e2e clusters must not advertise into — or absorb nodes
+	// from — the surrounding LAN. Gossip then needs --join seeds.
+	NoMDNS bool
+
 	// store is the node.json handle for runtime mutations. Unexported; use
 	// Rename / SetVolume / SetOutputDelayMs.
 	store *Store
@@ -107,6 +113,7 @@ func Load(opts Options) (*Config, error) {
 		fMedia  = fs.String("media", "", "media directory (default DATA_DIR/media)")
 		fName   = fs.String("name", "", "initial node name (first start only)")
 		fJoin   = fs.String("join", "", "dev gossip seed list: host:gossipPort,...")
+		fNoMDNS = fs.Bool("no-mdns", false, "disable mDNS discovery (tests; use --join)")
 	)
 	if err := fs.Parse(opts.Args); err != nil {
 		return nil, fmt.Errorf("config: parse flags: %w", err)
@@ -143,6 +150,7 @@ func Load(opts Options) (*Config, error) {
 
 	cfg.Output = resolveString("", getenv(EnvOutput), DefaultOutput)
 	cfg.Join = parseJoin(resolveString(*fJoin, getenv(EnvJoin), ""))
+	cfg.NoMDNS = *fNoMDNS || isTruthy(getenv(EnvNoMDNS))
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("config: create data dir: %w", err)
@@ -251,4 +259,13 @@ func parseJoin(s string) []string {
 		}
 	}
 	return out
+}
+
+// isTruthy reports whether an env value means "on": 1/true/yes (case-insensitive).
+func isTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

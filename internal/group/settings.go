@@ -90,6 +90,9 @@ func (e *Engine) SetSettings(s contracts.GroupSettings) error {
 	groupID := mv.group.ID
 
 	e.p.Cluster.SetGroupSettings(groupID, v)
+	e.log.Info("group settings applied", "group", groupID.String(),
+		"codec", v.Codec, "transport", v.Transport, "bufferMs", v.BufferMs,
+		"live", e.sess != nil)
 
 	if e.sess == nil {
 		return nil // idle: record only; next Play uses it
@@ -104,6 +107,6 @@ func (e *Engine) SetSettings(s contracts.GroupSettings) error {
 	// Note: codec changes do not rebuild the running encoder mid-session — a codec
 	// change takes effect at the next Play. Transport/bufferMs apply live.
 	e.p.Source.StartSession(gen, stream.ParseTransport(v.Transport), v.BufferMs)
-	e.repointLocked(mv.master, gen, v.Transport)
+	e.repointLocked(mv.master, gen, v.Transport, true)
 	return nil
 }

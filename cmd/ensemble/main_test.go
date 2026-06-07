@@ -173,9 +173,12 @@ func TestShutdownStackLIFO(t *testing.T) {
 }
 
 func TestProbeGossipPortReleases(t *testing.T) {
-	port, err := probeGossipPort("127.0.0.1", 17946, 64)
+	port, released, err := probeGossipPort("127.0.0.1", 17946, 64)
 	if err != nil {
 		t.Fatalf("probeGossipPort: %v", err)
+	}
+	if !released {
+		t.Fatal("probeGossipPort did not report release")
 	}
 	// Both TCP and UDP must be immediately re-bindable (proves probe-release, D8).
 	tcp, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
@@ -240,6 +243,7 @@ func (f *fakeSink) Push(gen uint32, seq uint64, pts int64, payload []byte) {
 	f.pushes = append(f.pushes, gen)
 }
 func (f *fakeSink) Reset(gen uint32)           { f.resets = append(f.resets, gen) }
+func (f *fakeSink) Disarm()                    {}
 func (f *fakeSink) Stats() contracts.SinkStats { return contracts.SinkStats{} }
 func (f *fakeSink) SetGain(float64)            {}
 func (f *fakeSink) SetDelayOffset(int64)       {}

@@ -50,11 +50,18 @@ func (e *Engine) Play(uri string) error {
 
 	// Open the media source (no lock — may block on http/file). On error: no gen,
 	// no status.
+	e.log.Info("opening source", "uri", uri, "scheme", uriScheme(uri), "codec", settings.Codec, "transport", settings.Transport)
 	src, err := e.p.Media.Open(uri)
 	if err != nil {
+		e.log.Warn("source open failed", "uri", uri, "scheme", uriScheme(uri), "err", err)
 		return err
 	}
 	live := src.Live()
+	pacing := "pull"
+	if live {
+		pacing = "live"
+	}
+	e.log.Info("source opened", "uri", uri, "scheme", uriScheme(uri), "pacing", pacing)
 
 	// Opus encoder (D33): master encodes once for all subscribers.
 	var enc OpusEncoder
@@ -67,10 +74,13 @@ func (e *Engine) Play(uri string) error {
 		if err != nil {
 			_ = src.Close()
 			if errors.Is(err, dl.ErrUnavailable) {
+				e.log.Warn("opus encoder unavailable", "err", err)
 				return ErrNoOpus
 			}
+			e.log.Error("opus encoder creation failed", "err", err)
 			return err
 		}
+		e.log.Info("opus encoder created")
 	}
 
 	// Clock readiness: stamp startMaster in master time (§7). Retry-wait.
@@ -120,10 +130,13 @@ func (e *Engine) Play(uri string) error {
 	e.sess = sess
 
 	e.p.Source.StartSession(gen, stream.ParseTransport(settings.Transport), settings.BufferMs)
+	e.log.Info("playback started",
+		"uri", uri, "gen", gen, "codec", settings.Codec, "transport", settings.Transport,
+		"bufferMs", settings.BufferMs, "leadMs", e.p.LeadMs, "live", live)
 
 	// Re-point THIS node's own plumbing at itself as master for gen so the master
 	// hears its own stream immediately (§8.2 — no special handling).
-	e.repointLocked(mv.master, gen, settings.Transport)
+	e.repointLocked(mv.master, gen, settings.Transport, true)
 
 	e.p.Cluster.SetPlayback(groupID, sess.playbackRecord(e.now(), e.p.Source.Stats()))
 	e.lastBeat = e.now()
@@ -149,8 +162,10 @@ func (e *Engine) Stop() error {
 		return nil
 	}
 	groupID := e.sess.groupID
+	uri := e.sess.uri
 	e.stopLocked()
 	e.p.Cluster.SetPlayback(groupID, contracts.Playback{State: "idle"})
+	e.log.Info("playback stopped", "uri", uri, "reason", "user")
 	return nil
 }
 
@@ -231,6 +246,16 @@ func (e *Engine) validateOpusGroup(snap contracts.Snapshot, mv myView) error {
 		return fmt.Errorf("%w: %s", ErrNoOpus, strings.Join(lacking, ", "))
 	}
 	return nil
+}
+
+// uriScheme returns the lowercased scheme prefix of a media URI ("file" when
+// none), for operator logging only.
+func uriScheme(uri string) string {
+	i := strings.IndexByte(uri, ':')
+	if i <= 0 {
+		return "file"
+	}
+	return strings.ToLower(uri[:i])
 }
 
 func hasCodec(codecs []string, want string) bool {

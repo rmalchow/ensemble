@@ -55,3 +55,15 @@ export function cidrList(addrs) {
   if (!addrs || addrs.length === 0) return "—";
   return addrs.join(", ");
 }
+
+// ports renders a NodeView's port set compactly, omitting unset ports:
+// "http 8080 · stream 9090 · source 9200 · gossip 7946".
+export function ports(node) {
+  if (!node) return "";
+  const parts = [];
+  if (node.httpPort) parts.push("http " + node.httpPort);
+  if (node.streamPort) parts.push("stream " + node.streamPort);
+  if (node.sourcePort) parts.push("source " + node.sourcePort);
+  if (node.gossipPort) parts.push("gossip " + node.gossipPort);
+  return parts.join(" · ");
+}

@@ -22,6 +22,10 @@ const (
 	opusSetBitrateReq    = 4002 // OPUS_SET_BITRATE_REQUEST
 )
 
+// OpusBitrate is the encoder bitrate in bits/sec (§8.3), exported for operator
+// logging at session start.
+const OpusBitrate = opusBitrate
+
 var opusSonames = []string{"libopus.so.0", "libopus.so"}
 
 var opusSymbols = []string{

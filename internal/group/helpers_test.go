@@ -125,3 +125,12 @@ func idN(b byte) id.ID {
 	i[15] = b
 	return i
 }
+
+// withPlaying marks every group in the snapshot as having an active session,
+// so repoint tests exercise the session-gated subscribe/arm path.
+func withPlaying(s contracts.Snapshot) contracts.Snapshot {
+	for i := range s.Groups {
+		s.Groups[i].Playback.State = "playing"
+	}
+	return s
+}

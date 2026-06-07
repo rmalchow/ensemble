@@ -102,6 +102,9 @@ func (d *delegate) NotifyJoin(n *memberlist.Node) {
 	now := d.c.clock().Unix()
 	d.c.live.join(peer, now)
 	d.observeNode(peer, n)
+	if peer != d.c.self {
+		d.c.log.Info("node joined", "node", peer.String(), "name", d.peerName(peer), "addr", n.Addr.String())
+	}
 	d.c.notify()
 }
 
@@ -111,7 +114,20 @@ func (d *delegate) NotifyLeave(n *memberlist.Node) {
 		return
 	}
 	d.c.live.leave(peer)
+	if peer != d.c.self {
+		d.c.log.Info("node left", "node", peer.String(), "name", d.peerName(peer))
+	}
 	d.c.notify()
+}
+
+// peerName returns the peer's replicated node name, or "" if not yet known.
+func (d *delegate) peerName(peer id.ID) string {
+	d.c.mu.Lock()
+	defer d.c.mu.Unlock()
+	if r := d.c.doc.Nodes[peer]; r != nil {
+		return r.Name
+	}
+	return ""
 }
 
 func (d *delegate) NotifyUpdate(n *memberlist.Node) {
@@ -122,6 +138,9 @@ func (d *delegate) NotifyUpdate(n *memberlist.Node) {
 	now := d.c.clock().Unix()
 	d.c.live.update(peer, now)
 	d.observeNode(peer, n)
+	if peer != d.c.self {
+		d.c.log.Debug("node updated", "node", peer.String(), "name", d.peerName(peer))
+	}
 	d.c.notify()
 }
 
@@ -153,4 +172,18 @@ func peerID(n *memberlist.Node) (id.ID, bool) {
 		return pid, true
 	}
 	return id.Zero, false
+}
+
+// NotifyConflict implements memberlist.ConflictDelegate: another process on the
+// network advertises OUR node id (memberlist names are node ids). This is
+// almost always two processes sharing one node.json — e.g. two instances
+// started with the same (or default) --data dir. The cluster cannot work like
+// this: gossip treats both processes as one node.
+func (d *delegate) NotifyConflict(existing, other *memberlist.Node) {
+	d.c.log.Error("DUPLICATE NODE ID on the network — another process advertises this node's id; "+
+		"two instances sharing the same node.json / --data dir?",
+		"id", existing.Name,
+		"thisAddr", existing.Address(),
+		"otherAddr", other.Address(),
+	)
 }

@@ -142,10 +142,10 @@ func TestMediaList(t *testing.T) {
 	_, ts := testServer(t, cfg)
 
 	resp := doJSON(t, ts, http.MethodGet, "/api/media", nil)
-	var got MediaResp
+	var got []MediaFile
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
-	if len(got.Files) != 1 || got.Files[0].Path != "a.flac" {
+	if len(got) != 1 || got[0].Path != "a.flac" {
 		t.Errorf("media = %+v", got)
 	}
 }

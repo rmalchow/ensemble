@@ -14,6 +14,20 @@ const (
 	roleFollower             // a valid follower of someone else
 )
 
+// String renders a role for structured logging.
+func (r role) String() string {
+	switch r {
+	case roleSolo:
+		return "solo"
+	case roleMaster:
+		return "master"
+	case roleFollower:
+		return "follower"
+	default:
+		return "unknown"
+	}
+}
+
 // myView is this node's resolved position in the pre-derived snapshot (D5).
 // C already filled Snapshot.Groups; H only LOCATES this node's group + reads
 // its own NodeView. No XOR, no membership computation here.

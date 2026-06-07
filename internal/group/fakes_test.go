@@ -320,14 +320,20 @@ func (s *fakeSubscriber) snapshotSubs() []subCall {
 // --- fakeSink ----------------------------------------------------------------
 
 type fakeSink struct {
-	mu     sync.Mutex
-	resets []uint32
+	mu      sync.Mutex
+	resets  []uint32
+	disarms int
 }
 
 func (s *fakeSink) Push(uint32, uint64, int64, []byte) {}
 func (s *fakeSink) Reset(gen uint32) {
 	s.mu.Lock()
 	s.resets = append(s.resets, gen)
+	s.mu.Unlock()
+}
+func (s *fakeSink) Disarm() {
+	s.mu.Lock()
+	s.disarms++
 	s.mu.Unlock()
 }
 func (s *fakeSink) Stats() contracts.SinkStats { return contracts.SinkStats{} }

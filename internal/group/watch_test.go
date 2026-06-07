@@ -15,8 +15,8 @@ func TestRepointSubscriberOnMasterChange(t *testing.T) {
 	r.cl.dialResults[a] = []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 2})}
 	r.cl.dialResults[b] = []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 3})}
 
-	// self follows a.
-	r.cl.setSnap(masterSnap(a, defaultSettings(), self))
+	// self follows a; the group has an active session (subscribe is gated on it).
+	r.cl.setSnap(withPlaying(masterSnap(a, defaultSettings(), self)))
 	r.e.reconcile()
 
 	subs := r.sub.snapshotSubs()
@@ -34,7 +34,7 @@ func TestRepointSubscriberOnMasterChange(t *testing.T) {
 	}
 
 	// Master changes to b.
-	r.cl.setSnap(masterSnap(b, defaultSettings(), self))
+	r.cl.setSnap(withPlaying(masterSnap(b, defaultSettings(), self)))
 	r.e.reconcile()
 	subs = r.sub.snapshotSubs()
 	if len(subs) != 2 {
@@ -58,7 +58,7 @@ func TestRepointUsesDialCandidatesAndPorts(t *testing.T) {
 	masterIP := netip.AddrFrom4([4]byte{10, 0, 0, 5})
 	r.cl.dialResults[master] = []netip.Addr{masterIP}
 
-	snap := masterSnap(master, defaultSettings(), self)
+	snap := withPlaying(masterSnap(master, defaultSettings(), self))
 	// give the master distinct ports.
 	for i := range snap.Nodes {
 		if snap.Nodes[i].ID == master {
@@ -86,7 +86,7 @@ func TestMasterSubscribesToSelfLoopback(t *testing.T) {
 	self := idN(1)
 	r := newRig(self, 0, false)
 	// No dial candidates for self → loopback fallback.
-	r.cl.setSnap(soloSnap(self))
+	r.cl.setSnap(withPlaying(soloSnap(self)))
 	r.e.reconcile()
 
 	subs := r.sub.snapshotSubs()
