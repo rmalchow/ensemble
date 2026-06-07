@@ -167,7 +167,13 @@ explicit end-of-session notice (§8.6). (G/H)
 `max(2 × bufferMs, 1 s)`. Prime = replay ring frames whose `pts + bufferMs`
 deadline is still future (older frames are skipped — useless to the
 newcomer). UDP burst pacing ~4× realtime (one frame per ~5 ms); TCP
-back-to-back. Primes are counted in SourceStats. (G)
+back-to-back. Primes are counted in SourceStats (at burst initiation).
+*Implementation refinement:* a priming subscriber is **excluded from live
+fan-out** until its burst has caught up to the live edge via the ring
+(`framesAfter` loop) — otherwise an interleaved live frame would anchor the
+newcomer's reorder window/sink ahead of the burst and the entire prime would
+be dropped as late. The >‑realtime burst rate guarantees catch-up
+terminates. (G)
 
 **D25 — rate servo (E)**: skew estimator — cumulative samples consumed vs
 master-clock elapsed, ~3 s averaging window; backend `DelayReporter`
