@@ -105,7 +105,14 @@ func newAlsaBackend(device string, log *slog.Logger) (*alsaBackend, error) {
 	if rc := alsaBound.open(&pcm, device, sndPCMStreamPlayback, 0); rc < 0 {
 		return nil, fmt.Errorf("alsa: snd_pcm_open(%s) failed: %d", device, rc)
 	}
-	latencyUs := int32(contracts.DefaultBufferMs * 1000)
+	// Small FIXED device latency, deliberately NOT bufferMs: bufferMs is the
+	// NETWORK jitter budget held in our own jitter buffer; handing it to the
+	// device as well doubled the end-to-end delay on alsa nodes and created a
+	// ~180ms audible phase offset against pipe-backend nodes (whose players
+	// buffer far less). 60ms keeps the DAC fed across scheduling hiccups while
+	// staying phase-comparable to the exec backends.
+	const alsaLatencyUs = 60_000
+	latencyUs := int32(alsaLatencyUs)
 	if rc := alsaBound.setParams(pcm, sndPCMFormatS16LE, sndPCMAccessRWInterlvd,
 		stream.Channels, stream.SampleRate, alsaSoftResample, latencyUs); rc < 0 {
 		alsaBound.close(pcm)
