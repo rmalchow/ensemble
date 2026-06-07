@@ -1,13 +1,15 @@
 # A — identity & config
 
 Source of truth: [docs/README.md](../README.md) §1 (node identity), §2 (ports,
-flags/env, data/media dirs), §8.5 (`ENSEMBLE_OUTPUT` backend override). Shared
-contracts: [S-skeleton.md](S-skeleton.md) — this piece consumes only
-`internal/id` and stdlib.
+flags/env, data/media dirs, the dev `--join` seed list), §8.5
+(`ENSEMBLE_OUTPUT` named-backend selector). Shared contracts:
+[S-skeleton.md](S-skeleton.md) — this piece consumes only `internal/id` and
+stdlib.
 
-Scope: parse flags + env fallbacks; resolve `DATA_DIR`/`MEDIA_DIR`; create or
-load `node.json` (immutable `id`, renameable `name`); atomic rename-rewrite;
-expose the `ENSEMBLE_OUTPUT` sink override. **Pure and unit-testable** — no
+Scope: parse flags + env fallbacks (incl. `--source-port` and the dev `--join`
+seed list); resolve `DATA_DIR`/`MEDIA_DIR`; create or load `node.json`
+(immutable `id`, renameable `name`); atomic rename-rewrite; expose the
+`ENSEMBLE_OUTPUT` sink override. **Pure and unit-testable** — no
 sockets, no goroutines, no hardware. Capability *detection* (playback-backend
 probe, codec/format lists) is NOT this piece (sink/audio/main own it); config
 only carries the persistent identity and the resolved knobs `main` wires in.
@@ -50,19 +52,22 @@ import (
 const (
 	DefaultHTTPPort   = 8080
 	DefaultStreamPort = 9090
+	DefaultSourcePort = 9200
 	DefaultGossipPort = 7946
 	DefaultDataDir    = "data"      // relative to CWD if not overridden
-	DefaultOutput     = ""          // "" = auto-detect backend (sink piece decides)
+	DefaultOutput     = ""          // "" = auto-detect backend (sink piece decides; "auto")
 )
 
 // Env var names (spec §2, §8.5). Flags override env; env overrides defaults.
 const (
 	EnvHTTPPort   = "ENSEMBLE_HTTP_PORT"
 	EnvStreamPort = "ENSEMBLE_STREAM_PORT"
+	EnvSourcePort = "ENSEMBLE_SOURCE_PORT"
 	EnvGossipPort = "ENSEMBLE_GOSSIP_PORT"
 	EnvDataDir    = "ENSEMBLE_DATA_DIR"
 	EnvMediaDir   = "ENSEMBLE_MEDIA_DIR"
-	EnvOutput     = "ENSEMBLE_OUTPUT" // sink backend override: "", "null", "file", "pw-play", ...
+	EnvOutput     = "ENSEMBLE_OUTPUT" // named sink backend: "", "auto", "exec", "null", "file:<path>", "alsa"
+	EnvJoin       = "ENSEMBLE_JOIN"   // dev seed list: comma-separated host:gossipPort (§2, D20)
 )
 
 // Config is the fully-resolved startup configuration. All fields are final:
@@ -80,12 +85,19 @@ type Config struct {
 	// Base ports (§2). Actual bound ports are decided later by netx (K).
 	HTTPPort   int
 	StreamPort int
+	SourcePort int // audio source: subscriptions + stream control (§8.7)
 	GossipPort int
 
-	// Sink backend override (§8.5). "" => auto-detect; "null" forces null
-	// backend (tests, headless). The sink piece (E) interprets the value;
-	// config only carries it.
+	// Sink backend override (§8.5). "" => auto-detect ("auto"); selects a NAMED
+	// backend: "auto" | "exec" | "null" | "file:<path>" | "alsa" (where built).
+	// The sink piece (E) interprets the value; config only carries it verbatim.
 	Output string
+
+	// Join is the dev-only gossip seed list (§2, D20): comma-separated
+	// host:gossipPort entries, parsed from --join / ENSEMBLE_JOIN. Empty in
+	// production (mDNS is the discovery path). main (K) passes it to
+	// cluster.Join for hermetic loopback e2e tests; config only carries it.
+	Join []string
 
 	// store is the node.json handle for runtime renames. Unexported; use Rename.
 	store *Store
@@ -129,14 +141,22 @@ Flag names (registered in `Load` on a private `flag.FlagSet`, spec §2):
 ```
 --http-port    int     default DefaultHTTPPort
 --stream-port  int     default DefaultStreamPort
+--source-port  int     default DefaultSourcePort
 --gossip-port  int     default DefaultGossipPort
 --data         string  default ""   (=> env ENSEMBLE_DATA_DIR, else DefaultDataDir)
 --media        string  default ""   (=> env ENSEMBLE_MEDIA_DIR, else DataDir/media)
 --name         string  default ""   (initial node name; first start only)
+--join         string  default ""   (=> env ENSEMBLE_JOIN; dev-only seed list)
 ```
 
 `--output` is intentionally **not** a flag (spec §2 lists no output flag; §8.5
 calls it `ENSEMBLE_OUTPUT` env only). Config reads it from env exclusively.
+
+`--join` / `ENSEMBLE_JOIN` (dev only, D20) is a single comma-separated string
+of `host:gossipPort` entries; `Load` splits on `,`, trims whitespace, and drops
+empty fields into `Config.Join []string` (nil when unset). Same flag>env>default
+precedence as the other knobs (zero sentinel `""`); the value is **not** dialed
+or validated here — `main` (K) hands it to `cluster.Join`, which resolves it.
 
 Precedence implementation note: the `flag` package can't tell "default" from
 "explicitly set to the default". `Load` registers flags with the **zero
@@ -222,9 +242,11 @@ A is leaf code.
 2. `Load` parses flags, applies env fallback, resolves+creates dirs, then
    `Store.LoadOrCreate(name)` to get `NodeID`/`NodeName`, and stashes the
    `*Store` in `cfg.store`.
-3. main reads `cfg.NodeID`, `cfg.NodeName`, ports, dirs, `cfg.Output` and wires
-   the rest of the system (cluster gets `NodeID`/`NodeName`; netx gets the base
-   ports; sink gets `Output`; media listing gets `MediaDir`).
+3. main reads `cfg.NodeID`, `cfg.NodeName`, ports, dirs, `cfg.Output`,
+   `cfg.Join` and wires the rest of the system (cluster gets
+   `NodeID`/`NodeName` and `cfg.Join` for `cluster.Join`; netx gets the four
+   base ports incl. `SourcePort` for the audio source bind; sink gets `Output`;
+   media listing gets `MediaDir`).
 
 ### Steady state
 - No state in this package after `Load` returns, except the `*Store` path.
@@ -270,10 +292,16 @@ A is leaf code.
   a non-numeric port (`ENSEMBLE_HTTP_PORT=abc`) → error from `strconv.Atoi`,
   fatal. A port out of range (`<1` or `>65535`) → error.
 - **`--name` empty AND first start:** name = `id.String()[:8]` (§1 default).
-- **`ENSEMBLE_OUTPUT` (§8.5):** passed through verbatim to `cfg.Output`. Config
-  does **not** validate the value — the sink piece (E) maps `""`→auto,
-  `"null"`/`"file"`/`exec-name` and errors on unknown. Keeps config dumb and
-  avoids duplicating the backend list.
+- **`ENSEMBLE_OUTPUT` (§8.5, D27):** a **named backend** selector, passed
+  through verbatim to `cfg.Output`. Config does **not** validate the value — the
+  sink piece (E) maps `""`/`"auto"`→auto-detect, `"exec"`/`"null"`/`"file:<path>"`/
+  `"alsa"` and errors on unknown. Keeps config dumb and avoids duplicating the
+  backend registry list.
+- **`--join` / `ENSEMBLE_JOIN` (§2, D20):** dev-only seed list, split on `,`
+  with whitespace trimmed and empty fields dropped into `cfg.Join`; unset →
+  `nil` (not empty-non-nil). Config does **not** parse or dial `host:port` — it
+  carries the raw entries; `cluster.Join` (C) resolves them. mDNS remains the
+  production discovery path.
 - **Atomic rename failure:** temp write or `os.Rename` error leaves the old
   `node.json` intact and `cfg.NodeName` unchanged; the error propagates to the
   API caller which returns 5xx. Best-effort `os.Remove` of the temp file.
@@ -313,11 +341,13 @@ explicit `Args` slice — no real env, no real flags, no network, no hardware.
   JSON object (no concatenation / tearing).
 
 `internal/config/config_test.go`
-- `TestLoadDefaults` — empty Args, empty env → default ports, DataDir abs of
-  "data", MediaDir == DataDir/media, Output "".
+- `TestLoadDefaults` — empty Args, empty env → default ports (incl. SourcePort
+  9200), DataDir abs of "data", MediaDir == DataDir/media, Output "", Join nil.
 - `TestLoadFlagsOverrideEnv` — Args set --http-port 9000, env
   ENSEMBLE_HTTP_PORT=1234 → 9000.
 - `TestLoadEnvFallback` — no flag, env ENSEMBLE_STREAM_PORT=9100 → 9100.
+- `TestLoadSourcePortFlagAndEnv` — --source-port 9300 wins over
+  ENSEMBLE_SOURCE_PORT=9250; env-only fallback → 9250; neither → 9200.
 - `TestLoadDataDirEnv` — ENSEMBLE_DATA_DIR=tmp → DataDir abs(tmp), node.json
   there.
 - `TestLoadMediaDirDefault` — only DataDir set → MediaDir == DataDir/media,
@@ -325,7 +355,13 @@ explicit `Args` slice — no real env, no real flags, no network, no hardware.
 - `TestLoadMediaDirEnvOverride` — ENSEMBLE_MEDIA_DIR=elsewhere → that absolute
   path, created; not under DataDir.
 - `TestLoadDataDirMadeAbsolute` — relative --data resolves via filepath.Abs.
-- `TestLoadOutputEnv` — ENSEMBLE_OUTPUT=null → cfg.Output == "null".
+- `TestLoadOutputEnv` — ENSEMBLE_OUTPUT=null → cfg.Output == "null"; a named
+  value like `file:/tmp/o.pcm` is carried verbatim (no validation).
+- `TestLoadJoinFlagSplits` — --join "a:7946, b:7947 ,," → cfg.Join ==
+  ["a:7946","b:7947"] (trimmed, empties dropped).
+- `TestLoadJoinEnvFallback` — no flag, ENSEMBLE_JOIN="h:7946" → cfg.Join ==
+  ["h:7946"]; flag --join wins over env.
+- `TestLoadJoinUnsetIsNil` — neither flag nor env → cfg.Join == nil.
 - `TestLoadNameFirstStartOnly` — Load with --name "a" mints; second Load same
   dir with --name "b" → name still "a".
 - `TestLoadBadPortEnv` — ENSEMBLE_HTTP_PORT=abc → error.
@@ -346,7 +382,9 @@ explicit `Args` slice — no real env, no real flags, no network, no hardware.
 
 | Produced for downstream | Consumer |
 |---|---|
-| `Config{NodeID, NodeName, DataDir, MediaDir, *Port, Output}` | K (main) wiring |
+| `Config{NodeID, NodeName, DataDir, MediaDir, HTTPPort, StreamPort, SourcePort, GossipPort, Output, Join}` | K (main) wiring |
+| `SourcePort` | K (netx bind-or-increment for the audio source, §8.7) |
+| `Join` | K → `cluster.Join` (dev seed list, §2/D20) |
 | `Config.Rename` | I (API `PATCH /api/node`), paired with `cluster.SetName` |
 | `MediaDir` | I (media listing, §6) |
 | `Output` | E (sink backend select, §8.5) |

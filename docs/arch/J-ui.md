@@ -84,7 +84,8 @@ The shapes J codes against (verbatim from S, JSON field names are the contract):
   "name": "kitchen",
   "addrs": ["192.168.1.17/24", "fd00::5/64"],
   "httpPort": 8080, "streamPort": 9090, "gossipPort": 7946,
-  "capabilities": { "playback": true, "codecs": ["pcm"], "formats": ["wav","mp3","flac"] },
+  "capabilities": { "playback": true, "codecs": ["pcm"], "backends": ["exec","null","file"],
+                    "sources": ["file","http","input"], "formats": ["wav","mp3","flac"] },
   "following": "0000…(32 hex zero == solo master)",
   "observed": { "<peerId>": { "ip": "192.168.1.9", "lastSeen": 1733570000 } },
   "alive": true, "lastSeen": 1733570000, "stale": false,
@@ -97,8 +98,9 @@ The shapes J codes against (verbatim from S, JSON field names are the contract):
   "name": "downstairs",            // "" if unnamed
   "master": "<nodeId>",
   "members": ["<nodeId>", …],
-  "playback": { "state":"playing", "file":"jazz.flac", "startedAt":…, "positionSec":12.4,
-                "codec":"pcm", "transport":"udp" },
+  "playback": { "state":"playing", "uri":"file:jazz.flac", "startedAt":…, "positionSec":12.4,
+                "codec":"pcm", "transport":"udp",
+                "source": { "clients":2, "connects":3, "restarts":0, "primes":3 } },
   "settings": { "codec":"pcm", "transport":"udp", "bufferMs":150 }
 }
 ```
@@ -199,9 +201,10 @@ export async function renameGroup(groupId, name): Promise<void>   // POST /api/g
 
 // --- media + playback ---
 export async function getMedia(nodeId): Promise<MediaFile[]>      // GET  /api/<nodeId>/media
-export async function play(nodeId, file): Promise<void>           // POST /api/<nodeId>/play {file}
-//   "Play here": targets nodeId's group; server does implicit takeover if nodeId
-//   is a follower (§5.2 / §10 Media). See §5 below for the takeover-then-play flow.
+export async function play(nodeId, uri): Promise<void>            // POST /api/<nodeId>/play {uri}
+//   uri is a media-source URI (§6): "file:<path>" (or bare path), "http(s)://…",
+//   or "input:". "Play here": targets nodeId's group; server does implicit takeover
+//   if nodeId is a follower (§5.2 / §10 Media). See §5 below for the takeover-then-play flow.
 export async function stop(masterId): Promise<void>               // POST /api/<masterId>/stop
 
 // --- group settings (master only for POST; optional UI, see §6) ---
@@ -216,7 +219,8 @@ Notes:
   sync, playout}`. J uses only `id` (self marker) and `name`/`role` for the
   header. The exact stat fields are I's to define; J reads them defensively.
 - `MediaFile` is `{path, name, sizeBytes, modTime}` (§6). `path` is relative to
-  the node's `MEDIA_DIR` and is what `play` sends back.
+  the node's `MEDIA_DIR`; the Media section turns it into a `"file:<path>"` URI
+  for `play` (which now takes a media-source `uri`, §6).
 
 ### 3.3 `web/src/lib/derive.js` — pure selectors over a snapshot
 
@@ -285,7 +289,9 @@ ephemeral UI bits (which media node is picked, which name is being edited).
   - Header: `<EditableText value={label} onsave={(n)=>renameGroup(group.id,n)}>`
     (click name to rename, §10 Groups).
   - `<PlaybackBar group={group}>` (status + position + stop).
-  - member list: one `<MemberRow>` per member.
+  - member list: one `<MemberRow>` per member. The master's row also shows the
+    source stats `group.playback.source` (listeners / reconnects), since the
+    master is the node running the audio source (§8.2, D28).
   - footer: `<JoinDropdown node={self...}>`? **No** — join is per-member; see
     MemberRow. Card footer instead shows group settings summary (codec/transport/
     bufferMs) as plain text, read-only in v1 (optional editor §6).
@@ -294,11 +300,15 @@ ephemeral UI bits (which media node is picked, which name is being edited).
 ### `components/MemberRow.svelte`
 - **Props:** `member` (NodeView), `group` (GroupView), `self`.
 - **Derived:** `isThisMaster = member.id === group.master`;
-  `isSelf = member.id === self.id`.
+  `isSelf = member.id === self.id`; `src = group.playback.source` (source stats,
+  shown only on the master row when `group.playback.state === "playing"`).
 - **Renders:**
   - member name as `<EditableText value={member.name}
     onsave={(n)=>renameNode(member.id,n)}>` (rename works remotely via proxy).
   - master badge if `isThisMaster`.
+  - on the master row, when playing: source stats from `src` —
+    `{src.clients} listeners`, `{src.restarts} reconnects` (§8.2 / D28). Hidden
+    on non-master rows and when idle.
   - liveness dot (`member.alive`), `stale` mark, `relTime(member.lastSeen)`.
   - **Make master** button (hidden when `isThisMaster`): `makeMaster(member.id,
     member.id)` — issued on the member itself, takes mastership to it (§5.2).
@@ -318,8 +328,9 @@ ephemeral UI bits (which media node is picked, which name is being edited).
 ### `components/PlaybackBar.svelte`
 - **Props:** `group` (GroupView).
 - **Derived:** `pb = group.playback`; `playing = pb.state === "playing"`.
-- **Renders:** when playing: file name, `position(pb.positionSec)`, codec/transport
-  tags, and a **Stop** button → `stop(group.master)`. When idle: "idle".
+- **Renders:** when playing: the source URI `pb.uri` (the played file path /
+  stream URL / `input:`), `position(pb.positionSec)`, codec/transport tags, and a
+  **Stop** button → `stop(group.master)`. When idle: "idle".
 - **State:** none. (Position advances only when a new snapshot/heartbeat arrives,
   §9.2; v1 does not tick locally — keep it simple. Heartbeat is every 5 s, which
   is acceptable for a status readout.)
@@ -345,14 +356,25 @@ ephemeral UI bits (which media node is picked, which name is being edited).
   - `pickedNodeId` — defaults to `self.id`; chosen from a node `<select>` over
     `snapshot.nodes` that have `capabilities.formats` non-empty.
   - `files` — `MediaFile[]` for the picked node.
+  - `url` — the http(s) stream URL typed into the URL field.
   - `loading`, `err`.
+- **Derived:** `picked = nodeById(snapshot, pickedNodeId)`;
+  `sources = picked?.capabilities.sources ?? []` — gates the http/input controls
+  (a node only serves schemes it reports, §6.1 / D26).
 - **Effect:** when `pickedNodeId` changes → `getMedia(pickedNodeId)` → `files`
   (errors → toast + empty list).
-- **Renders:** node picker; per file a row with `name`, `bytes(sizeBytes)`,
-  `relTime(modTime)`, and **Play here** → `play(pickedNodeId, file.path)`.
-  "Play here" semantics: the server makes `pickedNodeId`'s group play the file,
-  doing implicit takeover if that node is a follower (§5.2 / §10). J issues a
-  single `play` call to that node; it does not orchestrate takeover itself.
+- **Renders:** node picker; then three play paths, each a single `play` call that
+  sends `{uri}` (§9.1) to `pickedNodeId`:
+  - **Files** — per file a row with `name`, `bytes(sizeBytes)`, `relTime(modTime)`,
+    and **Play here** → `play(pickedNodeId, "file:" + file.path)`.
+  - **URL** — a text field + **Play URL** button → `play(pickedNodeId, url)` with
+    the entered `http(s)://…` URI. Shown only when `sources` includes `"http"`;
+    the button is disabled until `url` is a non-empty `http(s)://` string.
+  - **Input** — an **Input** button → `play(pickedNodeId, "input:")` (the node's
+    local capture). Shown only when `sources` includes `"input"`.
+  "Play here" / Play URL / Input semantics: the server makes `pickedNodeId`'s group
+  play that URI, doing implicit takeover if that node is a follower (§5.2 / §10). J
+  issues a single `play` call to that node; it does not orchestrate takeover itself.
 
 ### `components/EditableText.svelte`
 - **Props:** `value` (string), `onsave` (async fn(newValue)), `placeholder?`.
@@ -541,7 +563,8 @@ embed, but `npm test` is wired for CI.
   `base(remoteId)` → "/api/<remoteId>".
 - `renameNode(remote,…)` issues `PATCH /api/<remote>/node` with `{name}`.
 - `follow/unfollow/makeMaster` hit the right path on the right node id.
-- `play(node,file)` posts `{file}` to `/api/<node>/play`.
+- `play(node,uri)` posts `{uri}` to `/api/<node>/play` (e.g. `"file:jazz.flac"`,
+  an `http(s)://` URL, or `"input:"`).
 - non-2xx with `{error}` body → throws `ApiError` carrying status+message.
 
 `web/src/lib/ws.test.js` (WebSocket mocked)

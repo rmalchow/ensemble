@@ -1,8 +1,10 @@
 # I — HTTP API (Echo)
 
 Source of truth: [docs/README.md](../README.md) §9, §10. Shared contracts:
-[S-skeleton.md](S-skeleton.md). This piece owns `internal/api/*` and the
-`//go:embed web/dist` directive. It is **thin**: every route either reads the
+[S-skeleton.md](S-skeleton.md). This piece owns `internal/api/*`. The
+`//go:embed` directive lives in `web/embed.go` (`package web`, per DECISIONS.md
+D15); the API serves the SPA from the `web.DistFS` it receives via `Config.DistFS`.
+It is **thin**: every route either reads the
 `contracts.Snapshot` (cluster, C) or delegates a mutation to the cluster setters
 (C) and the group engine (H). The API holds no domain state of its own beyond
 the WebSocket hub and the embedded SPA.
@@ -27,7 +29,7 @@ internal/api/ws.go           WebSocket hub: per-conn writer, debounced cluster p
 internal/api/proxy.go        node-proxy middleware (§9.3): id-or-unique-name match, one-hop guard, reverse proxy via DialCandidates
 internal/api/observe.go      Echo middleware feeding client remote IP to cluster.Observe (§3.1)
 internal/api/follow_client.go FollowClient impl (contracts.FollowClient) the group engine (H) uses for takeover (§5.2)
-internal/api/spa.go          //go:embed web/dist; SPA file server with index.html fallback + placeholder detection
+internal/api/spa.go          SPA file server over cfg.DistFS (web.DistFS, D15) with index.html fallback + placeholder detection
 internal/api/deps.go         the Cluster / Group dependency interfaces this package consumes (defined here, where consumed)
 
 internal/api/api_test.go       Server construction, route registration, graceful shutdown
@@ -107,15 +109,19 @@ type Group interface {
 	MakeMaster(ctx context.Context, node id.ID) error
 	// NameGroup sets a group's display name (LWW, any node, §4/§9.1).
 	NameGroup(ctx context.Context, group id.ID, name string) error
-	// Play starts playback of file on THIS node's group; master only.
-	// ErrNotMaster (with takeover hint) if this node isn't its group's master.
-	// ErrNoCodec if codec unsupported (§8.3). ErrMediaNotFound on bad file.
-	Play(ctx context.Context, file string) error
+	// Play starts playback of a media-source URI on THIS node's group; master
+	// only (§6, §6.1). uri selects the source scheme (file:/http(s):///input:);
+	// a bare relative path is treated as a "file:" URI. ErrNotMaster (with
+	// takeover hint) if this node isn't its group's master. ErrNoCodec if codec
+	// unsupported (§8.3). ErrMediaNotFound / ErrBadScheme on a bad URI.
+	Play(ctx context.Context, uri string) error
 	// Stop stops THIS node's group playback; master only.
 	Stop(ctx context.Context) error
 	// Settings returns this node's group's settings (GET /api/group/settings).
 	Settings() contracts.GroupSettings
 	// SetSettings updates this node's group's settings; master only (POST).
+	// Applies LIVE: H bumps the generation and broadcasts RECONFIG so
+	// subscribers re-read settings and resubscribe (§8.7, DECISIONS.md D23).
 	SetSettings(ctx context.Context, s contracts.GroupSettings) error
 }
 
@@ -125,14 +131,23 @@ type Media interface {
 	List() ([]MediaFile, error)
 }
 
-// SyncStat is the per-node clock/playout snapshot for GET /api/status (§9.1).
-// Provided by a closure main (K) wires from the sink (E) + clock follower (F).
-type SyncStat struct {
-	Synced   bool   `json:"synced"`
-	Played   uint64 `json:"played"`
-	Silence  uint64 `json:"silence"`
-	LateDrop uint64 `json:"lateDrop"`
-	StaleGen uint64 `json:"staleGen"`
+// StatusStats is the per-node sink/clock/source snapshot for GET /api/status
+// (§9.1, DECISIONS.md D19). Provided by a closure main (K) wires from the sink
+// (E), the clock follower (F), and — only while this node runs an audio source
+// — the source server (G). Sink stats are contracts.SinkStats verbatim
+// (played/silence/lateDrop/staleGen/synced/ratePPM/buffered, §8.5); clock is
+// the follower's offset/rtt; source is present only when Source != nil.
+type StatusStats struct {
+	Sink   contracts.SinkStats   // §8.5 servo + jitter stats
+	Clock  ClockStat             // follower offset/rtt
+	Source *contracts.SourceStats // non-nil only on an active source (D19/D28)
+}
+
+// ClockStat is the clock-follower portion of GET /api/status (§7).
+type ClockStat struct {
+	Synced   bool  `json:"synced"`
+	OffsetNs int64 `json:"offsetNs"`
+	RTTNs    int64 `json:"rttNs"`
 }
 ```
 
@@ -155,8 +170,9 @@ type Config struct {
 	Cluster  Cluster
 	Group    Group
 	Media    Media
-	SyncStat func() SyncStat // closure over sink (E) + clock (F) stats
-	Listener net.Listener    // HTTP listener from netx.BindTCP (K owns binding)
+	Stats    func() StatusStats // closure over sink (E), clock (F), source (G) stats
+	Listener net.Listener       // HTTP listener from netx.BindTCP (K owns binding)
+	DistFS   fs.FS              // SPA build FS = web.DistFS (D15; embed lives in package web)
 	Log      *slog.Logger
 }
 
@@ -230,16 +246,24 @@ package api
 
 import "ensemble/internal/contracts"
 
-// --- GET /api/status -------------------------------------------------------
+// --- GET /api/status (DECISIONS.md D19) ------------------------------------
 type StatusResp struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	HTTPPort   int               `json:"httpPort"`
-	StreamPort int               `json:"streamPort"`
-	GossipPort int               `json:"gossipPort"`
-	Role       string            `json:"role"`    // "master" | "follower"
-	GroupID    string            `json:"groupId"` // derived group this node is in
-	Sync       SyncStat          `json:"sync"`    // §2.1
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Role    string `json:"role"`    // "master" | "follower" | "solo"
+	GroupID string `json:"groupId"` // derived group this node is in
+	Ports   PortsResp            `json:"ports"`  // http/stream/source/gossip
+	Sink    contracts.SinkStats  `json:"sink"`   // §8.5 servo + jitter stats
+	Clock   ClockStat            `json:"clock"`  // §7 follower offset/rtt
+	Source  *contracts.SourceStats `json:"source,omitempty"` // present only on an active source
+}
+
+// PortsResp is the actually-bound port set (§2), surfaced as ports.* (D19).
+type PortsResp struct {
+	HTTP   int `json:"http"`
+	Stream int `json:"stream"`
+	Source int `json:"source"`
+	Gossip int `json:"gossip"`
 }
 
 // --- PATCH /api/node -------------------------------------------------------
@@ -274,9 +298,14 @@ type MasterReq struct {
 	Node string `json:"node"` // 32-hex node id to become master
 }
 
-// --- POST /api/play --------------------------------------------------------
+// --- POST /api/play (§6, §9.1) ---------------------------------------------
+// Body is {uri}; back-compat {file} is accepted and folded to a "file:" URI
+// (a bare relative path with no scheme is also treated as file:). uri wins if
+// both are present. The resolved URI is passed to Group.Play (H), which opens
+// the matching media source (§6.1).
 type PlayReq struct {
-	File string `json:"file"`           // relative media path
+	URI  string `json:"uri,omitempty"`  // media-source URI: file:… | http(s)://… | input:
+	File string `json:"file,omitempty"` // back-compat: relative media path ≡ "file:" URI
 	Node string `json:"node,omitempty"` // optional: target node (proxy hint; see §3.5)
 }
 
@@ -463,30 +492,31 @@ func (f *followClient) Unfollow(ctx context.Context, peer id.ID) error
 
 ### 2.8 `internal/api/spa.go` — embedded SPA (§10)
 
+Per **DECISIONS.md D15** the `//go:embed` directive does **not** live in this
+package — `go:embed` cannot reference parent directories from `internal/api`, so
+the embed lives in `web/embed.go` (`package web`, `//go:embed all:dist`, exports
+`web.DistFS fs.FS`). The API receives that FS through its `Config.DistFS` field
+(K wires `web.DistFS`, see K §3.1 step 12), so this piece imports no `embed`.
+
 ```go
 package api
 
-import "embed"
+import "io/fs"
 
-//go:embed all:web/dist
-var distFS embed.FS
-
-// handleSPA serves the embedded Svelte build for any non-/api path. Unknown
-// paths fall back to index.html (client-side routing). If the embed is only the
-// committed placeholder, the served index notes the UI isn't built yet.
+// handleSPA serves the SPA FS (cfg.DistFS, injected per D15) for any non-/api
+// path. Unknown paths fall back to index.html (client-side routing). If the FS
+// is only the committed placeholder, the served index notes the UI isn't built.
 func (s *Server) handleSPA(c echo.Context) error
 ```
 
-Mechanics: `fs.Sub(distFS, "web/dist")`, wrap in `http.FileServer`. For a path
-with no matching file and no extension, serve `index.html` (SPA fallback). A
-real asset 404 (e.g. `/missing.js`) returns 404. Placeholder detection: read
-`index.html` once at `New`; if it contains the sentinel comment
-`<!-- ensemble-placeholder -->` (committed in the S placeholder), log a warning
-once. The embed path is relative to the **api package directory**, so the
-Makefile/K must ensure `web/dist` is reachable — but per S, the embed directive
-lives in this piece and `web/dist/index.html` is committed at repo root; the
-directive therefore uses a module-root-relative path. **See contract concern
-#1** — the embed path placement.
+Mechanics: serve `cfg.DistFS` directly (it is already rooted at the build's
+`dist`), wrapped in `http.FileServer(http.FS(cfg.DistFS))`. For a path with no
+matching file and no extension, serve `index.html` (SPA fallback). A real asset
+404 (e.g. `/missing.js`) returns 404. Placeholder detection: read `index.html`
+once at `New`; if it contains the sentinel comment `<!-- ensemble-placeholder -->`
+(committed in the S placeholder), log a warning once. The FS injection keeps the
+embed directive in `package web` (S-owned), satisfying D15 with no parent-dir
+embed from `internal/api`.
 
 ---
 
@@ -560,11 +590,20 @@ deps.
 - **Follow target not alive / not a master / unknown (§5.1)**: H returns
   `ErrNotAlive`/`ErrNotMaster`/`ErrUnknownNode` → **409**/**404** with stable
   error codes (`not_alive`, `target_not_master`, `unknown_node`).
-- **Path traversal in media/play (§6)**: the media scanner and H reject paths
-  escaping `MEDIA_DIR`; a `..` path → **400** `{"error":"bad_path"}`. The API
-  passes the raw relative path through; rejection is centralized in D/H, but the
-  handler still rejects an absolute path or one containing `..` up front as a
-  cheap guard.
+- **Path traversal in media/play (§6, §6.1)**: for a `file:` URI (incl. the
+  back-compat `{file}` and a bare relative path), the media scanner and H reject
+  paths escaping `MEDIA_DIR`; a `..` path → **400** `{"error":"bad_path"}`. The
+  API folds `{file}`/scheme-less input to a `file:` URI and passes it through;
+  rejection is centralized in D/H, but the handler still rejects a `file:`/bare
+  path that is absolute or contains `..` up front as a cheap guard. `http(s):`
+  and `input:` URIs skip the path check (no `MEDIA_DIR` involvement).
+- **Unknown URI scheme on play (§6.1)**: a scheme this node has no source for →
+  H returns `ErrBadScheme` → **400** `{"error":"bad_scheme"}`.
+- **Live settings change (§8.7, D23)**: `POST /api/group/settings` on the master
+  applies immediately — `SetSettings` delegates to H, which writes the replicated
+  group-settings record, bumps the generation, and broadcasts RECONFIG so
+  subscribers resubscribe under the new settings. The handler does not wait for
+  resubscription; success means H accepted and broadcast the change.
 - **Proxy: target unknown / undialable (§9.3)**: empty `DialCandidates` → **502**
   `{"error":"unreachable"}`. All candidates fail to connect → same.
 - **Proxy: ambiguous name (§9.3)**: name matches >1 alive node → **404**
@@ -603,8 +642,13 @@ deps.
 - `TestBodyLimitRejectsOversize` — >1M body → 413.
 
 `internal/api/handlers_test.go` (httptest + fake Cluster/Group)
-- `TestStatusShape` — GET /api/status returns id/name/ports/role/groupId/sync.
-- `TestStatusRoleMaster` / `TestStatusRoleFollower` — role derives from snapshot.
+- `TestStatusShape` — GET /api/status returns id/name/role/groupId and the
+  ports (http/stream/source/gossip), sink (incl. ratePPM/buffered), and clock
+  blocks (D19).
+- `TestStatusSourceOnlyWhenActive` — top-level `source` block present only when
+  this node runs an active audio source; absent (omitted) otherwise (D19/D28).
+- `TestStatusRoleMaster` / `TestStatusRoleFollower` / `TestStatusRoleSolo` —
+  role derives from snapshot ("solo" = master of a group of 1).
 - `TestRenameNode` — PATCH /api/node calls Cluster.SetName; empty name → 400.
 - `TestClusterReturnsSnapshotVerbatim` — body == json(Snapshot), no wrapper.
 - `TestMediaList` — GET /api/media returns scanner output in MediaResp shape.
@@ -612,14 +656,22 @@ deps.
 - `TestUnfollow` — POST /api/unfollow calls Group.Unfollow.
 - `TestGroupNameOK` / `TestGroupNameBadGroupID` — name set; bad hex → 400.
 - `TestGroupMasterForwards` — POST /api/group/master calls Group.MakeMaster.
-- `TestPlayOK` — master play succeeds.
+- `TestPlayURI` — master play with `{uri:"file:song.flac"}` calls Group.Play
+  with that URI; `{uri:"http://…"}` and `{uri:"input:"}` pass through verbatim.
+- `TestPlayFileBackCompat` — `{file:"song.flac"}` folds to `file:song.flac`;
+  a bare scheme-less path also folds to `file:`; `uri` wins over `file`.
 - `TestPlayNonMaster409WithHint` — error=not_master + takeover hint present.
-- `TestPlayBadPath` — `../x` → 400 bad_path.
+- `TestPlayBadPath` — `file:../x` (or `../x`) → 400 bad_path.
+- `TestPlayBadScheme` — an unknown scheme → 400 bad_scheme.
 - `TestStopOK` / `TestStopNonMaster` — stop routes; non-master 409.
-- `TestGetSettings` / `TestSetSettingsMasterOnly` / `TestSetSettingsBadCodec`.
+- `TestGetSettings` / `TestSetSettingsMasterOnly` / `TestSetSettingsBadCodec` —
+  POST delegates to Group.SetSettings (applies live via RECONFIG, §8.7).
 
 `internal/api/dto_test.go`
-- `TestStatusRespJSONGolden` — field names/order match §9.1 exactly.
+- `TestStatusRespJSONGolden` — field names match D19 exactly: id/name/role/
+  groupId, ports.{http,stream,source,gossip}, sink.{played,silence,lateDrop,
+  staleGen,synced,ratePPM,buffered}, clock.{synced,offsetNs,rttNs}, and source
+  omitted when nil.
 - `TestErrorRespOmitsEmptyHint` — `hint` omitted when empty.
 - `TestSnapshotJSONTagsStable` — re-assert the contracts JSON tags the SPA uses.
 

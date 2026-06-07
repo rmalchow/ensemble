@@ -1,16 +1,27 @@
 # K — main wiring & end-to-end
 
-Source of truth: [docs/README.md](../README.md). Contracts: [S-skeleton.md](S-skeleton.md).
+Source of truth: [docs/README.md](../README.md) (§2 four ports, §6 sources, §8
+audio pipeline, §9 API). Contracts: [S-skeleton.md](S-skeleton.md). Integrator
+decisions: [DECISIONS.md](DECISIONS.md) — this piece is governed by **D2, D3,
+D6, D8, D16, D19, D20, D22, D23, D24, D25, D26, D27, D28**.
+
 This piece owns process lifecycle (`cmd/ensemble/main.go`) and the two scripts
 (`scripts/dev2.sh`, `scripts/e2e.sh`). It writes **no** package code under
 `internal/` — it only constructs the components other pieces export, in
-dependency order, and tears them down in reverse. If a constructor signature
-here disagrees with what A/B/C/F/G/E/H/I actually ship, K is the integrator's
-fix-loop; mismatches are recorded as contract concerns, not worked around with
-new abstractions.
+dependency order, and tears them down in reverse. K is the only place that knows
+the full graph, so it is the only place allowed to know every concrete
+constructor. If a constructor signature here disagrees with what
+A/B/C/F/G/E/H/I actually ship, K is the integrator's fix-loop; mismatches are
+recorded as contract concerns (see §9), **not** worked around with new
+abstractions.
 
-K is the only place that knows the full graph, so it is the only place allowed
-to know every concrete constructor. Everything K calls already exists by wave 4.
+The audio path is **subscribe-based** (D22): the group master runs an audio
+**source server** on its `SOURCE_PORT`; every member — including the master
+itself, over loopback — runs a **subscriber client** that HELLOs to the current
+master's source and feeds frames into its local sink. There is **no**
+master-dials-members push, no `Resolver`, no `SetEndpoints`: subscribers dial,
+the source streams back to the address each subscription came from. K wires both
+ends on every node (any node can become master).
 
 ---
 
@@ -19,28 +30,31 @@ to know every concrete constructor. Everything K calls already exists by wave 4.
 Files K creates and owns:
 
 ```
-cmd/ensemble/main.go     flag/env parse → build component graph → run → signal → graceful shutdown
-scripts/dev2.sh          launch two nodes, tmp DATA_DIRs, ENSEMBLE_OUTPUT=null, distinct ports
-scripts/e2e.sh           curl/jq smoke test against the two nodes' REST API (the assertions §K)
+cmd/ensemble/main.go      flag/env parse → build component graph → run → signal → graceful shutdown
+cmd/ensemble/main_test.go pure-helper unit tests (option parse, caps, follow client, LIFO unwind)
+scripts/dev2.sh           launch two nodes, tmp DATA_DIRs, ENSEMBLE_OUTPUT=null, four disjoint ports, --join seed
+scripts/e2e.sh            curl/jq smoke test against the nodes' REST API (the assertions of §7)
+scripts/fixtures.sh       (thin) regenerate testdata/media/tone.wav via a go run helper, if absent
 ```
 
 `main.go` is deliberately a single file: flag parsing, a `run(ctx) error`
 builder, and `main()` that wires signals to a context and maps the error to an
-exit code. No `internal/app` package, no DI container — the graph is ~12 nodes,
-built top-to-bottom once. Keep it under ~300 lines.
+exit code. No `internal/app` package, no DI container — the graph is ~14 nodes,
+built top-to-bottom once. Target ≤ ~340 lines.
 
-There is **one** non-obvious helper kept local to `main.go`: `followClient`, a
-tiny `contracts.FollowClient` implementation (HTTP POST to a peer's
-`/api/follow` / `/api/unfollow`, address resolved via the cluster). S says the
-API piece (I) "injects a concrete implementation" of `FollowClient`; if I ships
-it, K uses I's. K provides the fallback so the graph closes even if I does not
-(see contract concerns). The e2e takeover path needs it to work either way.
+One non-obvious helper stays local to `main.go`: `followClient`, a tiny
+`contracts.FollowClient` implementation (HTTP POST to a peer's `/api/follow` /
+`/api/unfollow`, address resolved via the cluster per §3.1). Per **D16** the API
+piece (I) owns the canonical `FollowClient` as a plain cluster-backed HTTP
+client; K prefers I's (`apiSrv.FollowClient()`) and provides this fallback only
+so the graph closes if I has not shipped it yet. The takeover e2e needs it to
+work either way.
 
 ---
 
 ## 2. Concrete Go API
 
-`main.go` exports nothing (package `main`). The internal shape:
+`main.go` exports nothing (package `main`). Internal shape:
 
 ```go
 package main
@@ -53,8 +67,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,461 +82,697 @@ import (
 	"ensemble/internal/contracts"
 	"ensemble/internal/discovery"
 	"ensemble/internal/group"
+	"ensemble/internal/id"
 	"ensemble/internal/netx"
 	"ensemble/internal/sink"
+	"ensemble/internal/source"
 	"ensemble/internal/stream"
 )
 
-// options is the fully-resolved configuration after flags+env (A owns the
-// parse; K only declares the flags and hands the values to config.Load).
+// options is the fully-resolved configuration after flags+env. A owns the
+// parse semantics (flag > env > default); K declares the flags, reads env
+// fallbacks, and hands the values to config.Load.
 type options struct {
-	HTTPPort   int    // --http-port  / ENSEMBLE_HTTP_PORT   (default 8080)
-	StreamPort int    // --stream-port/ ENSEMBLE_STREAM_PORT (default 9090)
-	GossipPort int    // --gossip-port/ ENSEMBLE_GOSSIP_PORT (default 7946)
-	DataDir    string // --data       / ENSEMBLE_DATA_DIR    (default ./data)
-	MediaDir   string // --media      / ENSEMBLE_MEDIA_DIR   (default DATA_DIR/media)
-	Name       string // --name       (initial node name; applied on first start only)
-	Output     string // ENSEMBLE_OUTPUT: "", "null", "auto" (default auto) — selects sink backend
-	Host       string // bind host, default "" (all interfaces); "127.0.0.1" in dev2/e2e
-	LogLevel   string // ENSEMBLE_LOG (debug|info|warn|error), default info
+	HTTPPort   int      // --http-port   / ENSEMBLE_HTTP_PORT   (default 8080)
+	StreamPort int      // --stream-port / ENSEMBLE_STREAM_PORT (default 9090)
+	SourcePort int      // --source-port / ENSEMBLE_SOURCE_PORT (default 9200)  ← NEW, D22/§2
+	GossipPort int      // --gossip-port / ENSEMBLE_GOSSIP_PORT (default 7946)
+	DataDir    string   // --data        / ENSEMBLE_DATA_DIR    (default ./data)
+	MediaDir   string   // --media       / ENSEMBLE_MEDIA_DIR   (default DATA_DIR/media)
+	Name       string   // --name        (initial node name; applied on first start only)
+	Output     string   // ENSEMBLE_OUTPUT (env only, D2): "" → "auto" | "null" | "file:<path>" | backend name
+	Join       []string // --join / ENSEMBLE_JOIN (D20): comma-sep host:gossipPort seeds (dev e2e)
+	Host       string   // --host bind address, default "" (all ifaces); "127.0.0.1" in dev2/e2e
+	LogLevel   string   // ENSEMBLE_LOG (debug|info|warn|error), default info
 }
 
-func main()                                   // parse → run(ctx) → exit code
-func parseOptions(args []string) (options, error)
+func main()                                            // parse → run(ctx) → exit code
+func parseOptions(args []string, env func(string) string) (options, error)
+func capabilities(opt options) contracts.Capabilities  // D3: PATH probe + build tags
 func run(ctx context.Context, opt options) error
 
-// followClient is K's local contracts.FollowClient: HTTP POST /api/follow and
-// /api/unfollow to a peer, dialing an address resolved from the cluster. Used
-// only if the API piece does not export an equivalent (it should — §I).
-type followClient struct {
-	store  contracts.StateStore   // resolve peer http addr (§3.1)
-	client *http.Client
-	self   id.ID                  // for the X-Ensemble-Proxied guard
+// shutdownStack is a LIFO of teardown closures (§3.3). Pushed as resources are
+// acquired; unwound in reverse on shutdown. Extracted so it is unit-testable.
+type shutdownStack struct {
+	fns []func(context.Context) error
 }
+func (s *shutdownStack) push(name string, fn func(context.Context) error)
+func (s *shutdownStack) unwind(ctx context.Context, log *slog.Logger) error // reverse; logs each; returns first err
 
+// followClient is K's fallback contracts.FollowClient (used only if I exports
+// none): HTTP POST /api/follow|/unfollow to a peer, dialing an http addr
+// resolved from the cluster (§3.1), carrying the X-Ensemble-Proxied guard.
+type followClient struct {
+	store  contracts.StateStore
+	client *http.Client
+}
 func (f *followClient) Follow(ctx context.Context, peer, target id.ID) error
 func (f *followClient) Unfollow(ctx context.Context, peer id.ID) error
+func (f *followClient) httpAddr(peer id.ID) (netip.AddrPort, error) // DialCandidates ∩ httpPort
 ```
 
 ### 2.1 Assumed constructor surface (per piece)
 
-These are the constructors K calls. They follow the spec and S directly; each
-is named in IMPLEMENTATION.md as that piece's job. Exact spellings are the
-integrator's to confirm — any divergence is a one-line edit in `run`.
+The constructors K calls, following the spec + S + D22–D28 **subscribe model**.
+Exact spellings are the integrator's to confirm in the fix-loop; any divergence
+is a one-line edit in `run`. G and H are regenerated to the subscribe model
+(source server + subscriber client; URI-scheme media factory), so the surface
+below matches them; the remaining cross-piece naming mismatches to settle at
+integration are recorded as contract concerns (§9).
 
 ```go
-// A — config (§2). Loads/creates node.json under DataDir; applies Name only on
-// first start; resolves MediaDir. Pure.
-config.Load(opt config.Options) (*config.Config, error)
-cfg.NodeID  id.ID
-cfg.Name    string
-cfg.DataDir string
+// ── A: config (§2, D2, D20) ─────────────────────────────────────────────────
+config.Load(o config.Options) (*config.Config, error) // node.json (id,name) under DataDir; resolves MediaDir
+cfg.NodeID   id.ID
+cfg.Name     string
+cfg.DataDir  string
 cfg.MediaDir string
-cfg.SetName(name string) error   // atomic rewrite of node.json on rename
+cfg.SetName(name string) error                          // atomic node.json rewrite on rename
 
-// netx (S) — bind-or-increment, all-or-nothing per port.
+// ── netx (S): bind-or-increment, all-or-nothing per port number ─────────────
 netx.BindTCPUDP(host string, base, tries int) (*net.TCPListener, *net.UDPConn, int, error)
 netx.BindTCP(host string, base, tries int) (*net.TCPListener, int, error)
 netx.InterfaceCIDRs() []string
 
-// stream (S) — UDP mux over the bound STREAM_PORT socket.
+// ── stream (S): UDP mux over the bound STREAM_PORT UDP socket ───────────────
 stream.NewMux(conn *net.UDPConn, log *slog.Logger) *stream.Mux
+mux.LocalAddr() netip.AddrPort
 
-// C — cluster. Wraps memberlist on the bound gossip TCP+UDP; implements
-// contracts.StateStore. K passes the resolved self-record fields.
+// ── C: cluster (memberlist on the probed gossip port, D8; impls StateStore) ─
 cluster.New(p cluster.Params) (*cluster.Cluster, error)
-//   Params{ Self id.ID, Name string, HTTPPort, StreamPort, GossipPort int,
-//           Addrs []string, Capabilities contracts.Capabilities,
-//           GossipTCP *net.TCPListener, GossipUDP *net.UDPConn, Log *slog.Logger }
-cl.Observe(peer id.ID, ip string)          // fed by discovery + API (§3.1)
-cl.Join(addrs []string) (int, error)       // join discovered peers
+//   Params{ Self id.ID, Name string, HTTPPort, StreamPort, SourcePort, GossipPort int,
+//           Addrs []string, Capabilities contracts.Capabilities, Log *slog.Logger }
+cl.Observe(peer id.ID, ip string)
+cl.Join(addrs []string) (int, error)                    // seed list (D20) + discovery peers
+cl.DialCandidates(peer id.ID) []netip.Addr              // §3.1, best-first (used by followClient + source dial)
 cl.Subscribe() <-chan struct{}
 cl.Snapshot() contracts.Snapshot
 cl.Self() id.ID
-cl.SetFollowing(target id.ID)              // §5.1 setter (used by API/group)
-cl.Shutdown() error                        // leave gracefully, then close
+cl.SetFollowing(target id.ID)
+cl.Shutdown() error                                     // memberlist Leave broadcast, then close
 
-// B — discovery. Registers _ensemble._tcp, browses; emits peers on a channel.
+// ── B: discovery (mDNS register/browse; emits Peer, D4) ─────────────────────
 discovery.New(p discovery.Params) (*discovery.Discovery, error)
-//   Params{ Self id.ID, HTTPPort, StreamPort, GossipPort int, Log *slog.Logger }
-d.Peers() <-chan discovery.Peer            // {ID, Addr, GossipPort, HTTPPort, StreamPort}
-d.Run(ctx context.Context) error           // register + browse loop
+//   Params{ Self id.ID, HTTPPort, StreamPort, SourcePort, GossipPort int, Log *slog.Logger }
+d.Peers() <-chan discovery.Peer                          // {ID, Addr, GossipPort, HTTPPort, StreamPort, SourcePort}
+d.Run(ctx context.Context) error
 d.Close() error
 
-// F — clock. Server answers 0x10→0x11 on the mux; follower runs 1 Hz against
-// the master endpoint, implements contracts.Clock.
-clock.NewServer(mux *stream.Mux, log *slog.Logger) *clock.Server   // Register on mux
+// ── F: clock (server 0x10→0x11 on mux; follower 1 Hz, impls contracts.Clock) ─
+clock.NewServer(mux *stream.Mux, log *slog.Logger) *clock.Server
 clock.NewFollower(mux *stream.Mux, log *slog.Logger) *clock.Follower
-fol.SetMaster(addr netip.AddrPort, gen uint32)  // re-point on master/gen change
-fol.MasterNow() (int64, bool)                    // contracts.Clock
+fol.SetMaster(addr netip.AddrPort, gen uint32)           // H re-points on master/gen change (D17 clock half stands)
 fol.Run(ctx context.Context)
 fol.Close() error
+// *clock.Follower satisfies contracts.Clock (MasterNow/MasterToLocal/LocalToMaster)
 
-// E — sink. Backend auto-pick or null; jitter buffer + playout against a Clock.
-sink.NewBackend(kind string, log *slog.Logger) (contracts.Backend, error) // "auto"|"null"
-sink.New(b contracts.Backend, clk contracts.Clock, bufferMs int, log *slog.Logger) *sink.Sink
-//   *sink.Sink implements contracts.Sink (Push/Reset/Stats/Close)
+// ── E: sink + playout + rate servo (D25, D27) ───────────────────────────────
+sink.PickBackend(name string, log *slog.Logger) (contracts.Backend, error) // "auto"|"null"|"file:<p>"|name (D27)
+sink.New(cfg sink.Config) *sink.Playout                  // impls contracts.Sink
+//   Config{ Backend contracts.Backend, Clock contracts.Clock, BufferMs int, Log *slog.Logger }
+sk.Push(gen uint32, seq uint64, pts int64, payload []byte)
+sk.Reset(gen uint32)
+sk.Stats() contracts.SinkStats                           // incl. RatePPM, Buffered (D25)
+sk.Close() error
 
-// G — transport. Receiver delivers (header,payload) to the sink; sender fans out.
-stream.NewReceiver(mux *stream.Mux, tcpLn *net.TCPListener, log *slog.Logger) *stream.Receiver
-rx.OnFrame(func(h stream.Header, payload []byte))   // wired to sink.Push
-rx.Run(ctx context.Context)
-rx.Close() error
-stream.NewSender(mux *stream.Mux, log *slog.Logger) *stream.Sender  // group H drives it
+// ── G: subscriber client (member side, internal/stream) + source server
+//      (master side, internal/source), D22–D24 ─
+// Subscriber: HELLO/keepalive/BYE/RESTART; UDP receive via mux 0x01/0x02 (+FEC),
+// or TCP subscription; delivers (Header, payload) to a DeliverFunc callback.
+// (G-stream.md names it stream.NewClient/*stream.Client — see §9 concern 1.)
+stream.NewClient(cfg stream.ClientConfig) *stream.Client
+//   ClientConfig{ Mux *stream.Mux, Deliver stream.DeliverFunc, Log *slog.Logger }
+//   DeliverFunc = func(h stream.Header, payload []byte)
+sub.Subscribe(sourceAddr netip.AddrPort, gen uint32, t stream.Transport) error // (re)point at master's SOURCE_PORT; prime-me
+sub.Unsubscribe()                                        // BYE + stop
+sub.Counters() stream.Counters                           // lifetime transport-health counters
+sub.Close() error
+// (The 2 s-starvation watchdog → RESTART lives inside the Client, §8.6/D25 —
+// K does not call a Restart() hook.)
+// Source server (only active while this node is master; bound on every node, D22):
+source.NewServer(cfg source.Config) *source.Server
+//   Config{ Self id.ID, UDP *net.UDPConn, TCP *net.TCPListener, Log *slog.Logger }
+srcSrv.Stats() contracts.SourceStats                     // Clients/Connects/Restarts/Primes (D28)
+srcSrv.Run()                                             // non-blocking; starts read/accept/sweeper loops
+srcSrv.Close() error
+// H drives the source server per session (open media → ticker release → fan-out
+// to subscribers); K just constructs and starts/stops it.
 
-// H — group engine. Derivation + follow/takeover + playback orchestration.
-group.New(p group.Params) *group.Engine
-//   Params{ Store *cluster.Cluster, Source audio.Opener, Sink contracts.Sink,
-//           Sender *stream.Sender, Clock contracts.Clock, Follow contracts.FollowClient,
-//           MediaDir string, Log *slog.Logger }
-g.Run(ctx context.Context)                  // derivation loop + self-heal + watchdog
+// ── D: media-source factory (scheme-keyed: file/http/input, D26) ────────────
+// D-audio.md exports audio.Open(ctx, uri, mediaDir) (audio.Source, error) +
+// audio.Schemes(); H consumes it behind a MediaFactory seam. K wires whichever
+// constructor D ships (a thin Opener wrapper or Open directly) into group.Deps.
+// audio.Source: ReadFrame(dst []byte) error (D9 EOF); Live() bool; Close() error
+
+// ── H: group engine (derivation consume + follow/takeover + playback) ───────
+group.New(d group.Deps) *group.Engine
+//   Deps{ Cluster <cluster write+read view>, Clock contracts.Clock, Follow contracts.FollowClient,
+//         Opener <media opener>, Source *source.Server, Subscriber *source.Subscriber,
+//         ClockFollower <SetMaster-er>, Sink contracts.Sink, MediaDir string, Log *slog.Logger }
+g.Start()
 g.Close() error
+// On Play (master): open media → run release ticker → server fans out to subs;
+// own sink subscribes over loopback like everyone else. On any master/gen change
+// (derivation): repoints Subscriber + clock Follower at the current master's
+// SOURCE_PORT / STREAM_PORT (resolved via cluster.DialCandidates). On settings
+// change: bumps gen, broadcasts RECONFIG, subscribers resubscribe (D23).
 
-// audio (D) — opener for the media source.
-audio.NewOpener() audio.Opener              // Open(path) (FrameReader, error)
-
-// I — HTTP API. Echo server over the bound HTTP listener; serves SPA + REST + WS.
+// ── I: HTTP API (Echo: REST + WS + proxy + SPA embed; feeds Observe) ────────
 api.New(p api.Params) *api.Server
 //   Params{ Store *cluster.Cluster, Group *group.Engine, Config *config.Config,
-//           MediaDir string, Observe func(id.ID, string), Log *slog.Logger }
-srv.Handler() http.Handler                  // for httptest in unit tests
-srv.FollowClient() contracts.FollowClient   // I's injected impl (preferred over K's)
-srv.Serve(ln net.Listener) error            // blocks; returns on Shutdown
+//           MediaDir string, Observe func(peer id.ID, ip string), DistFS fs.FS, Log *slog.Logger }
+srv.FollowClient() contracts.FollowClient                // D16 — preferred over K's fallback
+srv.Serve(ln net.Listener) error                         // blocks until Shutdown
 srv.Shutdown(ctx context.Context) error
 ```
 
-K does not invent any type beyond `options` and the fallback `followClient`.
-Everything else is constructed-and-wired.
+K invents no type beyond `options`, `shutdownStack`, and the `followClient`
+fallback. Everything else is constructed-and-wired.
 
 ---
 
 ## 3. Control flow
 
-### 3.1 Startup — strict dependency order
+### 3.1 Startup — strict dependency order (four port binds)
 
-`run(ctx, opt)` builds the graph bottom-up. Each step that allocates an OS
-resource or starts a goroutine is registered on a LIFO `shutdown` stack
-(a `[]func(context.Context) error`) so teardown is exactly reverse order.
+`run(ctx, opt)` builds the graph bottom-up. Every step that allocates an OS
+resource or starts a goroutine pushes a closer onto the `shutdownStack` so
+teardown is exactly reverse order. **Four** ports are bound (§2):
 
 ```
- 0. logger      := slog.New(handler at opt.LogLevel).With("comp","main")
- 1. cfg         := config.Load(...)                 // node.json (A); FATAL on error
- 2. bind ports  := netx.BindTCPUDP(stream) ; netx.BindTCPUDP(gossip) ; netx.BindTCP(http)
-                   // each FATAL on error (port exhaustion §2). Capture ACTUAL ports.
- 3. addrs       := netx.InterfaceCIDRs()
- 4. caps        := capabilities(opt.Output)         // playback? codecs=[pcm] formats=[wav,mp3,flac]
- 5. mux         := stream.NewMux(streamUDP, log)     // not yet Run
- 6. cluster     := cluster.New(Params{... gossip sockets, actual ports, addrs, caps})
- 7. clockSrv    := clock.NewServer(mux, log)         // Register(0x10) on mux
-    clockFol    := clock.NewFollower(mux, log)
- 8. backend     := sink.NewBackend(kind, log)        // "null" if ENSEMBLE_OUTPUT=null
-    theSink     := sink.New(backend, clockFol, DefaultBufferMs, log)
- 9. receiver    := stream.NewReceiver(mux, streamTCP, log)
-    receiver.OnFrame(func(h, p){ theSink.Push(h.Gen,h.Seq,h.PTS,p) })
-10. sender      := stream.NewSender(mux, log)
-11. opener      := audio.NewOpener()
-12. apiSrv      := api.New(Params{cluster, <group set later>, cfg, mediaDir, cluster.Observe, log})
-    follow      := apiSrv.FollowClient() (or K's followClient fallback)
-13. engine      := group.New(Params{cluster, opener, theSink, sender, clockFol, follow, mediaDir, log})
-    apiSrv.SetGroup(engine)  // or pass engine into api.New if order allows (see note)
-14. discovery   := discovery.New(Params{cfg.NodeID, httpPort, streamPort, gossipPort, log})
-15. mux.Run()                                        // now packets flow
-16. start goroutines under ctx:
-      go clockSrv (passive; registered)              clockFol.Run(ctx)
-      go receiver.Run(ctx)   go engine.Run(ctx)      go discovery.Run(ctx)
-      go discoveryJoinLoop(ctx, discovery.Peers(), cluster)   // mDNS peer → cluster.Join + Observe
-      go apiSrv.Serve(httpLn)                         // blocks in its own goroutine
-17. log "ready" with id, name, http/stream/gossip ports
+ 0. logger   := slog at opt.LogLevel, .With("comp","main")
+ 1. cfg      := config.Load{DataDir,MediaDir,Name}        // node.json (A). FATAL on error (no fresh id over corrupt file, §4)
+ 2. PORT BINDS — bind-or-increment, capture the ACTUAL bound port for each:
+      streamTCP, streamUDP, streamPort := netx.BindTCPUDP(host, opt.StreamPort, 64)   // §2; UDP handed to mux
+      srcTCP,    srcUDP,    sourcePort  := netx.BindTCPUDP(host, opt.SourcePort, 64)   // §2 D22 — NEW fourth path
+      httpLn,               httpPort    := netx.BindTCP   (host, opt.HTTPPort,   64)
+      gossipPort                        := probeGossipPort(host, opt.GossipPort, 64)   // D8: probe TCP+UDP pair, CLOSE both, hand bare number to memberlist
+    Each FATAL on error (port exhaustion §2). Nothing to unwind on a bind error
+    except already-bound listeners (closed in the deferred cleanup before return).
+ 3. addrs    := netx.InterfaceCIDRs()                      // §3.1 (empty on loopback — fine)
+ 4. caps     := capabilities(opt)                          // D3: PATH probe (backends/playback), sources=[file,http,input], formats, codecs
+ 5. mux      := stream.NewMux(streamUDP, log)              // owns STREAM_PORT UDP; not yet Run
+ 6. cluster  := cluster.New{Self:cfg.NodeID, Name:cfg.Name,
+                  HTTPPort, StreamPort:streamPort, SourcePort:sourcePort, GossipPort:gossipPort,
+                  Addrs:addrs, Capabilities:caps, log}      // advertises ACTUAL ports incl. SourcePort
+ 7. clockSrv := clock.NewServer(mux, log)                  // Register(0x10) on mux  (answers 0x11)
+    clockFol := clock.NewFollower(mux, log)                // contracts.Clock; receives 0x11
+ 8. backend  := sink.PickBackend(opt.Output, log)          // "null" if ENSEMBLE_OUTPUT=null; auto-probes pw-play/… (D27)
+    theSink  := sink.New{backend, clockFol, contracts.DefaultBufferMs, log}   // contracts.Sink
+ 9. srcSrv   := source.NewServer{Self:cfg.NodeID, UDP:srcUDP, TCP:srcTCP, log}  // master-side source server (D22), idle until a session runs
+10. subClient:= stream.NewClient{Mux:mux,
+                  Deliver:func(h stream.Header,pay []byte){ theSink.Push(h.Gen,h.Seq,h.PTS,pay) }, log}  // member-side; mux 0x01/0x02 (+FEC) + TCP
+11. opener   := audio media factory over cfg.MediaDir      // scheme factory file/http/input (D26)
+12. apiSrv   := api.New{Store:cluster, Group:<set after>, Config:cfg, MediaDir:cfg.MediaDir,
+                  Observe:cluster.Observe, DistFS:web.DistFS, log}            // engine wired in step 13
+    follow   := apiSrv.FollowClient()  (or K's &followClient{cluster,client}) // D16 prefer I's
+13. engine   := group.New{Cluster:cluster, Clock:clockFol, Follow:follow,
+                  Opener:opener, Source:srcSrv, Subscriber:subClient,
+                  ClockFollower:clockFol, Sink:theSink, MediaDir:cfg.MediaDir, log}
+    apiSrv.SetGroup(engine)                                // close the API↔group cycle (see note)
+14. disc     := discovery.New{cfg.NodeID, HTTPPort, StreamPort:streamPort,
+                  SourcePort:sourcePort, GossipPort:gossipPort, log}
+15. SEED + ACTIVATE:
+      cluster.Join(opt.Join)                               // D20 dev seeds (e2e); errors logged, non-fatal
+      mux.Run()                                            // packets now flow on STREAM_PORT UDP
+16. start goroutines (each pushes its Close on the stack BEFORE starting):
+      clockFol.Run(ctx)        srcSrv.Run()        // subClient starts its own
+      engine.Start()           disc.Run(ctx)       // loops inside Subscribe (H drives it)
+      go discoveryJoinLoop(ctx, disc.Peers(), cluster)
+      go apiSrv.Serve(httpLn)                             // blocks in its own goroutine; error → cancel ctx
+    (clockSrv is passive — registered on the mux, no goroutine of its own;
+     srcSrv.Run() is non-blocking and starts the read/accept/sweeper loops.)
+17. log "ready": id, name, ports{http,stream,source,gossip}, output backend, playback cap
 18. <-ctx.Done()  → graceful shutdown (§3.3)
 ```
 
-**The API↔group cycle (steps 12–13).** `api.New` needs the group engine
-(REST `/play`,`/follow`,`/master` delegate to it) and the group engine needs
-`FollowClient` from the API. K breaks this the way S intends — `FollowClient`
-is a leaf interface in `contracts`, so:
+**The API↔group cycle (steps 12–13).** `api.New` needs the engine (REST
+`/play`,`/follow`,`/master`,`/stop`,`/group/settings` delegate to it); the
+engine needs `FollowClient` from the API (D16). K breaks it exactly as S/D16
+intend — `FollowClient` is a leaf interface in `contracts`:
 
-- Preferred: `api.New` takes the engine; engine takes `apiSrv.FollowClient()`.
-  Construct API first **without** the engine (pass nil), build the engine with
-  `apiSrv.FollowClient()`, then `apiSrv.SetGroup(engine)` before `Serve`.
-- Fallback (if I exposes no `SetGroup` and no `FollowClient`): K's own
-  `followClient{store: cluster}` is injected into the engine, and the engine is
-  passed to `api.New`. This needs the engine built before the API, which is
-  fine because K's `followClient` depends only on the cluster, not the API.
+- Preferred: build the API first **without** the engine; take
+  `apiSrv.FollowClient()`; build the engine with it; `apiSrv.SetGroup(engine)`
+  before `Serve`.
+- Fallback (I exposes neither `SetGroup` nor `FollowClient`): inject K's
+  `&followClient{store: cluster}` into the engine, build the engine first, then
+  `api.New` with the engine. K's `followClient` depends only on the cluster, so
+  no cycle. (§9 contract concern: I and H settle on one.)
 
-K codes the fallback (self-contained, always works) and uses I's injected
-client when present. Recorded as a contract concern so I and H settle on one.
+**`discoveryJoinLoop`** (the one K-owned goroutine). Ranges `disc.Peers()`; for
+each `Peer` it calls `cluster.Observe(peer.ID, peer.Addr.String())` (seeds the
+§3.1 observation from the mDNS source IP — critical on loopback where
+`InterfaceCIDRs` is empty) and `cluster.Join([peer.GossipAddrPort().String()])`.
+memberlist dedups already-joined members; join errors log at debug and drop.
 
-**`discoveryJoinLoop`.** One goroutine ranges `discovery.Peers()`; for each
-`Peer` it calls `cluster.Observe(peer.ID, peer.Addr.IP)` (seeds §3.1
-observations from the mDNS source address) and
-`cluster.Join([peer.Addr:GossipPort])`. memberlist dedups already-joined
-members; join errors are logged at debug and dropped (the peer may reappear).
+**Source/clock re-pointing is H's job, not K's.** K wires the subscriber and the
+clock follower **into the engine's Deps**; the engine watches `cluster.Subscribe()`
+derivation changes and calls `subClient.Subscribe(masterSourceAddr, gen, settings)`
+and `clockFol.SetMaster(masterStreamAddr, gen)` whenever the elected master
+endpoint or generation changes (D17 clock half; D22 subscribe half), resolving
+addresses via `cluster.DialCandidates(master)`. K never drives master changes.
 
 ### 3.2 Steady state — goroutines & channels
 
-| Goroutine            | Owner | Blocks on / loops                                   |
-|----------------------|-------|-----------------------------------------------------|
-| mux read loop        | S/mux | `ReadFromUDPAddrPort`; dispatch by type             |
-| clock follower       | F     | 1 Hz ticker; UDP req/reply via mux; offset median   |
-| receiver UDP         | G     | mux delivers 0x01/0x02 → reorder/FEC → `OnFrame`    |
-| receiver TCP         | G     | accept on streamTCP; length-framed reads → `OnFrame`|
-| sink playout         | E     | ticker at frame cadence; pop jitter buf; backend    |
-| group engine         | H     | cluster.Subscribe() events → re-derive; self-heal/watchdog tickers; playback ticker when master playing |
-| discovery register/browse | B | zeroconf; emits Peer                            |
-| discoveryJoinLoop    | K     | ranges Peers() → Observe + Join                      |
-| api Serve            | I     | Echo http.Server; per-request handlers; WS pump     |
+| Goroutine                 | Owner | Blocks on / loops                                                   |
+|---------------------------|-------|---------------------------------------------------------------------|
+| mux read loop             | S/mux | `ReadFromUDPAddrPort`; dispatch by type (0x01/0x02 audio+FEC, 0x10/0x11 clock) |
+| clock follower            | F     | 1 Hz ticker; UDP req/reply via mux; 5-best-of-30 median offset      |
+| source server: UDP fan-out| G     | per released frame → datagram to each sub addr + XOR FEC every 4     |
+| source server: TCP accept | G     | accept subscriber TCP conns on SOURCE_PORT; length-framed audio out  |
+| source server: control    | G     | HELLO/BYE/RESTART on SOURCE_PORT (UDP datagrams / TCP frames); registry keepalive(5 s)/expiry(15 s); burst prime |
+| subscriber receive (UDP)  | G     | mux 0x01/0x02 → reorder/FEC window → `Deliver` → `theSink.Push`      |
+| subscriber receive (TCP)  | G     | dial master SOURCE_PORT; length-framed reads → `Deliver`             |
+| subscriber control        | G     | HELLO keepalive (5 s); 2 s-starvation watchdog → RESTART; RECONFIG → resubscribe |
+| sink playout + rate servo | E     | frame-cadence ticker; jitter pop; Catmull-Rom resample; backend write |
+| group engine              | H     | `cluster.Subscribe()` → re-derive; self-heal/watchdog tickers; per-session release ticker (master); repoints subscriber+clock |
+| discovery register/browse | B     | zeroconf; emits Peer                                                 |
+| discoveryJoinLoop         | K     | ranges `Peers()` → `Observe` + `Join`                               |
+| api Serve                 | I     | Echo http.Server; per-request handlers; WS pump (debounced cluster) |
 
-Channels K introduces: only the `discovery.Peers()` consumer loop and the
-`shutdown` LIFO. K holds **no mutex** — it builds, starts, and waits. Each
-component owns its own single mutex (S §3 locking convention).
+The master's own sink is **not special**: the engine points `subClient` at the
+master's own `SOURCE_PORT` over loopback, so the master subscribes and plays via
+the identical path as remote members (D22). K wires exactly one subscriber and
+one source server per node; which one is "active" is derived state owned by H.
+
+Channels K introduces: the `disc.Peers()` consumer loop and the
+`shutdownStack`. K holds **no mutex** — it builds, starts, waits. Each component
+owns its own single mutex (S §3 convention).
 
 ### 3.3 Shutdown — reverse order, bounded
 
-`main` installs `signal.NotifyContext(ctx, SIGINT, SIGTERM)`. On the first
-signal, `ctx` cancels; `run` returns from `<-ctx.Done()` and unwinds the LIFO
-`shutdown` stack with a fresh `shutdownCtx` (5 s deadline, **not** the cancelled
-parent). On a second signal `main` exits hard (force-quit). Order:
+`main` installs `signal.NotifyContext(parent, SIGINT, SIGTERM)`. On the first
+signal `ctx` cancels; `run` returns from `<-ctx.Done()` and unwinds the
+`shutdownStack` with a **fresh** `shutdownCtx` (5 s deadline, not the cancelled
+parent). A second signal makes `main` exit hard. LIFO order (reverse of
+acquisition):
 
 ```
-1. discovery.Close()      // stop advertising/browsing first (deregister mDNS)
-2. apiSrv.Shutdown(sc)    // stop accepting HTTP; drain in-flight; closes WS
-3. engine.Close()         // stop any playback session: bump gen, send stop, clear status
-4. sender.Close()         // close TCP conns to members
-5. receiver.Close()       // stop accept + UDP delivery
-6. theSink.Close()        // stop playout loop, Close() backend
-7. clockFol.Close()       // stop 1 Hz loop  (clockSrv is passive, dies with mux)
-8. cluster.Shutdown(sc)   // memberlist Leave (broadcast) then close — peers see us go
-9. mux.Close()            // close UDP socket, join read goroutine
-10. httpLn/streamTCP/gossip listeners closed by their owners; any K still holds → Close
+ 1. disc.Close()           // stop advertising/browsing first (deregister mDNS)
+ 2. apiSrv.Shutdown(sc)    // stop accepting HTTP; drain in-flight; close WS
+ 3. engine.Close()         // stop any session: bump gen, BYE the local sub, RECONFIG/stop to subs, clear playback status
+ 4. subClient.Close()      // BYE to master source; stop receive loops
+ 5. srcSrv.Close()         // expire subscribers, close SOURCE_PORT TCP conns + listeners
+ 6. theSink.Close()        // stop playout loop + rate servo; Close() backend (exec: kill on hang, D21)
+ 7. clockFol.Close()       // stop 1 Hz loop   (clockSrv is passive; dies with the mux)
+ 8. cluster.Shutdown(sc)   // memberlist Leave (broadcast) then close — peers see us depart
+ 9. mux.Close()            // close STREAM_PORT UDP socket, join read goroutine
+10. close remaining listeners K still owns: srcTCP, srcUDP, streamTCP, httpLn
 ```
 
-Engine before cluster so the master broadcasts `state:idle` (clears playback
-record) **before** we Leave; followers then see both the stop and our
-departure. Cluster Leave before mux close so the gossip socket is still live
-for the leave broadcast. Every `Close` error is logged, never aborts the
-unwind. `run` returns the first non-nil shutdown error (or the original cause).
+Ordering rationale: **engine before subClient/srcSrv** so the master's stop
+control (RECONFIG/stop, §8.6 D23) is sent while the source server still runs and
+subscribers are still listening. **engine before cluster** so the master writes
+`state:idle` (clears the playback record) *before* we Leave; followers then see
+both the stop and our departure. **cluster Leave before mux.Close** so the
+gossip socket is alive for the leave broadcast. Every `Close` error is logged,
+never aborts the unwind. `run` returns the first non-nil shutdown error (or the
+original cause from `ctx`).
 
 ### 3.4 Locking
 
 None in K. The graph is built on the main goroutine before any worker starts
-(`mux.Run()` is step 15, after all `Register`/`OnFrame` wiring), so there is no
-concurrent access during construction; workers only start in step 16.
+(`mux.Run()` and the `*.Run(ctx)` calls are step 15–16, after all
+`Register`/`Deliver`/`SetGroup` wiring), so there is no concurrent access during
+construction; workers only start after the graph is closed.
 
 ---
 
 ## 4. Edge cases & failure handling
 
-- **Port exhaustion (§2, S §4).** `netx.BindTCPUDP`/`BindTCP` returning an error
-  is fatal: log the base+range, exit non-zero **before** starting any goroutine.
-  Nothing to unwind (binds are step 2, first resource on the stack).
-- **node.json unreadable / corrupt (§1, A).** `config.Load` error is fatal; the
-  node has no identity. Do not generate a fresh ID over a corrupt file (would
-  duplicate identity on the network) — fail loudly.
-- **`ENSEMBLE_OUTPUT=null` (K mandate, §8.5).** `kind="null"` selects the null
-  backend regardless of `$PATH`; capability `playback=false` is still reported
-  *truthfully* by probing `$PATH` — but the running sink is null. Spec §1 ties
-  `playback` to a backend being *found*; with forced null we report
-  `playback=false` so the e2e two-null-node cluster shows no false playback
-  capability yet both still receive frames (the receiver→sink path is
-  independent of the backend kind). `kind="auto"` (default) probes pw-play/
-  pw-cat/aplay/paplay; none found → fall back to null + `playback=false`.
-- **No network interfaces (§3.1, S §4).** `InterfaceCIDRs()` empty is fine: the
-  node advertises no self CIDRs and is reachable only via observed IPs. In
-  dev2/e2e on loopback, CIDRs are empty (loopback skipped), so the two nodes
-  **must** still find each other — they do, because mDNS on 127.0.0.1 +
-  `cluster.Observe(peer, "127.0.0.1")` from the discovery source address seeds
-  the observation, and the gossip join dials `127.0.0.1:gossipPort` directly
-  from the discovered `Peer.Addr`. (Contract concern: discovery must surface the
-  loopback address it saw; mDNS may not advertise 127.0.0.1 — see §6.)
+- **Four-port exhaustion (§2, S §4, D8).** Any of `BindTCPUDP(stream)`,
+  `BindTCPUDP(source)`, `BindTCP(http)`, or `probeGossipPort` returning an error
+  is **fatal**: log the base+range, close any listeners already bound this call,
+  exit non-zero before starting any goroutine. SOURCE_PORT (9200) is bound on
+  **every** node, master or not (D22) — a node that never becomes master still
+  holds an idle source listener; that is correct and cheap.
+- **Gossip port handoff (D8).** K does **not** hand memberlist a live socket for
+  gossip: `probeGossipPort` uses `netx.BindTCPUDP` to find a free TCP+UDP pair,
+  **closes both**, and passes the bare number to `cluster.New` (memberlist binds
+  it itself). The tiny rebind race is accepted for v1. STREAM and SOURCE stay
+  bound-and-handed-over (mux keeps the STREAM UDP socket; the source server
+  keeps both SOURCE sockets).
+- **node.json unreadable / corrupt (§1, A).** `config.Load` error is fatal; do
+  **not** generate a fresh ID over a corrupt file — that would duplicate
+  identity on the network. Fail loudly.
+- **`ENSEMBLE_OUTPUT=null` (K mandate, §8.5, D27).** `opt.Output=="null"` selects
+  the null backend regardless of `$PATH`. `capabilities(opt)` still probes
+  `$PATH` truthfully: with forced `null`, `playback=false`, but the
+  receiver→sink path is independent of the backend, so a two-null cluster still
+  **subscribes and "plays"** (frames written to the null sink advance
+  `Stats().Played`). `auto` (default) probes pw-play/pw-cat/aplay/paplay; none
+  found → null + `playback=false`. `backends` in capabilities lists every name
+  this build/host actually offers (D27).
+- **Source schemes in capabilities (D26).** `capabilities(opt).Sources` is the
+  static `["file","http","input"]` (`input` only if an exec-capture tool is on
+  `$PATH`, mirroring the playback probe). `play` of an `http://` URI needs no
+  local file; `file:` URIs resolve under `MEDIA_DIR` with traversal rejected by
+  the opener (D26).
+- **No network interfaces (§3.1, S §4).** `InterfaceCIDRs()` empty is fine. On
+  loopback dev2/e2e, CIDRs are empty (loopback skipped), so the two nodes find
+  each other purely via (a) the `--join` seed (D20) and (b)
+  `cluster.Observe(peer, "127.0.0.1")` fed from the discovery source address and
+  from inbound HTTP/gossip traffic — `DialCandidates` then resolves
+  `127.0.0.1:<port>` for proxy, clock, and source subscription. The stream path
+  needs **no** resolution at all (the source streams back to the observed
+  subscription addr, §3.1/§8.7).
 - **mDNS unavailable (container, no multicast).** `discovery.New`/`Run` error or
-  silence is **non-fatal**: log a warning and continue. The cluster still works
-  if peers are joined some other way; in e2e we additionally seed an explicit
-  join (see §5, `ENSEMBLE_JOIN`) so the smoke test does not depend on multicast.
-- **Follower self-clock (§7).** The clock follower targets the *master's*
-  STREAM_PORT UDP. When this node is solo master, master == self, so the
-  follower dials `mux.LocalAddr()` (localhost). K passes the resolved master
-  endpoint to `clockFol.SetMaster` — but K does **not** drive master changes;
-  the group engine (H) owns "who is master" and calls `SetMaster` on the
-  follower (and bumps gen). K only wires the follower into the engine's params.
-  (Contract concern: confirm H owns `SetMaster`, else K runs a small re-point
-  loop off `cluster.Subscribe()`.)
-- **Takeover needs HTTP to peers (§5.2).** The `FollowClient` dials peers' HTTP
-  ports using `cluster.Snapshot()` addresses ∩ observations (§3.1). On loopback
-  e2e that is `127.0.0.1:httpPort`. If no address resolves, `Follow` returns an
-  error; the engine logs and the missing member self-heals (§5).
+  silence is **non-fatal**: warn and continue. e2e seeds an explicit `--join` so
+  the smoke test never depends on multicast.
+- **Subscriber re-point on master change (§7/§8.7, D17/D22).** Owned by H, not K.
+  When this node is solo master, master == self, so H points `subClient` at the
+  node's own SOURCE_PORT (loopback) and `clockFol.SetMaster(mux.LocalAddr(), gen)`.
+  K only supplies the subscriber, the source server, the clock follower, and
+  `cluster.DialCandidates` into the engine's Deps. (§9 contract concern: confirm
+  H owns the repoint; else K runs a small loop off `cluster.Subscribe()`.)
+- **Takeover needs HTTP to peers (§5.2).** `followClient` dials peers' HTTP ports
+  via `cluster.DialCandidates(peer)` ∩ `httpPort` (§3.1). On loopback that is
+  `127.0.0.1:<httpPort>`. No address resolves → `Follow` returns an error; the
+  engine logs and the missing member self-heals (§5). Proxied follow requests
+  carry `X-Ensemble-Proxied: 1` and are never re-proxied (§9.3).
 - **Graceful-shutdown deadline.** 5 s. If `cluster.Shutdown`/`apiSrv.Shutdown`
-  exceed it, the deadline `shutdownCtx` cancels them and `run` proceeds to
-  `mux.Close()` and returns. A second SIGINT bypasses the wait entirely.
-- **`run` returns error → exit 1.** `main` prints it to stderr and
-  `os.Exit(1)`. Clean shutdown → exit 0. Port-exhaustion/config errors map to 1.
+  exceed it, `shutdownCtx` cancels them and `run` proceeds to `mux.Close()` and
+  returns. A second SIGINT bypasses the wait entirely.
+- **`run` returns error → exit 1.** `main` prints to stderr, `os.Exit(1)`. Clean
+  shutdown → 0. Port-exhaustion / config errors → 1.
 
 ---
 
 ## 5. scripts/dev2.sh
 
-POSIX `sh`, `set -eu`. Builds once, launches two nodes on **loopback** with
-disjoint ports and temp data dirs, both forced to the null backend, and prints
-their base URLs. Used by `make dev` and as the harness `e2e.sh` sources.
-
-Behavior:
+`bash`, `set -euo pipefail`. Builds once, launches two nodes on **loopback** with
+four disjoint port blocks and temp data dirs, both forced to the null backend,
+prints their base URLs. Used by `make dev` and sourced by `e2e.sh`.
 
 ```sh
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/ensemble"
-go build -o "$BIN" ./cmd/ensemble          # build (web/dist placeholder is fine)
+go build -o "$BIN" ./cmd/ensemble            # web/dist placeholder is fine
 
-DATA1="$(mktemp -d)/n1"; DATA2="$(mktemp -d)/n2"
-export ENSEMBLE_OUTPUT=null                # both nodes: null sink (§8.5)
+# A tiny canonical WAV (48k stereo s16le tone) committed/generated for `play`.
+[ -f "$ROOT/testdata/media/tone.wav" ] || "$ROOT/scripts/fixtures.sh"
+
+DATA1="$(mktemp -d)"; DATA2="$(mktemp -d)"; DATA3="$(mktemp -d)"
+LOG1="$(mktemp)"; LOG2="$(mktemp)"; LOG3="$(mktemp)"
+export ENSEMBLE_OUTPUT=null                  # all nodes: null sink (§8.5, D27)
 export ENSEMBLE_LOG="${ENSEMBLE_LOG:-info}"
 
-# Node 1: http 18080 / stream 19090 / gossip 17946
-# Node 2: http 28080 / stream 29090 / gossip 27946
-"$BIN" --data "$DATA1" --media "$ROOT/testdata/media" \
-       --http-port 18080 --stream-port 19090 --gossip-port 17946 \
-       --host 127.0.0.1 --name n1 &  PID1=$!
-"$BIN" --data "$DATA2" --media "$ROOT/testdata/media" \
-       --http-port 28080 --stream-port 29090 --gossip-port 27946 \
-       --host 127.0.0.1 --name n2 \
-       --join 127.0.0.1:17946 &        PID2=$!   # explicit join — no multicast reliance
+# Four ports per node, distinct blocks:
+#   N1: http 18080 stream 19090 source 19200 gossip 17946
+#   N2: http 28080 stream 29090 source 29200 gossip 27946
+#   N3: http 38080 stream 39090 source 39200 gossip 37946  (started later by e2e for late-join)
+"$BIN" --data "$DATA1" --media "$ROOT/testdata/media" --name n1 --host 127.0.0.1 \
+       --http-port 18080 --stream-port 19090 --source-port 19200 --gossip-port 17946 \
+       >"$LOG1" 2>&1 &  PID1=$!
+"$BIN" --data "$DATA2" --media "$ROOT/testdata/media" --name n2 --host 127.0.0.1 \
+       --http-port 28080 --stream-port 29090 --source-port 29200 --gossip-port 27946 \
+       --join 127.0.0.1:17946 >"$LOG2" 2>&1 &  PID2=$!
 
-trap 'kill "$PID1" "$PID2" 2>/dev/null || true' EXIT INT TERM
-echo "N1=http://127.0.0.1:18080  N2=http://127.0.0.1:28080  (pids $PID1 $PID2)"
-# When run directly: wait. When sourced by e2e.sh: caller controls lifetime.
+trap 'kill $PID1 $PID2 ${PID3:-} 2>/dev/null || true' EXIT INT TERM
+echo "N1=http://127.0.0.1:18080  N2=http://127.0.0.1:28080"
+echo "DATA1=$DATA1 DATA2=$DATA2 DATA3=$DATA3 LOG1=$LOG1 LOG2=$LOG2 LOG3=$LOG3"
+echo "ROOT=$ROOT BIN=$BIN"
+# Direct run: wait. Sourced by e2e (DEV2_WAIT=0): caller controls lifetime + starts N3.
 [ "${DEV2_WAIT:-1}" = 1 ] && wait
 ```
 
 Notes:
-- `--host 127.0.0.1` keeps everything on loopback (no LAN noise; reproducible).
-- `--join` / `ENSEMBLE_JOIN` is an explicit gossip seed so the test never
-  depends on mDNS multicast (which is flaky in CI/containers). Discovery still
-  runs; the seed is belt-and-suspenders. **Contract concern:** A/K need a
-  `--join` flag (a comma-list of `host:gossipPort` passed to `cluster.Join` at
-  startup). It is not in the spec's flag list (§2) but is required for a
-  hermetic e2e on loopback. K adds it as a hidden/dev flag.
-- `testdata/media` ships a tiny generated WAV (a few hundred ms of canonical
-  48k stereo s16le tone) committed under the repo so `play` has a real file.
-  Generated by a `go test`/`go run` helper in D's fixtures or a `make fixtures`
-  target; K's script only references the path.
+- Each node now binds **four** ports (`--source-port` added, D22/§2). N3's block
+  is reserved here but **started by e2e.sh mid-play** (late-join test, §7).
+- `--host 127.0.0.1` keeps everything on loopback. `--join` (D20) is an explicit
+  gossip seed so the test never depends on mDNS multicast; discovery still runs.
+- `testdata/media/tone.wav`: a few hundred ms of canonical 48k stereo s16le tone,
+  generated by `scripts/fixtures.sh` (a `go run` helper in D's fixtures) if
+  absent; long enough that a third node joining mid-play still has frames whose
+  `pts + bufferMs` deadline is future (so the burst prime has something to send,
+  D24). For a clean late-join assertion, e2e plays an `http://` live source or
+  loops the tone — see §7 note.
 
 ## 6. scripts/e2e.sh — the smoke test
 
-POSIX `bash`, `set -euo pipefail`. Needs `curl` and `jq`. Sources `dev2.sh`
-with `DEV2_WAIT=0` so it controls the node lifetime, polls readiness, runs the
-assertions, and tears the nodes down. Each assertion exits non-zero with a
-clear message on failure; success prints `e2e OK`.
+`bash`, `set -euo pipefail`. Needs `curl` and `jq`. Sources `dev2.sh` with
+`DEV2_WAIT=0`, polls readiness, runs the assertions, tears down. Each assertion
+exits non-zero with a clear message; success prints `e2e OK`. On any failure the
+trap tails each node's log file for debuggability.
 
 Helpers:
+
 ```sh
-api()   { curl -fsS -H 'Accept: application/json' "$@"; }
-post()  { curl -fsS -X POST -H 'Content-Type: application/json' -d "$2" "$1"; }
-wait_for() { # url jqfilter expected timeout — poll until jq filter == expected
+api()  { curl -fsS -H 'Accept: application/json' "$@"; }
+post() { curl -fsS -X POST -H 'Content-Type: application/json' -d "${2:-}" "$1"; }
+wait_for() {  # url jqfilter expected [timeout_s] — poll until jq filter == expected
   local url=$1 f=$2 want=$3 t=${4:-15} got
-  for _ in $(seq "$((t*4))"); do
+  for _ in $(seq $((t*4))); do
     got=$(api "$url" | jq -r "$f" 2>/dev/null || true)
     [ "$got" = "$want" ] && return 0
     sleep 0.25
   done
-  echo "TIMEOUT: $url $f != $want (last=$got)" >&2; return 1
+  echo "TIMEOUT: $url  $f != $want  (last=$got)" >&2; return 1
+}
+xor16() { python3 - "$1" "$2" <<'PY'
+import sys
+a=bytes.fromhex(sys.argv[1]); b=bytes.fromhex(sys.argv[2])
+print(bytes(x^y for x,y in zip(a,b)).hex())
+PY
 }
 ```
 
-The assertions (mirrors the K mandate exactly):
+The assertions (mirror the K mandate in IMPLEMENTATION.md exactly):
 
-1. **Both up.** `wait_for $N1/api/status '.id|length' 32` and same for `$N2`;
-   capture `ID1=$(api $N1/api/status|jq -r .id)`, `ID2` likewise.
+1. **Both up.** `wait_for $N1/api/status '.id|length' 32`; same for `$N2`.
+   Capture `ID1=$(api $N1/api/status|jq -r .id)`, `ID2` likewise. Assert the
+   status envelope (D19) exposes `.ports.source` (the new fourth port):
+   `wait_for $N1/api/status '.ports.source>0' true`.
 
-2. **They see each other.** `wait_for $N1/api/cluster '[.nodes[]|select(.alive)]|length' 2`
-   and the symmetric check on `$N2`. Asserts gossip converged via the explicit
-   join (and, when multicast works, via mDNS too).
+2. **Discovery + convergence.** `wait_for $N1/api/cluster
+   '[.nodes[]|select(.alive)]|length' 2` and the symmetric check on `$N2`. Both
+   nodes converge via the `--join` seed (and mDNS where multicast works). Assert
+   each node advertises its SOURCE_PORT in the record:
+   `wait_for $N1/api/cluster '[.nodes[]|select(.sourcePort>0)]|length' 2`.
 
 3. **Follow forms a 2-node group with XOR id.**
-   `post $N2/api/follow "{\"target\":\"$ID1\"}"`.
-   Wait until N1's cluster shows one group of two members mastered by `ID1`:
+   `post $N2/api/follow "{\"target\":\"$ID1\"}"`. Wait until N1's cluster shows
+   one group of two mastered by `ID1`:
    `wait_for $N1/api/cluster '[.groups[]|select(.master=="'$ID1'")|.members|length]|max' 2`.
-   Then assert the group ID is the XOR of the two node IDs, computed in the
-   shell from the hex (a 16-byte XOR in `awk`/`python3 -c`), and compared to
-   `.groups[]|select(.master==ID1).id`. This is the load-bearing derivation
-   check (§5).
+   Then assert the derived group ID **equals the 16-byte XOR** of the two node
+   IDs (§5): `GID=$(xor16 "$ID1" "$ID2")`;
+   `wait_for $N1/api/cluster '.groups[]|select(.master=="'$ID1'").id' "$GID"`.
+   This is the load-bearing derivation check.
 
-4. **Takeover moves mastership.**
+4. **Takeover moves mastership, group id unchanged.**
    `post $N1/api/group/master "{\"node\":\"$ID2\"}"` (issued on N1, the current
-   master; §5.2 forwards as needed). Wait until the group with the **same id**
-   now reports `master==ID2` and still has 2 members:
-   `wait_for $N1/api/cluster '.groups[]|select(.id=="'$GID'").master' "$ID2"`.
-   Group id unchanged (§5.2 step 4) is asserted by keying on `$GID`.
+   master; §5.2 forwards as needed). Wait until the group with the **same** id
+   reports `master==ID2` and still 2 members (§5.2 step 4 — XOR is unchanged):
+   `wait_for $N1/api/cluster '.groups[]|select(.id=="'$GID'").master' "$ID2"` and
+   `wait_for $N1/api/cluster '.groups[]|select(.id=="'$GID'")|.members|length' 2`.
 
-5. **Play makes BOTH null sinks receive frames, small playout error.**
-   `post $N2/api/play "{\"file\":\"tone.wav\"}"` (N2 is now master).
-   For each of N1,N2: `wait_for $N/api/status '.sink.played>0' true` — i.e. poll
-   until `played` (from `contracts.SinkStats`, surfaced under
-   `status.sink.played`) is non-zero on **both** nodes. Then assert the playout
-   is "small": `lateDrop` is a small fraction of `played`
-   (`(.sink.lateDrop // 0) <= .sink.played/10`) and `synced==true` on both.
-   "Small playout error" = mostly-played, few late drops, clock synced — the
-   observable proxy for in-sync playout the spec gives us via §9.1 stats.
+5. **Play → BOTH sinks subscribe and play.**
+   `post $N2/api/play "{\"file\":\"tone.wav\"}"` (N2 is now master; back-compat
+   `{file}` ≡ `file:` URI, §9.1). For each of N1,N2:
+   `wait_for $N/api/status '.sink.played>0' true` — poll until `played`
+   (`contracts.SinkStats` under `.sink`, D19) is non-zero on **both** nodes,
+   proving the master's own sink subscribed over loopback **and** the remote
+   member subscribed over the network (D22). Then assert in-sync quality:
+   `synced==true` on both and `lateDrop` a small fraction of `played`:
+   `wait_for $N1/api/status '.sink.synced' true`;
+   `api $N1/api/status | jq -e '(.sink.lateDrop // 0) <= (.sink.played/10)'`.
+   The rate servo's `.sink.ratePPM` and `.sink.buffered` (D25) are present in the
+   envelope; the test asserts `.sink.buffered >= 0` (sanity) but does not pin a
+   ppm value (servo settles below audibility).
 
-6. **Stop works.** `post $N2/api/stop ""`. Wait until the group playback state
-   is idle on both nodes: `wait_for $N1/api/cluster '.groups[]|select(.id=="'$GID'").playback.state' idle`.
-   Optionally assert the sinks stop advancing: sample `played`, sleep 0.5 s,
-   resample, assert unchanged (within the watchdog window, §8.6).
+6. **Source stats on the master (D28).** N2 (master) runs the source; its
+   `/api/status` carries `source:{clients,connects,restarts,primes}` (D19). With
+   a 2-node group both members subscribe — including N2's **own** loopback
+   subscription — so:
+   `wait_for $N2/api/status '.source.clients' 2`  (group size, self included),
+   `api $N2/api/status | jq -e '.source.connects >= 2'`,
+   `api $N2/api/status | jq -e '.source.primes >= 1'`. The same numbers ride the
+   replicated playback record (`Playback.Source`), so they are also readable from
+   any node's `/api/cluster`:
+   `api $N1/api/cluster | jq -e '.groups[]|select(.id=="'$GID'").playback.source.clients == 2'`.
 
-Teardown: the `trap` from `dev2.sh` kills both PIDs; `e2e.sh` adds its own trap
-to print captured node logs on failure (`tail` of each node's stderr file) for
-debuggability, then exits with the first failing assertion's code.
+7. **Late-join burst prime (D24).** Start N3 mid-play and make it follow N2:
+   ```sh
+   "$BIN" --data "$DATA3" --media "$ROOT/testdata/media" --name n3 --host 127.0.0.1 \
+          --http-port 38080 --stream-port 39090 --source-port 39200 --gossip-port 37946 \
+          --join 127.0.0.1:17946 >"$LOG3" 2>&1 &  PID3=$!
+   wait_for http://127.0.0.1:38080/api/status '.id|length' 32
+   ID3=$(api http://127.0.0.1:38080/api/status | jq -r .id)
+   post http://127.0.0.1:38080/api/follow "{\"target\":\"$ID2\"}"
+   ```
+   N3 joins the group, its subscriber HELLOs the master's SOURCE_PORT with the
+   prime-me flag, and the source **burst-primes** it from the ring. Assert N3
+   reports `played>0` **quickly** (within a few seconds — the burst outruns the
+   stream, ~4× realtime UDP, D24):
+   `wait_for http://127.0.0.1:38080/api/status '.sink.played>0' true 6`.
+   Master's source stats move: `wait_for $N2/api/status '.source.clients' 3` and
+   `.source.connects >= 3`, `.source.primes >= 2`. Group id is now the XOR of
+   three ids: `GID3=$(xor16 "$GID" "$ID3")`;
+   `wait_for $N1/api/cluster '.groups[]|select(.master=="'$ID2'").id' "$GID3"`.
 
-**Status JSON shape the test depends on** (§9.1 `GET /api/status`): the test
-reads `.id`, `.name`, `.role`, `.sink.played`, `.sink.lateDrop`,
-`.sink.synced`. S defines `SinkStats{Played,Silence,LateDrop,StaleGen,Synced}`
-but not the `/api/status` envelope. **Contract concern:** the API piece (I)
-must nest `SinkStats` under a stable key (proposed `"sink"`) in `/api/status`,
-with `played`/`lateDrop`/`synced` JSON tags as in `SinkStats`. If I names it
-differently, e2e.sh's jq filters are the single place to update.
+8. **RESTART recovery (§8.6, D25).** Simulate a lost subscriber by briefly
+   pausing N3 (`kill -STOP $PID3; sleep 3; kill -CONT $PID3`) — frames cease > 2 s,
+   N3's watchdog fires `Subscriber.Restart()`, sends RESTART to the source, and
+   resumes from a fresh burst. Assert N3 keeps playing after resume (its `played`
+   advances) and the master counts the re-prime:
+   sample `P=$(api .../status|jq .sink.played)`, `sleep 1`,
+   `api .../status | jq -e '.sink.played > '"$P"`; and
+   `api $N2/api/status | jq -e '.source.restarts >= 1'`.
+   (If `kill -STOP` is unavailable in the CI sandbox, the equivalent is dropping
+   N3's UDP via a brief firewall rule; the assertion text is the same. Recorded
+   as an environment caveat, not a contract concern.)
+
+9. **Live settings change → resubscribe, playback continues (D23/§8.7).**
+   Change the group's jitter buffer live:
+   `post $N2/api/group/settings "{\"codec\":\"pcm\",\"transport\":\"udp\",\"bufferMs\":80}"`.
+   The master bumps the generation, broadcasts RECONFIG; every subscriber
+   re-reads the replicated settings and **resubscribes** under the new gen — no
+   `play`/`stop`. Assert (a) the settings record updated everywhere:
+   `wait_for $N1/api/cluster '.groups[]|select(.master=="'$ID2'").settings.bufferMs' 80`;
+   (b) playback **did not stop**:
+   `api $N1/api/cluster | jq -e '.groups[]|select(.master=="'$ID2'").playback.state == "playing"'`;
+   (c) sinks keep advancing across the gen change (sample `played`, `sleep 1`,
+   resample, assert strictly greater on N1 and N3). A brief `staleGen` bump on
+   the sinks (old-gen frames dropped at the boundary) is allowed:
+   `api $N1/api/status | jq -e '.sink.staleGen >= 0'`.
+
+10. **Stop.** `post $N2/api/stop`. Wait until playback is idle on all nodes:
+    `wait_for $N1/api/cluster '.groups[]|select(.id=="'$GID3'").playback.state' idle`.
+    Then assert sinks stop advancing (within the watchdog window §8.6): sample
+    `played`, `sleep 0.6`, resample, assert unchanged on N1/N2/N3. Master's
+    `source.clients` drops as subscribers BYE:
+    `wait_for $N2/api/status '.source.clients' 0 5`. Print `e2e OK`.
+
+Teardown: `dev2.sh`'s trap kills PID1/PID2; e2e adds N3 (`PID3`) to the trap and,
+on failure, tails `$LOG1 $LOG2 $LOG3`, then exits with the first failing
+assertion's code.
+
+**Status JSON the test depends on** (D19 envelope, §9.1): `.id`, `.name`,
+`.role`, `.ports.{http,stream,source,gossip}`,
+`.sink.{played,lateDrop,staleGen,synced,ratePPM,buffered}`, and — on the master
+— `.source.{clients,connects,restarts,primes}`. From `/api/cluster`:
+`.groups[].{id,master,members,settings.bufferMs,playback.state,playback.source.clients}`.
+These are exactly S's `SinkStats`/`SourceStats`/`GroupView`/`Playback`/
+`GroupSettings` shapes under the D19 envelope; if I names a key differently, the
+jq filters in `e2e.sh` are the single place to update (§9 concern).
 
 ---
 
 ## 7. Test plan
 
-`main.go` is wiring; its logic is tested at two altitudes — Go unit tests for
-the pure helpers, and the shell e2e for the whole graph. No mocks of the 12
-components: the e2e *is* the integration test, run against real binaries.
+`main.go` is wiring; its logic is tested at two altitudes — Go unit tests for the
+pure helpers, the shell e2e for the whole graph. No mocks of the ~14 components:
+the e2e **is** the integration test, run against real binaries on loopback with
+null sinks.
 
 Go unit tests (`cmd/ensemble/main_test.go`):
-- `TestParseOptionsDefaults` — no args/env → spec defaults (8080/9090/7946, ./data, MediaDir=DataDir/media, output=auto).
-- `TestParseOptionsFlagsOverrideEnv` — flag beats env beats default for each port/dir.
-- `TestParseOptionsEnvFallback` — `ENSEMBLE_*` honored when flag absent.
-- `TestParseOptionsOutputNull` — `ENSEMBLE_OUTPUT=null` → opt.Output=="null".
-- `TestParseOptionsBadPort` — non-numeric `--http-port` → parse error (no panic).
-- `TestCapabilitiesNullForcesNoPlayback` — output=null → caps.Playback==false, codecs==["pcm"].
-- `TestFollowClientPostsFollow` — followClient.Follow hits `/api/follow` with `{target}` JSON and the proxied header, against an httptest server faking a peer (resolved via a fake StateStore).
-- `TestFollowClientUnfollow` — Unfollow hits `/api/unfollow` on the resolved peer.
+- `TestParseOptionsDefaults` — no args/env → spec defaults: http 8080, stream
+  9090, **source 9200**, gossip 7946, `./data`, MediaDir=DataDir/media,
+  output="auto".
+- `TestParseOptionsSourcePort` — `--source-port`/`ENSEMBLE_SOURCE_PORT` parsed
+  into `opt.SourcePort` (the new fourth port).
+- `TestParseOptionsFlagsOverrideEnv` — flag beats env beats default for every
+  port/dir.
+- `TestParseOptionsJoinList` — `--join a:1,b:2` and `ENSEMBLE_JOIN` parse to
+  `[]string{"a:1","b:2"}` (D20).
+- `TestParseOptionsOutputNull` — `ENSEMBLE_OUTPUT=null` → `opt.Output=="null"`
+  (env-only, D2; no flag).
+- `TestParseOptionsBadPort` — non-numeric `--http-port` → parse error, no panic.
+- `TestCapabilitiesNullForcesNoPlayback` — output=null → `caps.Playback==false`,
+  `caps.Codecs==["pcm"]`, `caps.Sources` contains `"file"` and `"http"`.
+- `TestCapabilitiesBackendsListed` — `caps.Backends` always contains `"null"`
+  and `"file"`; `"exec"` only when a pipe tool is on `$PATH` (D27).
+- `TestFollowClientPostsFollow` — `followClient.Follow` hits `/api/follow` with
+  `{target}` JSON and the `X-Ensemble-Proxied` header, against an httptest server
+  faking a peer (addr resolved via a fake `StateStore.DialCandidates`).
+- `TestFollowClientUnfollow` — `Unfollow` hits `/api/unfollow` on the resolved peer.
 - `TestFollowClientNoAddress` — peer with no resolvable addr → error, no panic.
-- `TestShutdownStackLIFO` — push N closers, run unwind, assert reverse order (the `shutdown []func` mechanism extracted to a tiny testable helper).
-- `TestRunFatalOnPortExhaustion` — pre-bind the base ports, `run` returns a non-nil error fast and starts no goroutine (assert via a short timeout + goroutine count delta).
+- `TestShutdownStackLIFO` — push N named closers, `unwind`, assert reverse order
+  and that all run even when one returns an error (first error is returned).
+- `TestProbeGossipPortReleases` — `probeGossipPort` returns a number whose TCP
+  **and** UDP are immediately re-bindable (proves D8 probe-release).
+- `TestRunFatalOnPortExhaustion` — pre-bind the four base ports, `run` returns a
+  non-nil error fast and starts no goroutine (assert via short timeout +
+  goroutine-count delta).
 
-Shell e2e (`scripts/e2e.sh`, invoked by `make e2e` / CI):
-- the six assertions in §6 are themselves the test; the script exits 0 only if
-  all pass. CI runs it on loopback with `ENSEMBLE_OUTPUT=null`, no audio
-  hardware, no root, no real multicast (explicit `--join`).
-- `make e2e` target: `go build` → `scripts/e2e.sh`. Fast (< ~10 s): node boot +
-  gossip convergence + one short tone.
+Shell e2e (`scripts/e2e.sh`, via `make e2e` / CI):
+- the ten assertions of §6 are the test; the script exits 0 only if all pass. CI
+  runs it on loopback with `ENSEMBLE_OUTPUT=null`, no audio hardware, no root, no
+  real multicast (explicit `--join`).
+- `make e2e`: `go build` → `scripts/e2e.sh`. Budget ~15 s (boot + convergence +
+  follow + takeover + a short looped/live tone + late-join + settings change).
 
 All Go unit tests run without network root, hardware, or multicast: `httptest`
-for the follow client, in-process fakes for `StateStore`, no real sockets bound
-except the deliberate port-exhaustion test (loopback ephemeral pre-bind).
+for the follow client, in-process fakes for `StateStore`, real sockets only in
+the deliberate `probeGossipPort` / port-exhaustion tests (loopback ephemeral).
 
 ---
 
 ## 8. Why this is the smallest thing that works
 
-- One `main.go`, one builder func, one fallback type. No app framework, no
-  lifecycle library, no DI — a LIFO closure stack is the whole "container".
-- K introduces **no** new cross-piece interface; it consumes only what S pinned
-  and what each piece already exports. The only K-original code is option
-  parsing (trivial), the `followClient` fallback (a 30-line HTTP POST), and the
-  two scripts.
-- The e2e asserts behavior through the **public REST API only** (curl/jq), so it
-  is decoupled from internal types and survives refactors of any single piece.
-- Everything runs on loopback with null sinks: no hardware, no root, no
-  multicast dependency (explicit gossip seed).
+- One `main.go`, one `run` builder, one LIFO closer stack, one fallback type.
+  No app framework, no lifecycle library, no DI container.
+- K introduces **no** cross-piece interface; it consumes only what S pinned and
+  what each piece exports. The only K-original code is option parsing, the
+  `capabilities` probe (D3), the `followClient` fallback (~30 lines), the
+  `shutdownStack`, and the two scripts.
+- The subscribe model removes an entire concern from K: there is **no** endpoint
+  resolver, **no** `SetEndpoints`, **no** master-dials-members. K binds the
+  fourth port, constructs one source server + one subscriber per node, and hands
+  both to the engine; H owns who subscribes to whom. The stream path needs no
+  address resolution (source streams back to the observed subscription address,
+  §3.1/§8.7).
+- The e2e asserts behavior through the **public REST API only** (curl/jq) under
+  the D19 envelope, so it is decoupled from internal types and survives refactors
+  of any single piece.
+- Everything runs on loopback with null sinks: no hardware, no root, no multicast
+  dependency (explicit gossip seed, D20).
+
+---
+
+## 9. Contract concerns (for the integrator fix-loop)
+
+G and H are both regenerated to the subscribe model (D22–D28); the remaining
+issues are cross-piece **naming/shape** mismatches K must reconcile in §2.1
+before wave-4 integration, not a stale push model:
+
+1. **Subscriber-client package & constructor.** G-stream.md puts the member-side
+   subscriber in **`internal/stream`** as `stream.NewClient(ClientConfig)` →
+   `*stream.Client` (`Subscribe(sourceAddr, gen, Transport)`, `Unsubscribe`,
+   `Counters`, `Close`); only the **source server** lives in `internal/source`
+   (`source.NewServer`). §2.1 here names the subscriber `source.NewSubscriber`
+   with `Subscribe(master, gen, contracts.GroupSettings)` and a
+   `Deliver(gen,seq,pts,payload)` callback — G instead uses a `DeliverFunc(h
+   Header, payload)` and a `Transport` (not `GroupSettings`) arg. **Action:
+   align K's wiring to `stream.NewClient`/`stream.Client` and G's `DeliverFunc`
+   signature (the deliver closure unpacks the Header into the sink Push args).**
+
+2. **Source server config field names.** §2.1 uses
+   `source.ServerConfig{SourceTCP, SourceUDP}`; G-stream.md uses
+   `source.Config{Self id.ID, UDP, TCP, Log}` and requires `Self`. **Action:
+   confirm the `source.Config` field set (Self/UDP/TCP) and that K passes the
+   node id.**
+
+3. **API↔group construction order (D16).** K prefers `apiSrv.FollowClient()` and
+   `apiSrv.SetGroup(engine)`. If I exports neither, K uses its own `followClient`
+   and passes the engine into `api.New`. **Action: I confirm it exports
+   `FollowClient()` and `SetGroup(*group.Engine)` (or accept the engine in
+   `Params` and expose `FollowClient`).**
+
+4. **`/api/status` D19 envelope.** The e2e reads `.ports.source`,
+   `.sink.{ratePPM,buffered}`, and `.source.{clients,connects,restarts,primes}`.
+   **Action: I confirm the envelope nests `SinkStats` under `.sink`,
+   `SourceStats` under `.source` (present only while a source runs), and exposes
+   `.ports.source`** — otherwise the jq filters in `e2e.sh` are the single edit
+   point.
+
+5. **`--source-port` / `ENSEMBLE_SOURCE_PORT` flag (§2, D22).** A's config must
+   parse the fourth port and `config.Options`/`cluster.Params`/`discovery.Params`
+   must carry `SourcePort`. **Action: A and the Params structs add SourcePort.**
+
+6. **Clock/subscriber re-point ownership (D17/D22).** K assumes H repoints both
+   `subClient.Subscribe(master, gen, settings)` and `clockFol.SetMaster(master,
+   gen)` off `cluster.Subscribe()`. **Action: confirm H owns this; else K runs a
+   small repoint loop.**

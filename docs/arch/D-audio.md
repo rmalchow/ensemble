@@ -1,349 +1,607 @@
-# D — audio source & decoding
+# D — media sources (file / http / input)
 
-Source of truth: [docs/README.md](../README.md) §6, §8.1, §8.2; contracts:
+Source of truth: [docs/README.md](../README.md) §6, §6.1, §8.1; integrator
+decisions [docs/arch/DECISIONS.md](DECISIONS.md) **D9** (EOF semantics),
+**D26** (scheme-keyed source factory, pull- vs live-paced); shared contracts
 [docs/arch/S-skeleton.md](S-skeleton.md). This piece owns **`internal/audio/`**
-only. It depends on S for the canonical PCM constants
-(`stream.FrameBytes`, `stream.FrameSamples`, `stream.SampleRate`,
-`stream.Channels`) and on three decode libs (`hajimehoshi/go-mp3`,
-`mewkiz/flac`) plus a hand-rolled WAV reader. Nothing else imports `internal/audio`
-except the group engine (H), which calls `Open` and pulls frames.
+only.
 
-Design stance: **smallest thing that satisfies the spec.** One concrete
-`FrameReader` type, one `Open` dispatch by extension, three thin per-format
-decoder adapters feeding a single shared "samples → canonical 20 ms frames"
-pipeline (resample + mono-dup + framing). No interfaces beyond the one decode
-source adapter (three implementations exist, so an interface is justified).
+It depends on S for the canonical-PCM constants (`stream.FrameBytes`,
+`stream.FrameSamples`, `stream.SampleRate`, `stream.Channels`,
+`stream.FrameDuration`) and on two decode libs (`hajimehoshi/go-mp3`,
+`mewkiz/flac`) plus a hand-rolled WAV reader. Nothing imports `internal/audio`
+except the group engine (H), which calls `Open` and pulls frames via the
+`Source` contract.
+
+Design stance: **smallest thing that satisfies the spec.** One exported
+`Source` interface, one `Open(uri)` scheme dispatcher, three media-source
+implementations (`fileSource`, `httpSource`, `inputSource`), and **one shared
+decode pipeline** (decoder adapter → mono-dup → linear resample → 20 ms
+framing) that all three reuse. The only structural difference between the
+three is *where the bytes come from and how the caller is paced* — pull-paced
+(file: decode-ahead, real EOF) vs live-paced (http/input: never EOF, underflow
+yields silence without stalling, D26).
+
+The previous round's decoder + resampler design is kept verbatim where still
+valid; the change is that decode is now wrapped behind the `Source` contract
+and reused by the http source, and two new live sources (http, input) are
+added.
 
 ---
 
 ## 1. Package / file layout
 
 ```
-internal/audio/audio.go        Open(path) dispatch by extension; FrameReader type;
-                               ReadFrame/Close/Format; pcmSource interface; the
-                               framing+resample+mono-dup pipeline; errors.
-internal/audio/wav.go          hand-rolled RIFF/WAVE reader (PCM s16/s24/u8 +
-                               IEEE float32), streaming sample source. ~110 lines.
-internal/audio/mp3.go          go-mp3 adapter: wraps *mp3.Decoder as a pcmSource.
-internal/audio/flac.go         mewkiz/flac adapter: wraps *flac.Stream as a pcmSource.
+internal/audio/source.go       Source interface; Open(uri) scheme dispatch;
+                               scheme registry; Schemes(); errors. ~120 lines.
+internal/audio/decode.go       the shared decode pipeline: decoder dispatch by
+                               format, mono-dup + resample + 20 ms framing into
+                               a *framer producing canonical frames. ~160 lines.
+internal/audio/file.go         fileSource: os.Open under MEDIA_DIR (traversal
+                               guard) → framer; pull-paced; real io.EOF. ~80 lines.
+internal/audio/http.go         httpSource: http.Get → streaming body → framer;
+                               live-paced (never EOF); bounded read-ahead +
+                               release-paced silence on underflow. ~150 lines.
+internal/audio/input.go        inputSource: exec-capture (pw-record/arecord raw
+                               s16le) → framer; live-paced; mirrors E's exec
+                               sink backend probe. ~130 lines.
+internal/audio/wav.go          hand-rolled RIFF/WAVE reader (PCM u8/s16/s24 +
+                               IEEE float32), streaming sampleReader. ~110 lines.
+internal/audio/mp3.go          go-mp3 adapter: wraps *mp3.Decoder. ~40 lines.
+internal/audio/flac.go         mewkiz/flac adapter: wraps *flac.Stream. ~60 lines.
 internal/audio/resample.go     linear-interpolation resampler (any rate → 48000),
-                               stereo-interleaved float-free fixed-point/int math.
+                               stereo-interleaved fixed-point int math. ~80 lines.
 
-internal/audio/audio_test.go     Open dispatch, end-to-end framing, EOF, errors.
-internal/audio/wav_test.go       hand-rolled WAV parse: fixtures written by test code.
+internal/audio/source_test.go    scheme dispatch, Open errors, capability list,
+                                 EOF contract (D9) end-to-end, live no-stall.
+internal/audio/file_test.go      traversal guard, file pull-paced EOF.
+internal/audio/http_test.go      httptest server: content-type/extension
+                                 dispatch, live-paced never-EOF, underflow
+                                 silence, bounded read-ahead, Close cancels.
+internal/audio/input_test.go     fake capture command (exec a tiny helper that
+                                 emits raw s16le), live framing, Close kills it.
+internal/audio/wav_test.go       hand-rolled WAV parse: fixtures written in-test.
+internal/audio/decode_test.go    framing/mono-dup/EOF over synthesized samples.
 internal/audio/resample_test.go  ratio/length/passthrough/interpolation checks.
-internal/audio/fixtures_test.go  test helpers: writeWAV(...) generators (s16/u8/float),
-                                 mp3/flac fixtures gated on build-time presence.
+internal/audio/fixtures_test.go  helpers: writeWAV*, genTone, fake-capture exe,
+                                 maybeFixture (gate mp3/flac on testdata).
 ```
 
-Note: `stream.FrameBytes`/`FrameSamples`/`SampleRate`/`Channels` come from
-`internal/stream/wire.go` (S). D never redefines them.
+`stream.FrameBytes`/`FrameSamples`/`SampleRate`/`Channels`/`FrameDuration`
+come from `internal/stream/wire.go` (S). D never redefines them.
 
 ---
 
 ## 2. Concrete Go API
 
-This is the contract H codes against. Only `Open`, `FrameReader`,
-`ReadFrame`, `Close`, `Format`, `Format*` consts, and the error sentinels are
-exported. Everything else (`pcmSource`, `wavSource`, `mp3Source`, `flacSource`,
-`resampler`, framing) is unexported.
+This is the contract H codes against. Exported surface: the `Source`
+interface, `Open`, `Schemes`, the scheme name consts, and the error sentinels.
+Everything else (the three source impls, decoder adapters, `framer`,
+`resampler`) is unexported.
 
 ```go
 package audio
 
 import (
+	"context"
 	"errors"
-	"io"
 )
 
-// Format identifies the container/codec detected from the file extension.
-type Format string
-
+// Scheme names (§6.1). A node's available schemes are reported in its
+// capabilities (§1) via Schemes(); H/K assemble the capability list from it.
 const (
-	FormatWAV  Format = "wav"
-	FormatMP3  Format = "mp3"
-	FormatFLAC Format = "flac"
+	SchemeFile  = "file"  // file:<rel path> or a bare path under MEDIA_DIR
+	SchemeHTTP  = "http"  // http:// or https:// remote stream/file
+	SchemeInput = "input" // input: local capture (line-in/mic), exec-captured
 )
 
 // Errors.
 var (
-	// ErrUnsupportedFormat is returned by Open for an unknown extension.
-	ErrUnsupportedFormat = errors.New("audio: unsupported format")
-	// ErrBadFile wraps any decoder/parse failure on otherwise-known formats.
-	ErrBadFile = errors.New("audio: cannot decode file")
+	// ErrUnsupportedScheme — Open got a URI whose scheme has no registered
+	// source (caller maps to an API 4xx).
+	ErrUnsupportedScheme = errors.New("audio: unsupported source scheme")
+	// ErrUnsupportedFormat — a decodable source whose media format (extension /
+	// content-type) is not wav/mp3/flac.
+	ErrUnsupportedFormat = errors.New("audio: unsupported media format")
+	// ErrBadMedia wraps any decoder/parse/transport failure on otherwise-known
+	// media (truncated header, unsupported sub-format, HTTP non-2xx, etc.).
+	ErrBadMedia = errors.New("audio: cannot open media")
+	// ErrTraversal — a file URI resolving outside MEDIA_DIR (§6).
+	ErrTraversal = errors.New("audio: path escapes media dir")
 )
 
-// FrameReader yields canonical PCM frames (§8.1): 48 kHz, stereo, s16le,
-// 20 ms = stream.FrameSamples (960) per channel = stream.FrameBytes (3840 B).
-// Every frame except possibly the last is exactly FrameBytes; the final frame
-// is zero-padded to FrameBytes (silence) so all frames are full-length.
-//
-// Not safe for concurrent use; one goroutine owns a FrameReader.
-type FrameReader struct {
-	// unexported: src pcmSource, rs *resampler, format Format, buffered samples,
-	// frameIndex uint64, done bool, closer io.Closer.
+// Source is the one contract every media source satisfies (§6.1, D26). It
+// produces canonical PCM (§8.1) one frame at a time and is owned by exactly
+// one goroutine — H's release ticker. Not safe for concurrent use.
+type Source interface {
+	// ReadFrame fills dst[:stream.FrameBytes] with exactly one canonical 20 ms
+	// frame (48 kHz stereo s16le, 3840 B) and returns nil; or returns io.EOF
+	// (no bytes written) when the session has ended. D9 EOF semantics: the
+	// final partial frame of a pull-paced source is zero-padded and returned
+	// with err==nil; the *next* call returns io.EOF. dst must have
+	// len >= stream.FrameBytes; ReadFrame never allocates the frame.
+	//
+	// Pacing class (D26) determines underflow behaviour:
+	//   - Pull-paced (file): blocks only on local decode work (microseconds);
+	//     returns io.EOF at true end of stream.
+	//   - Live-paced (http, input): NEVER returns io.EOF. When no real audio is
+	//     available within the frame deadline it fills dst with SILENCE and
+	//     returns nil, so H's 20 ms ticker keeps a steady seq/pts cadence and
+	//     can emit silence without stalling. The session ends only via Close.
+	//
+	// A genuine, unrecoverable error (mid-stream decode corruption, transport
+	// teardown that is not a normal end) is returned wrapped in ErrBadMedia.
+	ReadFrame(dst []byte) error
+
+	// Live reports the pacing class: false = pull-paced (file, EOF-terminated),
+	// true = live-paced (http/input, never-EOF, underflow→silence). H uses it
+	// to decide whether natural EOF can end the session (§6.1, §8.6).
+	Live() bool
+
+	// Close releases the file/decoder/connection/subprocess. Idempotent;
+	// unblocks any in-flight ReadFrame promptly. Safe to call from another
+	// goroutine than the reader (it is how H stops a live source).
+	Close() error
 }
 
-// Open detects the format from path's extension (case-insensitive: .wav .mp3
-// .flac), opens and prepares a streaming decoder, and returns a FrameReader
-// positioned at sample 0. The file is held open until Close. Returns
-// ErrUnsupportedFormat for unknown extensions and ErrBadFile (wrapped) for
-// parse/decode setup failures (truncated header, unsupported sub-format, etc.).
-func Open(path string) (*FrameReader, error)
+// Open parses uri's scheme and constructs the matching Source (D26). For a
+// bare path with no scheme it assumes SchemeFile. mediaDir bounds file://
+// resolution (traversal guard, §6). ctx governs setup *and* the lifetime of
+// live sources (http dial / subprocess): cancelling ctx (or Close) tears the
+// source down. Returns ErrUnsupportedScheme / ErrUnsupportedFormat /
+// ErrBadMedia / ErrTraversal as documented above.
+func Open(ctx context.Context, uri, mediaDir string) (Source, error)
 
-// ReadFrame fills dst[:stream.FrameBytes] with the next canonical frame and
-// returns the number of *audio* (non-padding) bytes that were real samples
-// (always FrameBytes except possibly the final frame), the frame's 0-based
-// index, and an error. At true end of stream it returns io.EOF *after* the
-// last (possibly padded) frame has been delivered — i.e. the last frame is
-// returned with err == nil, then the next call returns (0, idx, io.EOF).
-//
-// dst must have len >= stream.FrameBytes; ReadFrame never allocates the frame.
-// On a mid-stream decode error it returns a wrapped ErrBadFile.
-func (fr *FrameReader) ReadFrame(dst []byte) (n int, index uint64, err error)
-
-// Format returns the detected source format.
-func (fr *FrameReader) Format() Format
-
-// Close releases the underlying file/decoder. Idempotent; always safe.
-func (fr *FrameReader) Close() error
+// Schemes returns the media-source schemes this build can serve, for the
+// capability record (§1, §6.1). It probes the host for input support (a
+// pw-record/arecord binary on $PATH) so a node with no capture tool does not
+// advertise "input". file and http are always present (pure Go). Order is
+// stable: ["file","http"] (+ "input" when a capture binary exists).
+func Schemes() []string
 ```
 
-### 2.1 Internal source adapter (unexported, the only interface here)
+### 2.1 Internal sample reader (the decode seam)
 
-Three formats produce samples differently (byte stream vs. frame-of-int32),
-so one tiny pull interface unifies them. It emits **interleaved int16 samples
-at the source's native rate and channel count** — never canonical yet. The
-pipeline above it does resample → mono-dup → framing.
+Three *file formats* produce samples differently (byte stream vs. frame-of-
+int32), so one tiny pull interface unifies them. It emits **interleaved int16
+samples at the source's native rate and channel count** — never canonical yet.
+The shared `framer` above it does mono-dup → resample → framing. This is the
+same seam as the previous round (then named `pcmSource`); renamed
+`sampleReader` only to free `Source` for the new public contract.
 
 ```go
-// pcmSource is a native-rate, native-channel PCM sample producer. It is the
+// sampleReader is a native-rate, native-channel PCM sample producer — the
 // single seam over the three decode libs. Implementations: wavSource (wav.go),
 // mp3Source (mp3.go), flacSource (flac.go).
-type pcmSource interface {
-	// info reports the source's native sample rate (Hz) and channel count
-	// (1 or 2; >2 is rejected at Open as ErrBadFile). Valid after construction.
+type sampleReader interface {
+	// info reports native sample rate (Hz) and channel count (1 or 2; >2 is
+	// rejected at construction as ErrBadMedia). Valid after construction.
 	info() (sampleRate, channels int)
 
 	// read appends up to a bounded number of interleaved int16 samples to dst
-	// and returns the grown slice. Interleaving is L,R,L,R for stereo, or one
-	// sample per frame for mono. Returns io.EOF together with any final samples
-	// (Go convention: data + io.EOF allowed) or on a subsequent empty call.
-	// Any other error is a decode failure (wrapped ErrBadFile by the caller).
+	// and returns the grown slice. Interleave is L,R,L,R for stereo, one
+	// sample per frame for mono. May return data together with io.EOF (Go
+	// convention), or io.EOF alone when drained. Any other error is a decode
+	// failure (the framer wraps it in ErrBadMedia).
 	read(dst []int16) ([]int16, error)
 
-	// Close releases the source.
-	io.Closer
+	io.Closer // releases the decoder (not the underlying byte source)
 }
+
+// newDecoder picks a sampleReader by media format and wraps r (a file handle
+// or an HTTP body). format is "wav"/"mp3"/"flac"; an empty/unknown format
+// triggers a 12-byte sniff (RIFF / "ID3"+sync / "fLaC") before giving up with
+// ErrUnsupportedFormat. The returned sampleReader owns r for decode but NOT
+// for Close — the caller (file/http source) owns the byte source's lifetime.
+func newDecoder(r io.Reader, format string) (sampleReader, error)
 ```
 
-`mp3Source` (go-mp3) and `wavSource` byte streams convert s16le bytes → int16
-in `read`; `flacSource` converts each frame's `Subframes[ch].Samples` (int32,
-correlation already undone by `ParseNext`) down to int16, scaling by
-`BitsPerSample` (`>>(bps-16)` when bps>16, `<<(16-bps)` when bps<16).
+`mp3Source` (go-mp3) and `wavSource` convert s16le bytes → int16 in `read`;
+`flacSource` converts each frame's `Subframes[ch].Samples` (int32, correlation
+already undone by `ParseNext`) to int16, scaling by `BitsPerSample`
+(`>>(bps-16)` when bps>16, `<<(16-bps)` when bps<16). go-mp3 always emits
+2-channel s16le, so `mp3Source.info()` reports `channels = 2` and no mono-dup
+runs.
 
-### 2.2 Resampler (unexported)
+### 2.2 The shared framer (unexported)
+
+The decode pipeline that turns a `sampleReader` into canonical 20 ms frames.
+All three media sources embed one; only file uses its EOF, http/input wrap it
+in a live pacer (§3).
+
+```go
+// framer pulls native int16 samples from src, mono-dups, resamples to 48 kHz,
+// and slices canonical 20 ms frames into caller-owned dst. It owns no I/O
+// lifetime; Close on the owning Source closes src.
+type framer struct {
+	src      sampleReader
+	rs       *resampler // nil when native rate == 48000 (pass-through)
+	channels int        // native channel count (for mono-dup)
+	canon    []int16    // accumulated canonical (48k, stereo) samples
+	scratch  []int16    // native-read scratch
+	idx      uint64     // 0-based frame index (for callers that want it)
+	eof      bool       // src drained
+}
+
+func newFramer(src sampleReader) *framer
+
+// frame fills dst[:stream.FrameBytes] with the next canonical frame:
+//   - returns nil after writing a full (or zero-padded final) frame;
+//   - returns io.EOF (no write) once the buffer is empty and src is at EOF.
+// This is exactly the pull-paced / D9 behaviour; the live sources call frame
+// and translate its io.EOF into "no data right now" (§3).
+func (f *framer) frame(dst []byte) error
+```
+
+### 2.3 Resampler (unexported — unchanged from the prior round)
 
 ```go
 // resampler does linear interpolation from inRate to 48000 on interleaved
-// stereo int16 (it runs *after* mono→stereo duplication, so it is always
-// 2-channel). Pass-through (no allocation copy logic) when inRate == 48000.
-// It keeps the last input sample-frame across calls so block boundaries
-// interpolate seamlessly (no clicks at 20 ms edges).
+// stereo int16 (it runs AFTER mono→stereo duplication, so it is always
+// 2-channel). Pass-through when inRate == 48000. It keeps the last input
+// sample-frame across calls so block boundaries interpolate seamlessly (no
+// clicks at 20 ms edges).
 type resampler struct {
-	inRate   int
-	pos      int64 // fixed-point input position, 32.32; advances by inRate/48000 per out frame
-	// last L,R input sample-frame carried across read() calls; primed bool.
+	inRate int
+	pos    int64 // 32.32 fixed-point input position; step = (inRate<<32)/48000
+	lastL  int16
+	lastR  int16
+	primed bool
 }
 
 func newResampler(inRate int) *resampler
 
-// process consumes interleaved-stereo int16 input and appends interleaved-stereo
-// int16 output (at 48000) to out, returning the grown slice. atEOF=true flushes
-// the tail (emits remaining interpolated output up to the last input frame).
+// process consumes interleaved-stereo int16 input and appends interleaved-
+// stereo int16 output (at 48000) to out, returning the grown slice. atEOF
+// flushes the tail (blends the final input frame against its own duplicate).
 func (r *resampler) process(in []int16, atEOF bool, out []int16) []int16
 ```
 
-Implementation: maintain `pos` as a 32.32 fixed-point cursor in *input
-sample-frame* units, step `= (inRate << 32) / 48000` per output frame. For each
-output frame, take `i = pos>>32`, `frac = pos & 0xffffffff`, linearly blend
-input frames `i` and `i+1`; emit while `i+1` is within the available input
-(carry the boundary frame to the next call). EOF flush blends against a
-duplicate of the last frame. All integer math; no float, no cgo.
+Implementation: `pos` is a 32.32 fixed-point cursor in input sample-frame
+units, step `= (inRate << 32) / 48000` per output frame. For each output frame,
+`i = pos>>32`, `frac = pos & 0xffffffff`, linearly blend input frames `i` and
+`i+1`; emit while `i+1` is in the available input (carry the boundary frame to
+the next call). All integer math; no float, no cgo.
 
 ---
 
 ## 3. Control flow, goroutines, locking
 
-**Single-goroutine, no locks, no channels.** A `FrameReader` is a pull-based
-pipeline owned by one caller (the group master's release ticker in H). The
-spec's real-time pacing (ticker, lead, pts) lives in H, not here — D only
-decodes and frames on demand.
+### 3.1 fileSource (pull-paced) — no goroutine, no lock
 
-### Startup (`Open`)
-1. Lowercase the extension; dispatch to `newWavSource` / `newMp3Source` /
-   `newFlacSource`. Unknown → `ErrUnsupportedFormat`.
-2. Open the file (`os.Open`); construct the format source; read native
-   `(rate, channels)` via `info()`. Reject `channels < 1 || channels > 2`
-   and `rate <= 0` as `ErrBadFile`. On any setup error close the file and
-   return wrapped `ErrBadFile`.
-3. Build the `resampler` if `rate != 48000` (else mark pass-through).
-4. Pre-allocate the internal sample scratch buffers; `frameIndex = 0`.
+`Open` with a `file:` URI (or bare path):
 
-### Steady state (`ReadFrame`)
-Loop until the internal canonical-sample buffer holds ≥ `FrameSamples*2`
-(960×2 = 1920 int16) **or** source EOF:
-1. `src.read(scratch)` → native interleaved int16 (+ maybe io.EOF).
-2. **Mono-dup**: if `channels == 1`, expand each sample `s` → `s, s`.
-3. **Resample**: if not pass-through, `rs.process(stereo, atEOF, canonBuf)`;
-   else append stereo directly.
-4. Accumulate into the canonical buffer.
+1. Strip the `file:` prefix; `filepath.Clean`; reject absolute paths and any
+   result escaping `mediaDir` after `filepath.Join(mediaDir, rel)` +
+   `filepath.Rel` check → `ErrTraversal`.
+2. `os.Open` the file (missing → `ErrBadMedia`).
+3. `newDecoder(f, ext)` by extension; build a `framer`.
+4. `ReadFrame` just calls `framer.frame(dst)` — it returns `nil` per frame and
+   real `io.EOF` at end (D9). `Live()` returns **false**. `Close` closes the
+   file once (guarded by a `closed` flag).
 
-Then slice one frame:
-- If buffer ≥ 1920 int16: encode 960×2 samples little-endian into `dst`,
-  drop them from the buffer, `n = FrameBytes`, return `(FrameBytes, idx, nil)`,
-  `idx++`.
-- If buffer < 1920 **and** source EOF and buffer non-empty: zero-pad to 1920,
-  emit the final (padded) frame, mark `done`, `n` = real bytes, return nil err.
-- If buffer empty and EOF: return `(0, idx, io.EOF)`.
+Single-goroutine, owned by H's release ticker. Decode runs ahead implicitly:
+H pulls at the 20 ms cadence; the framer does only the work for the next frame.
 
-No goroutine is spawned. Back-pressure is implicit: H calls `ReadFrame` at
-20 ms cadence; D does only the work needed for the next frame.
+### 3.2 httpSource (live-paced) — one fetch goroutine + a frame channel
 
-### Shutdown (`Close`)
-Closes the underlying `*os.File`/decoder once; sets a `closed` flag so repeat
-calls and post-close `ReadFrame` return `io.EOF`/`os.ErrClosed` cleanly.
+`Open` with `http://`/`https://`:
+
+1. `http.NewRequestWithContext(ctx, GET, uri)`; a client with **no overall
+   timeout** (streams are infinite) but a dial/response-header timeout (`10 s`).
+   Non-2xx → `ErrBadMedia`.
+2. Pick the format from `Content-Type` (`audio/mpeg`→mp3, `audio/flac` or
+   `audio/x-flac`→flac, `audio/wav`/`audio/x-wav`/`audio/vnd.wave`→wav),
+   falling back to the URL path extension, then to a body sniff in
+   `newDecoder`. Unknown → `ErrUnsupportedFormat`.
+3. Wrap the body in a **bounded read-ahead**: a `framer` over the body feeds a
+   buffered channel `frames chan [frameBytes]byte` of depth
+   `readaheadFrames = 50` (~1 s). One **producer goroutine** loops
+   `framer.frame` and pushes full frames into the channel; it blocks on the
+   channel when the consumer is slow (that *is* the bound — TCP backpressure
+   then stalls the body read, which is exactly right for a faster-than-realtime
+   server). On the framer returning `io.EOF` (server closed a finite body) or
+   any error, the producer records it and exits; the channel is closed.
+
+`ReadFrame(dst)` is the **live pacer** and never blocks beyond one frame
+period:
+
+```
+select {
+case f, ok := <-frames:
+    if !ok {                    // producer gone
+        if fatal := loadErr(); fatal != nil { return wrap(ErrBadMedia) }
+        copy(dst, silence); return nil   // server EOF on a live stream → silence, keep cadence
+    }
+    copy(dst, f[:]); return nil
+case <-time.After(frameDeadline):        // underflow: nothing ready in ~20 ms
+    copy(dst, silence); return nil       // emit silence, NEVER stall (§6.1)
+case <-s.closed:
+    return io.EOF                          // only Close yields EOF for a live source
+}
+```
+
+`frameDeadline` is **one frame period** (`stream.FrameDuration` = 20 ms): H
+calls `ReadFrame` once per tick, so if no frame is buffered within ~20 ms we
+hand back silence and let the next tick try again. `Live()` returns **true**.
+A finite HTTP body (a plain `.mp3` file served over HTTP) thus *plays through
+then goes silent* rather than ending the session — consistent with §6.1
+(live-paced sources end only on `stop`); H stops it explicitly.
+
+`Close` cancels the request context (unblocking the body read), closes
+`s.closed` (unblocking `ReadFrame`), and waits for the producer goroutine.
+Idempotent.
+
+**Locking:** the only shared state between the producer and `ReadFrame` is the
+buffered channel plus an error guarded by one `sync.Mutex` (`loadErr`/store).
+One mutex, never held across a channel op.
+
+### 3.3 inputSource (live-paced) — exec-capture, mirrors E's exec sink
+
+`Open` with `input:`:
+
+1. Probe `$PATH` for the first of `pw-record`, `arecord` (same discovery style
+   as E's exec playback backend, but for capture). None found → `ErrBadMedia`
+   ("no capture backend"). Capability gating (§2's `Schemes()`) means H won't
+   normally call this on a node without one.
+2. Build the argv to emit **raw s16le 48 kHz stereo** on stdout:
+   - `pw-record --rate 48000 --channels 2 --format s16 -` (stdout), or
+   - `arecord -f S16_LE -r 48000 -c 2 -t raw -` .
+   Because the capture tool already produces canonical-rate stereo s16le, the
+   decode path is the trivial one: a `sampleReader` that just reads s16le bytes
+   off the pipe at native 48 k/2ch, so the `framer`'s resampler is pass-through
+   and there is no mono-dup. (If a tool can't be told the rate, the framer's
+   resampler still normalizes it — but the default argv asks for 48 k.)
+3. `exec.CommandContext(ctx, …)`; `cmd.StdoutPipe()`; `cmd.Start()`. Stderr is
+   logged at debug. The pipe feeds the same producer-goroutine + bounded
+   read-ahead + live-pacer machinery as http (§3.2) — **shared code**: http and
+   input differ only in how the byte stream is obtained; both wrap a `framer`
+   in `liveReader{frames, closed, err}`.
+
+`ReadFrame` is identical to http's live pacer: a stalled capture (xrun, device
+busy) yields silence, never a stall. `Live()` returns **true**. `Close` cancels
+the context (which sends SIGKILL to the process group after a short grace, like
+E's exec sink), closes `s.closed`, drains, and `cmd.Wait()`s. The process exit
+or a closed pipe is treated as a transient underflow (silence), not a fatal
+error, unless setup itself failed.
+
+### 3.4 Shared live machinery
+
+`http.go` and `input.go` both construct a `*liveReader`:
+
+```go
+// liveReader adapts a pull framer over an arbitrary byte stream into the
+// live-paced Source semantics (never EOF; underflow→silence). Used by both
+// httpSource and inputSource.
+type liveReader struct {
+	frames chan [stream.FrameBytes]byte
+	closed chan struct{}
+	mu     sync.Mutex
+	err    error
+	once   sync.Once // Close guard
+	stop   context.CancelFunc
+	done   chan struct{} // producer exited
+}
+```
+
+so the never-block / silence-on-underflow / Close semantics live in **one
+place** and are tested once. The file source does not use it (it wants real
+EOF). This keeps each concrete source file tiny (just "obtain bytes + format"),
+which is the whole point of the §6.1 abstraction.
+
+### 3.5 Scheme registry / Open dispatch
+
+`source.go` holds a tiny map literal `scheme → constructor`:
+
+```go
+var registry = map[string]func(ctx, uri, mediaDir) (Source, error){
+	SchemeFile:  openFile,
+	SchemeHTTP:  openHTTP,   // serves both http: and https:
+	SchemeInput: openInput,
+}
+```
+
+`Open` splits the scheme at `:` (no scheme ⇒ `file`), maps `https`→`http`
+bucket, looks up the constructor, and calls it; unknown ⇒
+`ErrUnsupportedScheme`. Adding a new source kind (Spotify, snapcast pipe, §6.1)
+is one constructor + one map entry — the explicit "register a scheme"
+extension point the spec calls for.
+
+No global mutable state, no init-order coupling: the map is a package-level
+literal, read-only after init, so `Open` needs no lock.
 
 ---
 
 ## 4. Edge cases & failure handling
 
-- **Unknown / missing extension (§6)**: `Open` → `ErrUnsupportedFormat`
-  (caller maps to an API 4xx). Extension match is case-insensitive
-  (`.WAV` == `.wav`); detection is by extension only, per piece scope — no
-  content sniffing.
+- **Unknown scheme (§6/§6.1)** → `ErrUnsupportedScheme`. Bare path (no `:` or a
+  Windows-free relative path) ⇒ treated as `file`. `https://` routes to the
+  http source.
+- **Path traversal (§6)**: `file:../../etc/passwd` and absolute paths are
+  rejected with `ErrTraversal` *before* any `os.Open`; resolution is
+  `filepath.Rel(mediaDir, filepath.Join(mediaDir, clean))` must not start with
+  `..`.
+- **Unknown media format**: extension/content-type not wav/mp3/flac and the
+  12-byte sniff fails ⇒ `ErrUnsupportedFormat`.
 - **Mono source (§8.1)**: duplicated to stereo *before* resampling, so the
   resampler is always 2-channel and the dup is cheap.
-- **>2 channels**: rejected at `Open` as `ErrBadFile`. v1 has no downmix
-  matrix (out of scope; spec only requires mono-dup + rate convert).
-- **Native rate == 48000 (§8.1)**: resampler is pass-through (identity), no
-  interpolation, bit-exact frames — the common case for 48 k WAV stays cheap.
-- **Arbitrary rate (44100, 22050, 96000…) (§8.1)**: linear interpolation to
-  48000. Carrying the last input frame across `read()` calls prevents clicks at
-  20 ms boundaries. Length: output frames ≈ `inSamples*48000/inRate`; the final
-  flush emits the tail.
-- **Final partial frame (§8.2)**: the file rarely ends on a 20 ms boundary; the
-  last frame is **zero-padded to FrameBytes** (trailing silence) so every wire
-  frame is full-length and the pts math in H (`sessionStart+index·20ms`) stays
-  integral. `ReadFrame` reports the real byte count via `n` for callers that
-  care, but H sends full 3840 B frames.
-- **EOF semantics (§8.6)**: last real/padded frame returns `err == nil`; the
-  *next* call returns `(0, idx, io.EOF)`. This lets H detect natural end and
-  bump the generation/clear playback status. go-mp3's `UnexpectedEOF` and
-  flac's truncation-at-stream-end are normalized to `io.EOF` (graceful end),
-  not `ErrBadFile`.
-- **Mid-stream decode corruption**: a non-EOF decoder error becomes wrapped
-  `ErrBadFile`; H stops the session and reports it. We do **not** try to skip
-  bad frames (keep it simple); a corrupt file just ends early with an error.
+- **>2 channels**: rejected at construction as `ErrBadMedia` (no downmix matrix
+  in v1; spec only requires mono-dup + rate convert).
+- **Native rate == 48000 (§8.1)**: resampler is pass-through (identity),
+  bit-exact frames — the common case (48 k WAV, captured input) stays cheap.
+- **Arbitrary rate (44100/22050/96000…)**: linear interpolation to 48000;
+  carrying the last input frame across `read()` calls prevents 20 ms-boundary
+  clicks; final flush emits the tail.
+- **Final partial frame, pull-paced (D9, §8.2)**: a file rarely ends on a 20 ms
+  boundary; the last frame is **zero-padded to FrameBytes** and returned with
+  `err==nil`; the *next* `ReadFrame` returns `io.EOF`. This lets H detect
+  natural end, bump the generation, and clear playback status (§8.6).
+- **EOF only for pull-paced (§6.1, D26)**: file's `ReadFrame` returns `io.EOF`;
+  http/input `ReadFrame` **never** returns `io.EOF` except after `Close`
+  (where it signals the reader to stop). H keys off `Source.Live()`: a
+  pull-paced EOF ends the session; a live source ends only on explicit `stop`.
+- **Live underflow (§6.1 — the load-bearing case)**: when no frame is buffered
+  within one frame period (network stall, capture xrun), the live source fills
+  `dst` with silence and returns `nil`. H's 20 ms release ticker therefore
+  keeps emitting frames with monotonically advancing `seq`/`pts` — the cadence
+  **never stalls**, exactly as the spec requires; the listener hears a brief
+  silence, the stream recovers when bytes resume.
+- **Finite HTTP body on a "live" URL**: a plain file served over HTTP plays to
+  its end, then the live source emits silence (does not EOF) until H stops it —
+  uniform with internet-radio behaviour; no special-casing.
+- **HTTP non-2xx / dial failure**: `ErrBadMedia` at `Open` (setup), surfaced to
+  H/API as a clear error. A mid-stream connection drop is *not* fatal to a live
+  source: it becomes underflow→silence (radio reconnect is out of scope for v1;
+  the watchdog/RESTART path lives in the sink/group, not here).
+- **Bounded read-ahead**: the producer channel (depth ~50 frames ≈ 1 s) caps
+  memory; a faster-than-realtime server is throttled by channel backpressure →
+  TCP flow control, not by a sleep. A slow server simply underflows to silence.
+- **Capture tool missing (§6.1)**: `Schemes()` omits `input`, so capabilities
+  don't advertise it; if `input:` is requested anyway, `openInput` returns
+  `ErrBadMedia` ("no capture backend").
+- **Subprocess death / pipe EOF (input)**: treated as transient underflow
+  (silence), matching live semantics; `Close` SIGKILLs and `Wait`s so no zombie
+  is left (mirrors E's exec sink kill-on-Close, DECISIONS.md D21).
 - **WAV sub-formats**: hand-rolled reader supports PCM `u8`, `s16`, `s24`
-  (down-shifted to s16), and IEEE float32 (`fmt` tag 3, clamped to s16);
-  anything else (a-law, μ-law, >32-bit, exotic tags) → `ErrBadFile`. It scans
-  chunks for `fmt ` then `data`, tolerating intervening chunks (`LIST`, `fact`).
-  Truncated `data` is treated as EOF at the last whole sample-frame.
-- **FLAC bit depth**: 16-bit passes through; 24/20/8-bit scaled to s16 by the
-  per-sample shift; correlation (mid/side/left-side/side-right) is already
-  resolved by `flac.Stream.ParseNext`, so D reads plain L/R int32.
-- **mp3 always-stereo**: go-mp3 emits 2-channel s16le regardless of source
-  channel count; `mp3Source.info()` reports `channels = 2` so no mono-dup runs
-  (correct — the lib already duplicated).
-- **Empty / zero-sample file**: first `ReadFrame` returns `(0, 0, io.EOF)`;
-  no panic, no padded silent frame.
-- **Close-during-read / double Close**: guarded by a `closed` flag; idempotent.
-- **No allocation on the hot path**: `ReadFrame` writes into the caller's `dst`
-  and reuses internal scratch slices across calls; only initial buffers are
-  allocated at `Open`.
+  (down-shifted), IEEE float32 (`fmt` tag 3, clamped to s16); a-law/μ-law/
+  exotic tags → `ErrBadMedia`. It scans chunks for `fmt ` then `data`,
+  tolerating intervening `LIST`/`fact`. Truncated `data` ⇒ EOF at the last
+  whole sample-frame.
+- **FLAC bit depth / correlation**: 16-bit passes through; 24/20/8-bit scaled
+  by per-sample shift; mid/side/left-side/side-right correlation is already
+  resolved by `flac.Stream.ParseNext`, so D reads plain L/R int32. go-mp3's
+  `UnexpectedEOF` and flac truncation-at-end normalize to `io.EOF` (graceful
+  end), not `ErrBadMedia`.
+- **Empty / zero-sample file**: first `ReadFrame` on a file source returns
+  `io.EOF` immediately; no panic, no padded silent frame.
+- **`dst` shorter than FrameBytes**: documented contract violation; ReadFrame
+  may panic (slice bounds) — H always passes a FrameBytes buffer. Tested as a
+  documented precondition, never silent corruption.
+- **Close during ReadFrame**: live sources' `Close` cancels ctx + closes
+  `s.closed`, so a blocked `ReadFrame` returns promptly (`io.EOF`); file
+  source's reads are local and short. Double Close is idempotent (`sync.Once`).
+- **No allocation on the hot path**: `ReadFrame` writes into the caller's `dst`;
+  the framer reuses `canon`/`scratch` slices; only setup allocates.
 
 ---
 
 ## 5. Test plan
 
-All tests are hardware-free: WAV fixtures are synthesized in-test;
-`internal/stream` constants are imported, never duplicated. mp3/flac decode
-tests are skipped (`t.Skip`) when no committed fixture is present, per
-IMPLEMENTATION.md D ("generate a wav fixture programmatically, skip
-codec-specific tests if no fixture").
+All hardware-free: WAV fixtures synthesized in-test; an `httptest.Server`
+serves bytes; a tiny **fake capture command** (a `go run`-built helper, or the
+test binary re-exec'd with an env flag) emits raw s16le so the input source is
+exercised with no real device. `internal/stream` constants are imported, never
+duplicated. mp3/flac decode tests `t.Skip` when no committed testdata fixture
+is present (IMPLEMENTATION.md D).
 
-`internal/audio/audio_test.go`
-- `TestOpenDispatchByExtension` — `.wav/.mp3/.flac` pick the right Format;
-  `.WAV` (uppercase) works; `.ogg`/none → `ErrUnsupportedFormat`.
-- `TestOpenMissingFile` — non-existent path → error (not panic).
-- `TestReadFrame48kStereoPassthrough` — 48 k stereo WAV: every frame is
-  FrameBytes, bytes match source exactly (no resample drift).
-- `TestReadFrameMonoDuplicated` — mono WAV: each output frame has L==R for
-  every sample-frame.
-- `TestReadFrameResamples44kTo48k` — 44.1 k WAV of known length: output frame
-  count ≈ `inFrames*48000/44100` (±1), no panic, monotonic.
-- `TestFinalFramePadded` — file length not a 20 ms multiple: last frame is
-  FrameBytes, `n < FrameBytes`, tail bytes are zero; next call → io.EOF.
-- `TestEOFAfterLastFrame` — last real frame returns nil err; subsequent call
-  returns `(0, idx, io.EOF)`; index increments by exactly 1 per frame.
-- `TestEmptyWAVImmediateEOF` — zero-sample data chunk → first ReadFrame io.EOF.
-- `TestReadFrameShortDstRejected` — `dst` shorter than FrameBytes → error/panic
-  per contract (documented), never silent corruption.
-- `TestCloseIdempotent` — double Close ok; ReadFrame after Close → io.EOF.
-- `TestMidStreamCorruptionIsBadFile` — truncated/garbled fixture → ErrBadFile
-  (not io.EOF) when corruption is mid-stream.
+`internal/audio/source_test.go`
+- `TestOpenSchemeDispatch` — `file:`, bare path, `http://`, `https://`,
+  `input:` route to the right impl; `ftp://`/`spotify:` → `ErrUnsupportedScheme`.
+- `TestSchemesReportsFileHTTPAlways` — `Schemes()` always contains file+http;
+  contains `input` iff a capture binary is on a faked `$PATH`.
+- `TestFileEOFContract` — D9 end-to-end: last frame nil err (zero-padded tail),
+  next call `io.EOF`; `Live()==false`.
+- `TestLiveNeverEOFThenSilence` — a live source whose producer is starved
+  returns nil + an all-zero frame within ~one frame period; never `io.EOF`
+  until `Close`; `Live()==true`.
+
+`internal/audio/file_test.go`
+- `TestFileTraversalRejected` — `file:../x`, absolute paths → `ErrTraversal`.
+- `TestFileMissing` → `ErrBadMedia` (not panic).
+- `TestFilePullPacedFrames` — 48 k stereo WAV: every frame FrameBytes, bytes
+  match source exactly (no resample drift), real EOF at end.
+
+`internal/audio/http_test.go`
+- `TestHTTPContentTypeDispatch` — server sets `audio/wav` / `audio/mpeg` /
+  `audio/flac`; correct decoder chosen.
+- `TestHTTPExtensionFallback` — no/again-wrong content-type, URL `.wav` ext →
+  wav; body sniff path covered.
+- `TestHTTPLivePacedSilenceOnStall` — server trickles bytes slower than
+  realtime; `ReadFrame` returns silence frames in the gaps, never blocks beyond
+  ~a frame period, never `io.EOF`.
+- `TestHTTPFiniteBodyGoesSilent` — finite body served fully → frames then
+  silence (not EOF) until Close.
+- `TestHTTPNon2xxIsBadMedia` — 404 → `ErrBadMedia` at Open.
+- `TestHTTPBoundedReadahead` — fast server; channel depth caps in-flight frames
+  (assert producer blocks, memory bounded) — observe via a counting reader.
+- `TestHTTPCloseCancels` — Close mid-stream returns promptly, producer goroutine
+  exits (no leak; `-race`).
+
+`internal/audio/input_test.go`
+- `TestInputFakeCaptureFrames` — fake command emits a known raw s16le tone;
+  frames decode to that tone; `Live()==true`.
+- `TestInputNoBackendIsBadMedia` — empty faked `$PATH` → `ErrBadMedia`.
+- `TestInputCloseKillsProcess` — Close terminates the (long-running) fake
+  command; `Wait` returns; no zombie, no goroutine leak (`-race`).
+- `TestInputStallSilence` — fake command pauses output; `ReadFrame` yields
+  silence, never stalls.
 
 `internal/audio/wav_test.go`
-- `TestWAVParseS16` — synthesized s16 PCM WAV: rate/channels/samples correct.
-- `TestWAVParseU8` — 8-bit unsigned scaled to s16 (0x80 → 0).
-- `TestWAVParseS24` — 24-bit down-shifted to s16, sign preserved.
-- `TestWAVParseFloat32` — IEEE float (fmt=3) clamped to s16 range.
-- `TestWAVSkipsAuxChunks` — `LIST`/`fact` chunks before `data` are skipped.
-- `TestWAVTruncatedDataIsEOF` — data shorter than declared → EOF at last whole
-  sample-frame, no error.
-- `TestWAVRejectsALaw` — fmt tag 6/7 (a-law/μ-law) → ErrBadFile.
-- `TestWAVRejectsMissingDataChunk` — no `data` chunk → ErrBadFile.
+- `TestWAVParseS16/U8/S24/Float32` — synthesized fixtures: rate/channels/
+  samples correct; u8 `0x80→0`; s24 sign preserved; float clamped.
+- `TestWAVSkipsAuxChunks` — `LIST`/`fact` before `data` skipped.
+- `TestWAVTruncatedDataIsEOF` — short `data` → EOF at last whole frame.
+- `TestWAVRejectsALaw` / `TestWAVRejectsMissingDataChunk` → `ErrBadMedia`.
+
+`internal/audio/decode_test.go`
+- `TestMonoDuplicated` — mono samples → L==R per frame.
+- `TestFinalFramePadded` — non-20 ms-multiple length → last frame padded with
+  zeros, nil err, then EOF.
+- `TestEmptyImmediateEOF` — zero-sample source → first frame `io.EOF`.
+- `TestSniffDispatch` — `newDecoder` with empty format sniffs RIFF/ID3/fLaC.
 
 `internal/audio/resample_test.go`
-- `TestResamplePassthrough48k` — inRate 48000 → output == input bit-exact.
-- `TestResampleHalfRate` — 24000→48000 doubles length (±1), interpolated
-  midpoints equal the average of neighbors.
-- `TestResampleUpDownRatios` — 44100/96000/22050 produce expected lengths
-  within ±1 of `n*48000/inRate`.
-- `TestResampleBlockBoundaryContinuity` — feeding input in two chunks yields
-  the same output as one chunk (no boundary click; carry-frame works).
-- `TestResampleEOFFlush` — `atEOF` flush emits the trailing tail and stops.
-- `TestResampleConstantSignal` — a DC/constant input stays constant through
-  interpolation (no overshoot).
+- `TestResamplePassthrough48k` — identity bit-exact.
+- `TestResampleHalfRate` — 24000→48000 doubles length (±1); midpoints = mean of
+  neighbours.
+- `TestResampleUpDownRatios` — 44100/96000/22050 lengths within ±1 of
+  `n*48000/inRate`.
+- `TestResampleBlockBoundaryContinuity` — two-chunk == one-chunk (carry frame).
+- `TestResampleEOFFlush` / `TestResampleConstantSignal` — tail flush; DC stays
+  DC (no overshoot).
 
-`internal/audio/fixtures_test.go` (helpers, not tests)
-- `writeWAVs16(t, rate, ch, samples)` / `writeWAVu8` / `writeWAVfloat32` —
-  build minimal RIFF/WAVE byte fixtures in a `t.TempDir()` file.
-- `genTone(rate, ch, freq, dur)` — deterministic int16 tone for assertions.
-- `maybeFixture(t, name)` — returns path + `skip=true` if an optional mp3/flac
-  testdata file is absent (keeps the suite green without binary fixtures).
+`internal/audio/fixtures_test.go` (helpers)
+- `writeWAVs16/u8/float32(t, rate, ch, samples)` — minimal RIFF/WAVE fixtures.
+- `genTone(rate, ch, freq, dur)` — deterministic int16 tone.
+- `fakeCaptureExe(t)` — builds/locates a helper emitting raw s16le on stdout
+  (for input tests); honours a "stall" / "duration" arg.
+- `maybeFixture(t, name)` — path + `skip=true` when an optional mp3/flac
+  testdata file is absent.
 
-`internal/audio/audio_test.go` (optional, fixture-gated)
-- `TestDecodeMP3Fixture` — if `testdata/tone.mp3` present: decodes to ~expected
-  duration of 48 k stereo frames; else `t.Skip`.
-- `TestDecodeFLACFixture` — if `testdata/tone.flac` present: 16-bit FLAC decodes
-  to canonical frames matching the source tone within tolerance; else `t.Skip`.
+`internal/audio/source_test.go` (fixture-gated)
+- `TestDecodeMP3Fixture` / `TestDecodeFLACFixture` — when `testdata/tone.mp3` /
+  `tone.flac` present, decode to ~expected duration of 48 k stereo frames;
+  else `t.Skip`.
+
+All tests use loopback `httptest`, in-process fakes, generated bytes, and a
+faked capture command — no root, no audio hardware, no network egress.
 
 ---
 
 ## 6. Notes for the integrator / downstream
 
-- D imports `internal/stream` only for the PCM constants; it does **not** import
-  the wire `Header`/`Mux` (framing for the wire is G's job — D emits raw PCM
-  payloads, G prepends the header).
-- Capabilities `formats: ["wav","mp3","flac"]` (§1) is reported by the config/
-  node layer, not D; D just needs to actually decode all three. If a build ever
-  drops a decoder, that's a separate concern — v1 always has all three.
-- `Open`/`ReadFrame` are blocking-free of I/O surprises: they read from a local
-  file only. Network media is out of scope (§6: local `MEDIA_DIR`).
-- go.mod adds `github.com/hajimehoshi/go-mp3` and `github.com/mewkiz/flac`
-  (both already in the allowed-deps closure). WAV is hand-rolled (~110 lines),
-  so `go-audio/wav` is **not** taken as a dependency — fewer deps, matches the
-  IMPLEMENTATION.md preference ("prefer hand-rolled if under ~120 lines").
-```
+- **H consumes only `Open`/`Source`** (`ReadFrame`, `Live`, `Close`). The
+  release ticker, lead, pts stamping, ring buffer, and burst priming all live
+  in H/G — D only decodes and frames on demand and tells H its pacing class via
+  `Live()`. `Live()` is the seam that lets H apply the §6.1 rule "pull-paced EOF
+  ends the session; live-paced ends only on stop" without knowing the scheme.
+- **Capabilities (§1, §6.1)**: `audio.Schemes()` is the source of the
+  `capabilities.sources` list; K assembles capabilities at startup (DECISIONS.md
+  D3) and calls `Schemes()` for the source schemes. `file`/`http` are always
+  present; `input` is host-probed. `capabilities.formats` (`wav/mp3/flac`)
+  stays a static list owned by the config/node layer — D just decodes all three.
+- **D imports `internal/stream` only for the PCM constants** (DECISIONS.md
+  "Confirmed as designed") — never the wire `Header`/`Mux`. D emits raw 3840 B
+  PCM payloads; G prepends the header.
+- **go.mod** adds `github.com/hajimehoshi/go-mp3` and `github.com/mewkiz/flac`
+  (both in the allowed-deps closure). WAV is hand-rolled (~110 lines), so
+  `go-audio/wav` is **not** a dependency (IMPLEMENTATION.md "prefer hand-rolled
+  if under ~120 lines"). The http source uses only `net/http`; the input source
+  only `os/exec` — no new deps, no cgo.
+- **`input` exec discovery mirrors E** (DECISIONS.md D27): same probe style as
+  the exec *playback* backend, kill-on-Close like the exec sink's write-deadline
+  limitation (D21). The two pieces deliberately do not share a package (E owns
+  output, D owns capture), but the exec idiom is identical so behaviour matches.
+- **No `Resolver`/`SetEndpoints`/push-model anything** here — D is decode-only
+  and entirely below the subscribe/stream layer (D18/D22); media URIs come from
+  the play request, addresses never enter this package.

@@ -5,8 +5,8 @@ Source of truth: [docs/README.md](../README.md) §3 / §3.1; piece contract:
 [S-skeleton.md](./S-skeleton.md).
 
 This piece is **only** the mDNS half of discovery (README §3.1): register the
-node's `_ensemble._tcp` service with TXT `id/gossip/http/stream`, browse the LAN
-continuously, and emit deduplicated `Peer` events on a channel. It has **no
+node's `_ensemble._tcp` service with TXT `id/gossip/http/stream/source`, browse
+the LAN continuously, and emit deduplicated `Peer` events on a channel. It has **no
 memberlist dependency** — the cluster piece (C) consumes the channel and does the
 actual joining. Keep it small: one file of real code, one of tests.
 
@@ -87,6 +87,7 @@ type Peer struct {
         GossipPort int            // from TXT "gossip="
         HTTPPort   int            // from TXT "http="
         StreamPort int            // from TXT "stream="
+        SourcePort int            // from TXT "source=" (§8.7 SOURCE_PORT)
 }
 
 // GossipAddrPort is the address C dials to join the peer's gossip cluster (§3).
@@ -101,6 +102,7 @@ type Config struct {
         GossipPort int    // actually-bound ports (§2 bind-or-increment result)
         HTTPPort   int
         StreamPort int
+        SourcePort int    // actually-bound SOURCE_PORT (§2/§8.7)
         Log        *slog.Logger // optional; defaults to slog.Default() with comp=discovery
 }
 
@@ -163,8 +165,8 @@ the channel only when, under the one mutex:
 
 1. the peer ID is **new** (not in `seen`), **or**
 2. a **material field changed** vs. the last emitted value — any of `Addr`,
-   `GossipPort`, `HTTPPort`, `StreamPort` (re-advertise after a port change, a
-   new IP from multi-homing, §3.1), **or**
+   `GossipPort`, `HTTPPort`, `StreamPort`, `SourcePort` (re-advertise after a
+   port change, a new IP from multi-homing, §3.1), **or**
 3. it has been ≥ `reEmitInterval` (30 s) since we last emitted for this ID
    (liveness refresh so C can re-confirm a long-lived peer).
 
@@ -185,7 +187,7 @@ One mutex (`d.mu`) guards `seen`, `server`, `closed`. Two long-lived goroutines.
   `peers` channel (cap 64, see edge cases), and the `context.WithCancel`. No I/O.
 - `Run()`:
   1. Builds the TXT slice via `txtRecords(cfg)` →
-     `["id=<hex>", "gossip=<p>", "http=<p>", "stream=<p>"]`.
+     `["id=<hex>", "gossip=<p>", "http=<p>", "stream=<p>", "source=<p>"]`.
   2. Starts goroutine **R (register-keeper)**: calls `register()` which does
      `zeroconf.Register(instance, ServiceName, Domain, cfg.HTTPPort, txt, nil)`
      (advertised port is HTTP — informational only; real ports are in TXT).
@@ -243,9 +245,10 @@ hand-off and is non-blocking. No lock is held across a blocking call.
   (returns `ok=false`). This is the primary filter, not address comparison
   (loopback/own IPs are unreliable). Tested.
 - **Malformed / partial TXT (§3).** A peer mid-(re)announce may expose a TXT set
-  missing a key or with a non-numeric port. `parseEntry` requires all four keys
-  (`id`,`gossip`,`http`,`stream`) to parse (`id.Parse`, `strconv.Atoi` with port
-  in 1..65535); any failure → `ok=false`, logged at debug, dropped. Better to
+  missing a key or with a non-numeric port. `parseEntry` requires all five keys
+  (`id`,`gossip`,`http`,`stream`,`source`) to parse (`id.Parse`, `strconv.Atoi`
+  with port in 1..65535); any failure → `ok=false`, logged at debug, dropped.
+  Better to
   miss one announce (zeroconf re-queries) than emit a half-formed Peer.
 - **No usable address (§3.1).** Choose `Addr` from `AddrIPv4` first, else
   `AddrIPv6`, skipping loopback/unspecified, taking the first valid via
@@ -294,20 +297,23 @@ CI containers; if the CI environment blocks multicast the socket tests
 sockets.
 
 `internal/discovery/parse_test.go` (no network):
-- `TestParseEntryValid` — full TXT + IPv4 → correct `Peer` (id, ports, addr).
+- `TestParseEntryValid` — full TXT + IPv4 → correct `Peer` (id, all ports incl.
+  `SourcePort`, addr).
 - `TestParseEntryDropsSelf` — TXT `id` == self → `ok==false`.
-- `TestParseEntryMissingKey` — drop `gossip=`/`http=`/`stream=`/`id=` each → `ok==false`.
+- `TestParseEntryMissingKey` — drop `gossip=`/`http=`/`stream=`/`source=`/`id=`
+  each → `ok==false`.
 - `TestParseEntryBadPort` — non-numeric / out-of-range port → `ok==false`.
 - `TestParseEntryBadID` — TXT id not 32-hex → `ok==false`.
 - `TestParseEntryPrefersIPv4` — both v4+v6 present → v4 chosen.
 - `TestParseEntryIPv6Fallback` — only global v6 → v6 chosen.
 - `TestParseEntrySkipsLoopbackLinkLocal` — only 127.0.0.1 / fe80:: → `ok==false`.
 - `TestGossipAddrPort` — `Peer.GossipAddrPort()` composes addr+gossip port.
-- `TestTXTRecords` — `txtRecords(cfg)` emits the four `key=value` strings.
+- `TestTXTRecords` — `txtRecords(cfg)` emits the five `key=value` strings
+  (`id`,`gossip`,`http`,`stream`,`source`).
 
 `internal/discovery/discovery_test.go` (loopback mDNS; skip on register error):
 - `TestRegisterBrowseRoundTrip` — node A registers, node B browses, B emits a
-  `Peer` for A with A's id/ports within a timeout.
+  `Peer` for A with A's id/ports (incl. `SourcePort`) within a timeout.
 - `TestDedupNoRepeatWithinInterval` — A static; B emits A exactly once over a
   window shorter than `reEmitInterval` (drain channel, assert count == 1).
 - `TestReEmitAfterInterval` — with `reEmitInterval` shrunk via a test hook, B

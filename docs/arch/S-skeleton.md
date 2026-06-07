@@ -144,13 +144,25 @@ const (
 	FrameNanos    = int64(FrameDuration) * 1_000_000 // pts step, ns
 )
 
-// Packet types multiplexed on the STREAM_PORT UDP socket (§8.4).
+// Packet types. 0x0x/0x1x are multiplexed on the member's STREAM_PORT UDP
+// socket (§8.4); 0x2x are the stream-control types on the master's
+// SOURCE_PORT (§8.7) — over UDP as datagrams, over TCP as frames on the
+// subscription connection.
 const (
 	TypeAudio    byte = 0x01 // audio frame:  header + PCM/Opus payload
 	TypeFEC      byte = 0x02 // XOR parity:   header + parity payload
 	TypeClockReq byte = 0x10 // clock request (F)
 	TypeClockRsp byte = 0x11 // clock reply   (F)
+
+	TypeHello    byte = 0x20 // sub→src subscribe / keepalive; payload flag: prime-me (G)
+	TypeBye      byte = 0x21 // sub→src "leaving, stop sending" (G)
+	TypeRestart  byte = 0x22 // sub→src "got lost, re-prime and resume" (G)
+	TypeReconfig byte = 0x23 // src→sub "gen/settings changed: re-fetch settings, resubscribe"; payload flag: stop (G)
 )
+
+// Control payloads (0x2x) are 1 byte: bit0 = prime-me (Hello) / stop
+// (Reconfig); other bits reserved zero. Header.Gen carries the session
+// generation; Header.Seq/PTS are zero for control packets.
 
 // Magic byte starting every framed packet (audio/fec). Clock packets carry it too.
 const Magic byte = 0xE5
@@ -336,6 +348,14 @@ type Backend interface {
 	Close() error
 }
 
+// DelayReporter is an OPTIONAL Backend extension (type-asserted by the rate
+// servo in E, §8.5): the exact amount of queued audio between a Write and the
+// speaker, in nanoseconds. An alsa backend implements it (snd_pcm_delay);
+// exec/null/file do not — the servo then falls back to backpressure inference.
+type DelayReporter interface {
+	DeviceDelay() (nanos int64, ok bool)
+}
+
 // ---- Frame sink (playout; sink piece E owns it, group H feeds it) -----------
 
 // Sink is what the receiver/group hands decoded frames to for scheduled
@@ -358,11 +378,21 @@ type Sink interface {
 
 // SinkStats is surfaced via /api/status and used by the e2e smoke test (K).
 type SinkStats struct {
-	Played   uint64 // frames written to the backend
-	Silence  uint64 // silent frames inserted for gaps
-	LateDrop uint64 // frames dropped for arriving past their deadline
-	StaleGen uint64 // frames dropped for an old generation
-	Synced   bool   // clock follower has a usable offset (gates playout)
+	Played   uint64  // frames written to the backend
+	Silence  uint64  // silent frames inserted for gaps
+	LateDrop uint64  // frames dropped for arriving past their deadline
+	StaleGen uint64  // frames dropped for an old generation
+	Synced   bool    // clock follower has a usable offset (gates playout)
+	RatePPM  float64 // current rate-servo correction (§8.5; 0 until settled)
+	Buffered int     // jitter-buffer depth, frames
+}
+
+// SourceStats is surfaced by a node running an audio source (§8.2/§9.1).
+type SourceStats struct {
+	Clients  int    `json:"clients"`  // current live subscribers
+	Connects uint64 `json:"connects"` // total HELLO-subscribes accepted
+	Restarts uint64 `json:"restarts"` // RESTART re-prime requests served
+	Primes   uint64 `json:"primes"`   // burst primes sent (connect + restart)
 }
 
 // ---- Clock (clock piece F owns it; playout E + source H consume it) ---------
@@ -414,6 +444,7 @@ type NodeView struct {
 	Addrs        []string          `json:"addrs"`        // self-reported CIDRs
 	HTTPPort     int               `json:"httpPort"`
 	StreamPort   int               `json:"streamPort"`
+	SourcePort   int               `json:"sourcePort"`
 	GossipPort   int               `json:"gossipPort"`
 	Capabilities Capabilities      `json:"capabilities"`
 	Following    id.ID             `json:"following"`    // Zero == solo master
@@ -428,8 +459,10 @@ type NodeView struct {
 // Capabilities mirror §1.
 type Capabilities struct {
 	Playback bool     `json:"playback"`
-	Codecs   []string `json:"codecs"`  // ["pcm"] (+ "opus" if built with it)
-	Formats  []string `json:"formats"` // ["wav","mp3","flac"]
+	Codecs   []string `json:"codecs"`   // ["pcm"] (+ "opus" if built with it)
+	Backends []string `json:"backends"` // sink backends in this build/host (§8.5)
+	Sources  []string `json:"sources"`  // media-source schemes (§6.1): ["file","http","input"]
+	Formats  []string `json:"formats"`  // ["wav","mp3","flac"]
 }
 
 // Observed is one observed-address entry (§3.1).
@@ -448,14 +481,18 @@ type GroupView struct {
 	Settings GroupSettings `json:"settings"`
 }
 
-// Playback mirrors the replicated playback-status record (§4).
+// Playback mirrors the replicated playback-status record (§4), written only
+// by the group's master. Source stats ride along (refreshed with the same
+// periodic position update), so the UI sees listeners/reconnects from the
+// snapshot without extra round-trips.
 type Playback struct {
-	State       string  `json:"state"`       // "idle" | "playing"
-	File        string  `json:"file"`
-	StartedUnix int64   `json:"startedAt"`
-	PositionSec float64 `json:"positionSec"`
-	Codec       string  `json:"codec"`       // "pcm" | "opus"
-	Transport   string  `json:"transport"`   // "udp" | "tcp"
+	State       string      `json:"state"`       // "idle" | "playing"
+	URI         string      `json:"uri"`         // media-source URI (§6)
+	StartedUnix int64       `json:"startedAt"`
+	PositionSec float64     `json:"positionSec"`
+	Codec       string      `json:"codec"`       // "pcm" | "opus"
+	Transport   string      `json:"transport"`   // "udp" | "tcp"
+	Source      SourceStats `json:"source"`      // master's source stats (§8.2)
 }
 
 // GroupSettings mirrors the per-group settings record (§8.3/§8.4/§9.1).
