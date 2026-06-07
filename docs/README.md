@@ -290,18 +290,25 @@ On `play`, the master starts an **audio source server** on its `SOURCE_PORT`:
 - It counts and surfaces **source stats**: current subscriber count, total
   connects, restarts (re-prime requests), and primes served (§9.1).
 
-### 8.3 Codec — group setting `codec: pcm | opus` (default `pcm`)
+### 8.3 Codec — group setting `codec: pcm | opus` (default `opus`, D42)
 
-- `pcm`: raw frame payload (3840 B).
-- `opus`: 20 ms Opus at 128 kbps. No cgo, no build variant: **libopus is
-  loaded at runtime** (`dlopen` via purego, `libopus.so.0`); if it isn't
-  loadable on a host, that node simply reports no `opus` capability and
-  everything else works. The **master encodes** (after `ReadFrame`, before
-  fan-out — one encode for all subscribers); **every member decodes**
-  (between receive and the sink, which always consumes canonical PCM).
-  Starting playback with `codec: opus` requires every current group member to
-  report the opus capability; otherwise `play` is rejected with a clear error
-  naming the nodes that lack it. A `pcm` cluster works everywhere, always.
+- `opus` (**default**): 20 ms Opus at 128 kbps (~320 B/frame, so a stream
+  datagram ≈ 344 B stays **under one MTU** and never IP-fragments). No cgo, no
+  build variant: **libopus is loaded at runtime** (`dlopen` via purego,
+  `libopus.so.0`); if it isn't loadable on a host, that node reports no `opus`
+  capability. The **master encodes** (after `ReadFrame`, before fan-out — one
+  encode for all subscribers); **every member decodes** (between receive and the
+  sink, which always consumes canonical PCM).
+- `pcm`: raw frame payload (3840 B). One datagram is `24 + 3840 = 3864 B`, which
+  **IP-fragments into ~3 packets** — on lossy Wi-Fi, losing any fragment drops
+  the whole frame and the per-frame XOR FEC cannot recover it. Use pcm only on
+  reliable links.
+- **Opus-default downgrade (D42)**: because opus is the default, a group whose
+  members don't *all* report the opus capability (or whose master has no opus
+  encoder) is **transparently downgraded to pcm at `play`** — opus is the
+  default, pcm is the universal fallback, so `play` never fails for lack of
+  opus. An *explicit* `codec: opus` group setting is still validated against the
+  master's own capability at `POST /api/group/settings`.
 
 ### 8.4 Transport — group setting `transport: udp | tcp` (default `udp`)
 

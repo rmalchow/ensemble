@@ -39,11 +39,21 @@ func (e *Engine) Play(uri string) error {
 	groupID := mv.group.ID
 	settings := fillDefaults(mv.group.Settings)
 
-	// Opus capability gating BEFORE consuming a generation (§8.3/D33).
+	// Codec selection (§8.3/D33, opus-default): opus keeps every frame under one
+	// MTU (raw PCM is 3864 B and IP-fragments, which collapses on lossy Wi-Fi).
+	// An opus session needs every member to support opus. If any member lacks it
+	// (or this node has no opus encoder), we DOWNGRADE this session to pcm rather
+	// than rejecting play — opus is the default, pcm is the universal fallback.
 	if settings.Codec == "opus" {
-		if err := e.validateOpusGroup(snap, mv); err != nil {
-			e.mu.Unlock()
-			return err
+		downgrade := ""
+		if e.p.Opus == nil {
+			downgrade = "no opus encoder on this node"
+		} else if err := e.validateOpusGroup(snap, mv); err != nil {
+			downgrade = err.Error()
+		}
+		if downgrade != "" {
+			e.log.Warn("opus unavailable for this group; falling back to pcm", "reason", downgrade)
+			settings.Codec = "pcm"
 		}
 	}
 	e.mu.Unlock()

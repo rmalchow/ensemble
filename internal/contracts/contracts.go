@@ -194,8 +194,14 @@ type GroupSettings struct {
 }
 
 // Defaults for group settings (single source of truth, §8.5).
+//
+// DefaultCodec is opus (§8.3): a 20 ms opus packet at 128 kbps is ~320 B, so a
+// stream datagram (header+payload ≈ 344 B) stays under one MTU and never IP-
+// fragments — raw PCM is 3864 B/frame and fragments into ~3 packets, which loses
+// catastrophically on lossy Wi-Fi. Opus is the default; a group whose members
+// don't all support opus is transparently downgraded to pcm at play (group.Play).
 const (
-	DefaultCodec     = "pcm"
+	DefaultCodec     = "opus"
 	DefaultTransport = "udp"
 	DefaultBufferMs  = 150
 	DefaultLeadMs    = 50 // source release lead over the clock (§8.2)

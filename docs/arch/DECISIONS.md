@@ -405,6 +405,34 @@ group **NAMES** map and the group **SETTINGS** map, each as FULL records (incl.
   entirely — the lookup table is kept indefinitely (spec §4 updated). Node
   records + playback still age out at 30 days.
 
+## Opus-by-default + playback-record follows the group id (user round)
+
+**D42 — opus is the default codec, with transparent pcm downgrade**.
+`contracts.DefaultCodec` is now `"opus"` (was `"pcm"`). Rationale: a raw-PCM
+stream datagram is `24 + 3840 = 3864 B` and IP-fragments into ~3 packets; on
+lossy Wi-Fi losing any fragment drops the whole frame and the per-frame XOR FEC
+cannot recover it (observed: Raspberry-Pi members on WLAN received clock packets
+— 24 B, unfragmented — but no audio at all). A 20 ms opus packet is ~320 B, so
+the datagram (~344 B) stays under one MTU. To keep "opus everywhere" from
+breaking heterogeneous clusters, `group.Play` **downgrades the session to pcm**
+when the group can't do opus (a member lacks the `opus` cap, or this master has
+no opus encoder) instead of rejecting — opus is the default, pcm is the
+universal fallback. An *explicit* `codec: opus` via `POST /api/group/settings`
+is still validated against the master's own capability (`validateSettings`).
+(spec §8.3 updated.)
+
+**D43 — the master's playback record follows the live group id**. Bug fix: the
+group ID is the XOR of the member set (§5), so it CHANGES whenever a member
+joins/leaves. The session captured its group id at `Play` time and the heartbeat
+kept writing the playback record under that stale id; when members left (e.g. the
+Pis disconnected), the surviving group's new id had no playback record, so every
+remaining member — including a co-located secondary — saw `state="idle"` and
+**stopped playout**, and it never self-healed (the master kept writing the wrong
+id). Fix: each reconcile, a master with a running session compares
+`sess.groupID` to the freshly-derived `mv.group.ID`; on a change it clears the
+OLD record to `idle` and immediately writes the live record under the NEW id
+(then `sess.groupID` tracks it). Membership churn no longer stalls playout.
+
 ## Confirmed as designed (no change)
 
 - C's two-mutex exception (doc + liveness) with a never-hold-both rule. (C)

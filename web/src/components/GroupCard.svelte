@@ -58,7 +58,7 @@
   {/if}
 
   <div class="hint">
-    codec {settings.codec ?? "pcm"} · transport {settings.transport ?? "udp"} ·
+    codec {settings.codec ?? "opus"} · transport {settings.transport ?? "udp"} ·
     buffer {settings.bufferMs ?? 150} ms
   </div>
 </div>

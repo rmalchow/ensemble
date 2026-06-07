@@ -14,8 +14,8 @@ func TestSettingsDefaults(t *testing.T) {
 	r := newRig(self, 0, false)
 	r.cl.setSnap(soloSnap(self))
 	s := r.e.Settings()
-	if s.Codec != "pcm" || s.Transport != "udp" || s.BufferMs != 150 {
-		t.Fatalf("settings = %+v, want pcm/udp/150", s)
+	if s.Codec != "opus" || s.Transport != "udp" || s.BufferMs != 150 {
+		t.Fatalf("settings = %+v, want opus/udp/150", s)
 	}
 }
 

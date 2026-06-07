@@ -48,19 +48,23 @@ func TestPlayRejectsBadURI(t *testing.T) {
 	}
 }
 
-func TestPlayRejectsOpusWithoutCap(t *testing.T) {
+func TestPlayDowngradesOpusWithoutCap(t *testing.T) {
 	self, follower := idN(1), idN(2)
 	r := newRig(self, 5, false)
-	// group codec opus; follower lacks opus capability.
+	// group codec opus; follower lacks opus capability → DOWNGRADE to pcm (not
+	// rejected): opus is the default, pcm is the universal fallback.
 	s := masterSnap(self, contracts.GroupSettings{Codec: "opus", Transport: "udp", BufferMs: 150}, follower)
 	r.cl.setSnap(s)
-	// self has pcm only too (Caps in rig is pcm).
-	err := r.e.Play("song.wav")
-	if !errors.Is(err, ErrNoOpus) {
-		t.Fatalf("err = %v, want ErrNoOpus", err)
+	if err := r.e.Play("song.wav"); err != nil {
+		t.Fatalf("Play should succeed (downgrade), got %v", err)
 	}
-	if r.e.gen != 0 {
-		t.Fatal("gen consumed on opus rejection")
+	defer r.e.Close()
+	pc, ok := r.cl.lastPlayback()
+	if !ok {
+		t.Fatal("no playback status written")
+	}
+	if pc.pb.Codec != "pcm" {
+		t.Fatalf("codec = %q, want pcm (downgraded)", pc.pb.Codec)
 	}
 }
 
