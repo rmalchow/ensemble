@@ -836,8 +836,21 @@ func (g *groupAdapter) MakeMaster(ctx context.Context, node id.ID) error {
 
 func (g *groupAdapter) NameGroup(ctx context.Context, group id.ID, name string) error {
 	// The engine owns no group-name write; it is a plain LWW cluster record any
-	// node may set (§4). Route straight to the cluster store.
-	g.cl.SetGroupName(group, name)
+	// node may set (§4/§9.1). The request's `group` is the current group id (=
+	// master id, D42), but the explicit name OVERRIDE map is keyed by the member-
+	// set XOR (an override names a specific COMBINATION of rooms, surviving master
+	// changes + re-forming). Resolve the group's CURRENT member set from the
+	// snapshot, compute its XOR, and write the override there. An empty name CLEARS
+	// the override (back to the derived label). A group id with no live members
+	// (skew) falls back to keying by the given id verbatim.
+	key := group
+	for _, gv := range g.cl.Snapshot().Groups {
+		if gv.ID == group {
+			key = id.XOR(gv.Members...)
+			break
+		}
+	}
+	g.cl.SetGroupName(key, name)
 	return nil
 }
 

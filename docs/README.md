@@ -125,16 +125,21 @@ memberlist broadcasts + push/pull sync. No leader, no consensus; merging is
 **last-writer-wins per record** using a per-record monotonic version
 (lamport-ish counter, tie-broken by node ID).
 
-Records:
+Records — **record keying** (D44): group **names** are keyed by the member-set
+**XOR** (an override names a specific COMBINATION of rooms); group **settings**
+and **playback** are keyed by the **master's node id** (= the live group id, §5):
 
 - **Node records** — owned and only ever written by the node itself:
   `id, name, volume, outputDelayMs, addrs (CIDR), httpPort, streamPort,
   sourcePort, gossipPort, capabilities, following (nodeId or empty),
   observed (peerId → {ip, lastSeenUnix}), version, updatedAt`
-- **Group names** — map `groupId → {name, version, updatedAt}`; written by
-  whichever node renames the group (LWW).
-- **Playback status** — per group, written only by that group's master:
-  `groupId → {state: idle|playing|paused, uri, startedAt, positionSec, codec,
+- **Group names (override map)** — map `memberXOR → {name, version, updatedAt}`;
+  written by whichever node renames the group (LWW). XOR-keyed so a name follows
+  a specific member COMBINATION across master changes + re-forming (D44). An empty
+  name clears the override (back to the §5 derived label).
+- **Playback status** — per group, keyed by the **master id** (D44), written only
+  by that group's master:
+  `masterId → {state: idle|playing|paused, uri, startedAt, positionSec, codec,
   transport, version, updatedAt}`. `paused` (D39) is a frozen session: the
   master keeps the media source + session/gen alive but stops releasing frames;
   members treat anything other than `playing` as inactive and unsubscribe.
@@ -143,14 +148,14 @@ Liveness (`lastSeen`) comes from memberlist itself; alive/dead is not part of
 the replicated doc. Node records and playback entries not updated for **30 days**
 are purged (checked hourly). **Group names and group settings are exempt from the
 purge entirely** (D41): they are a lookup table kept indefinitely, so a specific
-member combination keeps its name/settings whenever it reforms.
+member combination keeps its name whenever it reforms.
 
-The group **names** and **settings** maps are additionally persisted to
-`DATA_DIR/cluster.json` (D41) — full records incl. version+writer so the LWW
-merge applies on reload — loaded at start before joining gossip and saved
-debounced (and on clean shutdown). A node that was offline therefore still knows
-every group name + setting it ever saw. Node records and playback are NOT
-persisted (runtime/replicated).
+The group **override-names** map ALONE is persisted to `DATA_DIR/cluster.json`
+(D41, narrowed by D44) — full records incl. version+writer so the LWW merge
+applies on reload — loaded at start before joining gossip and saved debounced
+(and on clean shutdown). A node that was offline therefore still knows every
+group name it ever saw. Group **settings** are NOT persisted (D44: master-keyed
+live state), nor are node records or playback (runtime/replicated).
 
 ## 5. Groups
 
@@ -168,10 +173,25 @@ Derivation, recomputed by every node from the replicated state + liveness:
   that is itself following someone, behaves as solo — and additionally
   **resets its own `following` to ""** after a 10s grace period (self-heal).
 
-**Group ID** = XOR of all member node IDs (16-byte XOR, hex-encoded). Order
-doesn't matter (XOR is commutative); a solo node's group ID equals its node
-ID. Because the ID is derived purely from the member set, a *specific
-combination of nodes* keeps its name (§4 group names) whenever it reforms.
+**Group ID = the master's node id** (D44). A solo node's group ID equals its
+node ID. Keying the group — and its master-written playback + settings records
+(§4) — by the master id means membership churn (a member joining/leaving, master
+unchanged) never orphans those records: the id only changes on a *master* move,
+which is a takeover that stops the session first. This replaces the former
+XOR-of-members group id.
+
+**Group label** — a group's display name is resolved as follows (D44):
+
+- **Explicit override**: the XOR-of-members-keyed name map (§4). An override
+  names a specific COMBINATION of rooms, so it survives master changes and group
+  re-forming. When one exists for the current member set it is the label, and
+  `GroupView.NameIsDerived` is `false`.
+- **Derived label** (no override): computed server-side in `DeriveGroups` from
+  the member NAMES — sorted, joined with `" + "`, capped at the first 3 names
+  then `" +N more"` (e.g. `"bedroom + kitchen + living room +2 more"`); a solo
+  group is just the node's name; a member missing from the snapshot falls back to
+  its 8-char short id. `GroupView.NameIsDerived` is `true`. The UI renders derived
+  labels muted/italic.
 
 ### 5.1 Joining (“I follow you”)
 
@@ -192,10 +212,15 @@ her first. `POST /api/group/master {"node":"<aliceId>"}` on any group member:
 
 1. The receiving node forwards the request to the current master (proxy).
 2. The master stops any running playback session.
-3. The master instructs every member (including itself) over HTTP:
+3. The master copies the group's current **settings** record to the new master's
+   key (D44: settings are master-keyed, so they would otherwise reset to defaults
+   — one extra `SetGroupSettings` carries codec/transport/bufferMs over). Playback
+   does NOT carry (step 2 stopped it).
+4. The master instructs every member (including itself) over HTTP:
    `POST /api/follow {"target":"<aliceId>"}` — and alice: `POST /api/unfollow`.
-4. Group membership is unchanged, so the group ID and name are unchanged;
-   only the master moved.
+5. Group membership is unchanged, so the member-set XOR — hence the **name
+   override** — is unchanged; only the master moved, so the **group ID changes**
+   to the new master's id (D44) and settings carry over (step 3).
 
 Members that miss the command end up following alice late or self-heal to
 solo; no further coordination. The UI exposes this as a **“make master”**
@@ -452,7 +477,7 @@ All under `/api`. JSON. No auth (trusted LAN, v1).
 | `GET  /api/media` | list this node's local media |
 | `POST /api/follow` | `{target}` → this node follows target (§5.1) |
 | `POST /api/unfollow` | this node becomes solo master |
-| `POST /api/group/name` | `{group, name}` → name a group (any node may write) |
+| `POST /api/group/name` | `{group, name}` → set a group's name override (any node may write); the override is stored under the group's current member-set XOR (D44). An **empty `name` clears** the override, reverting to the derived label (§5) |
 | `POST /api/group/master` | `{node}` → takeover (§5.2) |
 | `POST /api/play` | `{uri}` (back-compat: `{file}` ≡ `file:` URI) → master only: serve that source to the group. Non-masters reject with a hint to use takeover. |
 | `POST /api/stop` | master only: stop group playback |
@@ -486,7 +511,8 @@ CSS. Built to static files, embedded in the binary via `go:embed`, served at
 `/` by every node. Connects to `/api/ws`, renders from cluster events.
 
 Screens (single page, sections):
-- **Groups** — cards per derived group: name (click to rename), members with
+- **Groups** — cards per derived group: name (click to rename; a derived label
+  renders muted/italic and clearing the field resets to derived, D44), members with
   master badge and a live **volume slider** each (PATCH via proxy, §9.1),
   playback status + position, source stats (listeners / reconnects) on the
   master, stop button, per-member **“make master”** button, drag-free “join”

@@ -88,7 +88,7 @@ func node(nid id.ID, following id.ID, alive bool) contracts.NodeView {
 func soloSnap(self id.ID) contracts.Snapshot {
 	n := node(self, id.Zero, true)
 	g := contracts.GroupView{
-		ID:       id.XOR(self),
+		ID:       self, // D42: group id == master (== own) id
 		Master:   self,
 		Members:  []id.ID{self},
 		Settings: defaultSettings(),
@@ -106,7 +106,7 @@ func masterSnap(master id.ID, settings contracts.GroupSettings, members ...id.ID
 		nodes = append(nodes, node(m, master, true))
 	}
 	g := contracts.GroupView{
-		ID:       id.XOR(all...),
+		ID:       master, // D42: group id == master id
 		Master:   master,
 		Members:  all,
 		Settings: settings,

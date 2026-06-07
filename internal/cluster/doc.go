@@ -168,8 +168,9 @@ func (d *Document) mergeAll(self id.ID, remote *Document) bool {
 }
 
 // mergeAllTracked is mergeAll that additionally reports whether the long-lived
-// LOOKUP tables — group names + settings — changed (D41: those are the only
-// records persisted to cluster.json, so only their change need trigger a save).
+// LOOKUP table — the group override-NAMES map — changed (D41/D42: the names map
+// is the only record persisted to cluster.json, so only its change triggers a
+// save; settings are master-keyed live state and are NOT persisted).
 func (d *Document) mergeAllTracked(self id.ID, remote *Document) (changed, lookupChanged bool) {
 	if remote == nil {
 		return false, false

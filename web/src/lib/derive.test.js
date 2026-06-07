@@ -7,6 +7,7 @@ import {
   masterCandidates,
   joinTargets,
   groupLabel,
+  groupNameIsDerived,
   selfNode,
   addTargets,
 } from "./derive.js";
@@ -88,6 +89,19 @@ describe("groupLabel", () => {
     expect(groupLabel({ name: "", id: "abcdef12" + "0".repeat(24) })).toBe(
       "Group abcdef12",
     );
+  });
+});
+
+describe("groupNameIsDerived", () => {
+  it("reflects the server nameDerived flag (D42)", () => {
+    expect(groupNameIsDerived({ name: "kitchen", nameDerived: false })).toBe(
+      false,
+    );
+    expect(
+      groupNameIsDerived({ name: "bedroom + kitchen", nameDerived: true }),
+    ).toBe(true);
+    expect(groupNameIsDerived(undefined)).toBe(false);
+    expect(groupNameIsDerived({ name: "x" })).toBe(false); // absent flag → not derived
   });
 });
 
