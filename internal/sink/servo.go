@@ -17,10 +17,10 @@ func defaultServoConfig() servoConfig {
 	return servoConfig{
 		Window:   3_000_000_000, // 3 s
 		WarmUp:   200_000_000,   // 200 ms
-		Kp:       0.3,
-		Ki:       0.05,
-		ClampPPM: 500,
-		SlewPPM:  5,
+		Kp:       0.6,           // user-requested: more aggressive correction
+		Ki:       0.1,
+		ClampPPM: 2000, // ±0.2% — still far below audibility
+		SlewPPM:  20,   // reaches the clamp in ~2s of slots instead of ~20s
 	}
 }
 
