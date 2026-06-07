@@ -35,6 +35,7 @@ type rateServo struct {
 	baseMaster int64   // master-clock ns at window start
 	integ      float64 // PI integral accumulator, ppm·s
 	seeded     bool    // the window has fully slid once: startup transient aged out
+	skewEMA    float64 // smoothed windowed skew (Wi-Fi clock jitter damping)
 	lastSkew   float64 // most recent measured skew, ppm (debug telemetry)
 	lastGot    float64 // window emitted samples (debug)
 	lastWant   float64 // window expected samples (debug)
@@ -86,7 +87,16 @@ func (s *rateServo) observe(consumedSamples, masterNanos, deviceDelayNs int64, o
 	// 0.33 Hz updates, not 50 Hz.
 	wantSamples := float64(elapsed) * float64(stream.SampleRate) / 1e9
 	gotSamples := emitted - s.baseEmit
-	skewPPM := 1e6 * (gotSamples - wantSamples) / wantSamples
+	rawSkew := 1e6 * (gotSamples - wantSamples) / wantSamples
+	// EMA across window steps: on high-RTT links (Wi-Fi) the clock offset
+	// jitters by hundreds of µs, which reads as ±200ppm of fake per-window
+	// skew. True crystal skew is constant — smooth before the PI step.
+	if !s.seeded {
+		s.skewEMA = rawSkew
+	} else {
+		s.skewEMA += 0.35 * (rawSkew - s.skewEMA)
+	}
+	skewPPM := s.skewEMA
 	s.lastSkew = skewPPM
 	s.lastGot = gotSamples
 	s.lastWant = wantSamples
@@ -150,6 +160,7 @@ func (s *rateServo) reset() {
 	s.baseEmit = 0
 	s.baseMaster = 0
 	s.seeded = false
+	s.skewEMA = 0
 	s.integ = 0
 	s.outPPM = 0
 }

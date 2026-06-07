@@ -9,6 +9,9 @@ import (
 	"ensemble/internal/contracts"
 	"ensemble/internal/dl"
 	"ensemble/internal/stream"
+	"os"
+	"strconv"
+	"time"
 )
 
 // ALSA simple-API constants (D34).
@@ -80,11 +83,13 @@ func probeAlsa() (*alsaFuncs, error) {
 // runtime-loaded libasound (D34). It implements contracts.DelayReporter
 // (snd_pcm_delay) for exact servo measurement (§3.5).
 type alsaBackend struct {
-	f      *alsaFuncs
-	pcm    uintptr
-	log    *slog.Logger
-	mu     sync.Mutex
-	closed bool
+	xruns       uint64
+	lastXrunLog time.Time
+	f           *alsaFuncs
+	pcm         uintptr
+	log         *slog.Logger
+	mu          sync.Mutex
+	closed      bool
 }
 
 // newAlsaBackend opens the named device (empty => "default") and sets canonical
@@ -109,10 +114,18 @@ func newAlsaBackend(device string, log *slog.Logger) (*alsaBackend, error) {
 	// NETWORK jitter budget held in our own jitter buffer; handing it to the
 	// device as well doubled the end-to-end delay on alsa nodes and created a
 	// ~180ms audible phase offset against pipe-backend nodes (whose players
-	// buffer far less). 60ms keeps the DAC fed across scheduling hiccups while
-	// staying phase-comparable to the exec backends.
-	const alsaLatencyUs = 60_000
-	latencyUs := int32(alsaLatencyUs)
+	// buffer far less). Default 100ms: 60ms proved too tight on Pi-class
+	// hardware (scheduling jitter -> device xruns = chop with clean pipeline
+	// counters). Tunable per host without rebuild via ENSEMBLE_ALSA_LATENCY_MS
+	// (20..500); a constant inter-device difference is what the per-node
+	// outputDelayMs calibration is for (D36).
+	latencyMs := 100
+	if v := os.Getenv("ENSEMBLE_ALSA_LATENCY_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms >= 20 && ms <= 500 {
+			latencyMs = ms
+		}
+	}
+	latencyUs := int32(latencyMs * 1000)
 	if rc := alsaBound.setParams(pcm, sndPCMFormatS16LE, sndPCMAccessRWInterlvd,
 		stream.Channels, stream.SampleRate, alsaSoftResample, latencyUs); rc < 0 {
 		alsaBound.close(pcm)
@@ -135,6 +148,15 @@ func (b *alsaBackend) Write(frame []byte) error {
 	n := b.f.writei(b.pcm, buf, uintptr(stream.FrameSamples))
 	if n < 0 {
 		// underrun (-EPIPE) or suspend (-ESTRPIPE): recover and retry once.
+		// Every recovery is an AUDIBLE glitch the pipeline counters cannot
+		// see — make it loud in the logs (rate-limited to 1/s) so "choppy
+		// but clean counters" is diagnosable from the log alone.
+		b.xruns++
+		if now := time.Now(); now.Sub(b.lastXrunLog) > time.Second {
+			b.lastXrunLog = now
+			b.log.Warn("alsa xrun (device underrun) — audible glitch; consider a larger ENSEMBLE_ALSA_LATENCY_MS",
+				"err", n, "xruns", b.xruns)
+		}
 		rc := b.f.recover(b.pcm, int32(n), 1)
 		if rc < 0 {
 			return fmt.Errorf("alsa: writei %d, recover %d", n, rc)
