@@ -37,7 +37,8 @@ type rateServo struct {
 	have       bool    // first observation seen (EMA + clock seeded)
 	startMast  int64   // master ns of the first observation (warmup origin)
 	lastMast   int64   // master ns of the previous observation (per-step dt)
-	ddEMA      float64 // smoothed device-queue depth, samples
+	ddEMA      float64 // smoothed device-queue depth, samples (fast)
+	ddRef      float64 // slow reference EMA (settle detection)
 	calibrated bool    // setpoint captured (warmup elapsed)
 	setpoint   float64 // target device-queue depth, samples
 	outPPM     float64 // current correction, ppm (slew-limited, clamped)
@@ -73,6 +74,7 @@ func (s *rateServo) observe(consumedSamples, masterNanos, deviceDelayNs int64, o
 	if !s.have {
 		s.have = true
 		s.ddEMA = dd
+		s.ddRef = dd
 		s.startMast = masterNanos
 		s.lastMast = masterNanos
 		return s.outPPM // 0
@@ -93,16 +95,29 @@ func (s *rateServo) observe(consumedSamples, masterNanos, deviceDelayNs int64, o
 	}
 	s.ddEMA += alpha * (dd - s.ddEMA)
 
-	// Warmup: the queue fills 0→full at session start; calibrate the setpoint
-	// to wherever it settles, so a steady queue reads zero error and only DRIFT
-	// moves it off setpoint.
-	if masterNanos-s.startMast < s.cfg.WarmUp {
-		return s.outPPM // hold at 0 while filling
+	// Calibrate the setpoint only once the device queue has SETTLED — not at a
+	// fixed time. The queue fills over several seconds at session start (prime
+	// burst + device buffer); calibrating mid-ramp captured a too-low setpoint
+	// and railed the servo for the whole session (and the sustained correction
+	// then shrank the resampler carry to underflow). We track a slow reference
+	// EMA; the queue is settled when the fast EMA has caught up to it. A hard
+	// cap forces calibration so a genuinely-drifting queue still gets a
+	// reference.
+	const settleTol = 480 // samples (~10 ms): fast≈slow ⇒ not ramping
+	srAlpha := float64(dtNs) / float64(6*s.cfg.QueueTau)
+	if srAlpha > 1 {
+		srAlpha = 1
 	}
+	s.ddRef += srAlpha * (dd - s.ddRef)
 	if !s.calibrated {
-		s.calibrated = true
-		s.setpoint = s.ddEMA
-		return s.outPPM
+		elapsed := masterNanos - s.startMast
+		settled := elapsed >= s.cfg.WarmUp && absf(s.ddEMA-s.ddRef) < settleTol
+		forced := elapsed >= 5*s.cfg.WarmUp // hard cap (~15 s at the default)
+		if settled || forced {
+			s.calibrated = true
+			s.setpoint = s.ddEMA
+		}
+		return s.outPPM // hold at 0 until calibrated
 	}
 
 	// Proportional control. Queue above setpoint ⇒ the DAC is draining slower
@@ -137,8 +152,16 @@ func (s *rateServo) reset() {
 	s.startMast = 0
 	s.lastMast = 0
 	s.ddEMA = 0
+	s.ddRef = 0
 	s.calibrated = false
 	s.setpoint = 0
 	s.outPPM = 0
 	s.queueErr = 0
+}
+
+func absf(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

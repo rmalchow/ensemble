@@ -167,6 +167,22 @@ func (r *resampler) process(in []byte) []byte {
 		}
 	}
 
+	// Carry UNDERFLOW guard. A sustained rate < 1 (outPPM < 0) consumes slightly
+	// more input than is fed, so the held lookahead shrinks. The NEXT call needs
+	// at least 2 held samples so the last output's p2/p3 are real (else the seam
+	// clamp returns and cascades — the user's "degrades until nothing is
+	// recognizable"). Normal held ≈ one frame, so this floor (well below it)
+	// only fires on a genuine underflow transient; the real cure is keeping the
+	// servo off its rail (setpoint calibration). Repeat the newest sample.
+	const heldFloor = leadPad + 8
+	for ch := 0; ch < stream.Channels; ch++ {
+		buf := r.carry[ch]
+		for len(buf) < heldFloor {
+			buf = append(buf, buf[len(buf)-1])
+		}
+		r.carry[ch] = buf
+	}
+
 	return r.out
 }
 
