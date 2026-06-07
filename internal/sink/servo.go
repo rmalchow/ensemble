@@ -34,6 +34,10 @@ type rateServo struct {
 	baseEmit   float64 // cumulative emitted (queue-adjusted) samples at window start
 	baseMaster int64   // master-clock ns at window start
 	integ      float64 // PI integral accumulator, ppm·s
+	seeded     bool    // the window has fully slid once: startup transient aged out
+	lastSkew   float64 // most recent measured skew, ppm (debug telemetry)
+	lastGot    float64 // window emitted samples (debug)
+	lastWant   float64 // window expected samples (debug)
 	outPPM     float64 // last emitted correction, ppm (slew-limited, clamped)
 }
 
@@ -71,49 +75,68 @@ func (s *rateServo) observe(consumedSamples, masterNanos, deviceDelayNs int64, o
 	}
 
 	elapsed := masterNanos - s.baseMaster
-	if elapsed <= 0 {
-		return s.outPPM
-	}
-	if elapsed < s.cfg.WarmUp {
-		return s.outPPM // 0 until warmed up
+	if elapsed < s.cfg.Window {
+		return s.outPPM // accumulate; one PI step per full window (see below)
 	}
 
-	// What master-clock elapsed says the DAC *should* have emitted.
+	// One servo step per full window. Early-window skew is garbage — with a
+	// small denominator, single-slot quantization reads as tens of thousands
+	// of ppm and (clamp-asymmetrically) poisoned the integral. Over the full
+	// 3 s span the slot quantization is < ±7 ppm. A crystal-drift servo needs
+	// 0.33 Hz updates, not 50 Hz.
 	wantSamples := float64(elapsed) * float64(stream.SampleRate) / 1e9
 	gotSamples := emitted - s.baseEmit
-	if wantSamples <= 0 {
+	skewPPM := 1e6 * (gotSamples - wantSamples) / wantSamples
+	s.lastSkew = skewPPM
+	s.lastGot = gotSamples
+	s.lastWant = wantSamples
+
+	// Re-seed the window.
+	s.baseEmit = emitted
+	s.baseMaster = masterNanos
+
+	// The FIRST window contains the session-start transient (deadline hold,
+	// catch-up burst): measure-and-discard.
+	if !s.seeded {
+		s.seeded = true
 		return s.outPPM
 	}
 
-	skewPPM := 1e6 * (gotSamples - wantSamples) / wantSamples
-
+	// PI step over this window, with: input clamp (transients must not dump
+	// charge), anti-windup, and a slow integral leak so any residual
+	// poisoning self-heals instead of holding the output off-zero forever.
 	dtSeconds := float64(elapsed) / 1e9
-	s.integ += skewPPM * dtSeconds
+	in := skewPPM
+	if in > s.cfg.ClampPPM {
+		in = s.cfg.ClampPPM
+	} else if in < -s.cfg.ClampPPM {
+		in = -s.cfg.ClampPPM
+	}
+	const leakTau = 60.0 // seconds (slow heal; small steady-state residual)
+	s.integ += in*dtSeconds - s.integ*(dtSeconds/leakTau)
+	if maxInteg := s.cfg.ClampPPM / s.cfg.Ki; s.integ > maxInteg {
+		s.integ = maxInteg
+	} else if s.integ < -s.cfg.ClampPPM/s.cfg.Ki {
+		s.integ = -s.cfg.ClampPPM / s.cfg.Ki
+	}
 
 	// Negative: DAC fast (skew>0) => slow production.
 	raw := -(s.cfg.Kp*skewPPM + s.cfg.Ki*s.integ)
-
-	// Clamp before slew.
 	if raw > s.cfg.ClampPPM {
 		raw = s.cfg.ClampPPM
 	} else if raw < -s.cfg.ClampPPM {
 		raw = -s.cfg.ClampPPM
 	}
 
-	// Slew toward raw by at most SlewPPM.
+	// Slew toward raw — per WINDOW step now, so allow a meaningful move.
+	maxStep := s.cfg.SlewPPM * float64(elapsed) / 50_000_000 // SlewPPM per 50ms-slot-equivalent
 	delta := raw - s.outPPM
-	if delta > s.cfg.SlewPPM {
-		delta = s.cfg.SlewPPM
-	} else if delta < -s.cfg.SlewPPM {
-		delta = -s.cfg.SlewPPM
+	if delta > maxStep {
+		delta = maxStep
+	} else if delta < -maxStep {
+		delta = -maxStep
 	}
 	s.outPPM += delta
-
-	// Slide the window: re-seed the baseline once the span exceeds Window.
-	if elapsed >= s.cfg.Window {
-		s.baseEmit = emitted
-		s.baseMaster = masterNanos
-	}
 
 	return s.outPPM
 }
@@ -126,6 +149,7 @@ func (s *rateServo) reset() {
 	s.have = false
 	s.baseEmit = 0
 	s.baseMaster = 0
+	s.seeded = false
 	s.integ = 0
 	s.outPPM = 0
 }

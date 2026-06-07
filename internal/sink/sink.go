@@ -23,16 +23,17 @@ func monotoNow() int64 { return clock.MonoNow() }
 // backend, with the continuous rate servo and the starvation watchdog.
 // Implements contracts.Sink. One scheduler goroutine, one mutex.
 type Playout struct {
-	mu       sync.Mutex
-	jb       *jitterBuffer
-	servo    *rateServo
-	rs       *resampler
-	gen      uint32
-	armed    bool
-	closed   bool
-	toneBusy bool // a TestTone writer goroutine is active
-	stats    contracts.SinkStats
-	lastPkt  int64 // local-ns of most recent accepted Push (watchdog)
+	mu           sync.Mutex
+	jb           *jitterBuffer
+	servo        *rateServo
+	rs           *resampler
+	gen          uint32
+	armed        bool
+	closed       bool
+	toneBusy     bool // a TestTone writer goroutine is active
+	stats        contracts.SinkStats
+	lastPkt      int64 // local-ns of most recent accepted Push (watchdog)
+	lastServoLog int64 // local ns of the last 1Hz servo debug line
 
 	// session servo accounting
 	originSeq  uint64
@@ -386,6 +387,14 @@ func (p *Playout) loop() {
 			ppm := p.servo.observe(p.consumed, mNow, dDelay, dok)
 			p.rs.setRate(ppm)
 			p.stats.RatePPM = ppm
+			if now := p.now(); now-p.lastServoLog > 1_000_000_000 {
+				p.lastServoLog = now
+				p.log.Debug("servo",
+					"skewPPM", int64(p.servo.lastSkew), "integ", int64(p.servo.integ),
+					"outPPM", int64(ppm), "got", int64(p.servo.lastGot),
+					"want", int64(p.servo.lastWant), "consumed", p.consumed,
+					"deviceDelayNs", dDelay, "delayOK", dok, "buffered", p.stats.Buffered)
+			}
 		}
 
 		s := p.jb.pop(seq)
