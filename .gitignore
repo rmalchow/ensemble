@@ -1,0 +1,12 @@
+/bin/
+/data/
+data*/
+
+# Svelte/Vite: deps and build output; keep the committed placeholder for go:embed.
+web/node_modules/
+web/dist/*
+!web/dist/index.html
+
+*.wav
+*.flac
+*.mp3
