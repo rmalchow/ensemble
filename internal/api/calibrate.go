@@ -236,6 +236,12 @@ func (c *calibController) SetOutputDelay(ctx context.Context, node id.ID, ms int
 
 // ---- mic recorder (input source + master-clock stamp) -----------------------
 
+// capturePrerollMs of audio is read and DISCARDED after opening a capture
+// device, before the measured window: opening a PipeWire/ALSA source emits a
+// loud clipped transient (a DC step / buffer pop) for ~the first second that
+// otherwise saturates the matched filter. Measured on real hardware (D48).
+const capturePrerollMs = 1200
+
 type micRecorder struct {
 	clock    contracts.Clock
 	mediaDir string
@@ -258,6 +264,20 @@ func (r *micRecorder) Record(ctx context.Context, d time.Duration) (calibrate.Re
 	frames := int(d/framePeriod) + 1
 	mono := make([]float32, 0, frames*stream.FrameSamples)
 	buf := make([]byte, stream.FrameBytes)
+
+	// drain and discard the capture-open transient before measuring.
+	preroll := int(time.Duration(capturePrerollMs)*time.Millisecond/framePeriod) + 1
+	for f := 0; f < preroll; f++ {
+		select {
+		case <-ctx.Done():
+			return calibrate.Recording{}, ctx.Err()
+		default:
+		}
+		if err := src.ReadFrame(buf); err != nil {
+			return calibrate.Recording{}, fmt.Errorf("calibrate: capture ended during warmup")
+		}
+	}
+
 	var t0 int64
 	stamped := false
 	for f := 0; f < frames; f++ {
