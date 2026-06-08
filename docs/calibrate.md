@@ -3,7 +3,9 @@
 A mode that **measures each node's real output delay with a microphone** and
 sets its `outputDelayMs` automatically, so every speaker in a group is
 phase-aligned at the listening position — no more guessing with the manual
-slider. Status: **design spec** (not yet implemented).
+slider. Status: **implemented** (`internal/calibrate` + `POST /api/calibrate`;
+see [DECISIONS D48](arch/DECISIONS.md)). The per-node volume-ramp attribution
+(§4) and a lower-latency capture path remain follow-ups for very noisy rooms.
 
 ---
 

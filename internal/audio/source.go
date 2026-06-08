@@ -46,9 +46,10 @@ type Source interface {
 type constructor func(ctx context.Context, uri, mediaDir string) (Source, error)
 
 var registry = map[string]constructor{
-	SchemeFile:  openFile,
-	SchemeHTTP:  openHTTP, // serves both http: and https:
-	SchemeInput: openInput,
+	SchemeFile:      openFile,
+	SchemeHTTP:      openHTTP, // serves both http: and https:
+	SchemeInput:     openInput,
+	SchemeCalibrate: openCalibrate,
 }
 
 // Open parses uri's scheme and constructs the matching Source (D26). For a bare
@@ -77,6 +78,8 @@ func schemeOf(uri string) string {
 		return SchemeHTTP
 	case "input":
 		return SchemeInput
+	case "calibrate":
+		return SchemeCalibrate
 	}
 	// A bare relative path that happens to contain a colon is rare; if the
 	// prefix isn't a known scheme word, treat it as an unsupported scheme so

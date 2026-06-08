@@ -575,6 +575,48 @@ removed, now keyed correctly by self).
   group with its last codec/transport/bufferMs instead of cluster defaults
   (spec §4/§8.4 updated). (C/H/I/J)
 
+**D48 — acoustic auto-calibration is implemented (docs/calibrate.md)**: a mic
+node measures every group member's output delay and writes their `outputDelayMs`
+(D36). Key implementation decisions:
+
+- **Relative alignment, not absolute.** The solver only needs pairwise delay
+  DIFFERENCES (the common `K` in `outputDelayMs[n] = D[n] + K` absorbs any shared
+  offset, §5). So each node's sweep arrival is stamped in master-clock time and
+  reduced to a loop-phase delay referenced to the first measured node, then
+  unwrapped into one period. This makes the **constant mic-capture-pipe latency
+  cancel** (same mic, fresh capture per node) — we never need to know the
+  reference's absolute emit pts, only that the loop is periodic in master time.
+
+- **The reference is a source scheme, not a media file.** `calibrate:` is a new
+  `audio.Open` scheme (`internal/audio/calibrate_src.go`) that loops the windowed
+  log-sweep forever (live-paced, never EOF). The master streams it like any
+  source via `group.Play("calibrate:")`. The signal is generated from the SAME
+  `calibrate.NewReference(default)` the estimator correlates against — that
+  identity is what makes the matched filter exact.
+
+- **Pure core, injected edges.** `internal/calibrate` is I/O-free: sweep gen,
+  matched-filter estimator (energy-normalised, parabolic sub-sample, per-loop
+  median + peak-to-sidelobe confidence), §5 solve, and a `Run` state machine over
+  `Controller`/`Recorder` interfaces. The API layer wires the real
+  `Controller` (drives `/api/play|stop` on the master and `PATCH /api/node`
+  volume/delay on each member through a peer HTTP client — reusing existing
+  endpoints, no new per-node mutation logic) and `Recorder` (the `input:` source
+  + clock follower). Fully unit-tested with a synthetic rig.
+
+- **API/UI.** `POST /api/calibrate` starts a run on the mic node (needs the
+  `input` capability, a synced clock, and ≥2 alive members), `GET /api/calibrate`
+  reports live progress + the result table; the UI polls it. The group card's
+  Advanced settings carries a microphone selector (group members with `input`)
+  and a Calibrate button. Run is all-or-nothing on the delay set, always restores
+  pre-run volumes and stops the reference on exit, and low-confidence nodes keep
+  their prior delay (§7).
+
+- **Known limit (deferred to on-hardware iteration).** The mic timeline anchors
+  on the first captured frame's clock stamp; the `input:` live reader buffers, so
+  absolute capture latency is approximate — fine because it cancels in the
+  relative solve, but the per-node envelope-ramp attribution (§4) and a smaller
+  capture buffer are follow-ups for very noisy rooms. (D/E/F/I/J)
+
 ## Confirmed as designed (no change)
 
 - C's two-mutex exception (doc + liveness) with a never-hold-both rule. (C)

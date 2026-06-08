@@ -15,6 +15,7 @@
   import EditableText from "./EditableText.svelte";
   import PlaybackBar from "./PlaybackBar.svelte";
   import MemberRow from "./MemberRow.svelte";
+  import Calibrate from "./Calibrate.svelte";
 
   let { group, snapshot, self, selected = false, onselect } = $props();
 
@@ -284,13 +285,7 @@
             {/each}
           {/if}
         </select>
-        <button
-          class="btn"
-          disabled={!micNodeId}
-          title="acoustic auto-calibration (coming soon)"
-        >
-          Calibrate…
-        </button>
+        <Calibrate {micNodeId} />
       </div>
     </div>
   </details>

@@ -66,7 +66,7 @@ func (o Options) withDefaults() Options {
 		o.Volume = 0.8
 	}
 	if o.Loops <= 0 {
-		o.Loops = 6
+		o.Loops = 4
 	}
 	if o.SettleMs <= 0 {
 		o.SettleMs = 400
