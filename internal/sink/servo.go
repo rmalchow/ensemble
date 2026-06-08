@@ -19,11 +19,11 @@ func defaultServoConfig() servoConfig {
 	return servoConfig{
 		WarmUp:   3_000_000_000, // 3 s: let the device queue fill and the EMA settle
 		QueueTau: 2_000_000_000, // 2 s: smooths the Pi's ±10ms snd_pcm_delay jitter
-		Kq:       1.5, // loop time-constant ~13s (rate error integrates into
+		Kq:       1.5,           // loop time-constant ~13s (rate error integrates into
 		//                queue depth only slowly); the SlewPPM limit below is
 		//                the real noise filter, so a brisk Kq is safe.
-		ClampPPM: 300,           // ±0.03% — covers any real crystal; inaudible
-		SlewPPM:  30,            // ppm/s — gentle, no audible rate steps
+		ClampPPM: 300, // ±0.03% — covers any real crystal; inaudible
+		SlewPPM:  30,  // ppm/s — gentle, no audible rate steps
 	}
 }
 

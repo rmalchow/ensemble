@@ -45,6 +45,7 @@ type execBackend struct {
 	log      *slog.Logger
 	once     sync.Once
 	mu       sync.Mutex
+	closed   bool
 }
 
 func newExecBackend(log *slog.Logger) (*execBackend, error) {
@@ -83,15 +84,21 @@ func (b *execBackend) spawnLocked() error {
 func (b *execBackend) Flush() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.cmd != nil {
+	if b.closed {
+		return // shutting down: do not respawn a player (avoids the nil
+		//        b.in deref Close() left behind, and zombie players)
+	}
+	if b.in != nil {
 		_ = b.in.Close()
+	}
+	if b.cmd != nil && b.cmd.Process != nil {
 		_ = b.cmd.Process.Kill()
 		_, _ = b.cmd.Process.Wait()
 	}
+	b.cmd, b.in = nil, nil
 	if err := b.spawnLocked(); err != nil {
 		b.log.Warn("exec backend respawn after flush failed", "err", err)
-		b.cmd = nil
-		b.in = nil
+		b.cmd, b.in = nil, nil
 	}
 }
 
@@ -115,19 +122,27 @@ func (b *execBackend) Close() error {
 	var ret error
 	b.once.Do(func() {
 		b.mu.Lock()
+		b.closed = true // stop any concurrent Flush from respawning
 		in := b.in
+		cmd := b.cmd
 		b.in = nil
+		b.cmd = nil
 		b.mu.Unlock()
 		if in != nil {
 			_ = in.Close()
 		}
+		if cmd == nil {
+			return
+		}
 		done := make(chan error, 1)
-		go func() { done <- b.cmd.Wait() }()
+		go func() { done <- cmd.Wait() }()
 		select {
 		case err := <-done:
 			ret = err
 		case <-time.After(time.Second):
-			_ = b.cmd.Process.Kill()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			<-done
 		}
 	})

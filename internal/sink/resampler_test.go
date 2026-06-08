@@ -134,8 +134,8 @@ func TestResamplerStereoIndependence(t *testing.T) {
 	in := makeFrame(func(i int) (int16, int16) {
 		return int16(i % 500), int16(-(i % 500))
 	})
-	r.process(in)            // frame 0 → silence
-	out := r.process(in)     // frame 1 → frame 0 (this same input) delayed
+	r.process(in)        // frame 0 → silence
+	out := r.process(in) // frame 1 → frame 0 (this same input) delayed
 	for i := 0; i < stream.FrameSamples; i++ {
 		ol, or := sampleLR(out, i)
 		if ol != int16(i%500) || or != int16(-(i%500)) {
