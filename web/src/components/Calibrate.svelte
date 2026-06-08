@@ -5,7 +5,7 @@
   // member and writes their output delays.
   import { startCalibrate, getCalibrate } from "../lib/api.js";
 
-  let { micNodeId } = $props();
+  let { micNodeId, micDevice = "" } = $props();
 
   let status = $state(null);
   let busy = $state(false);
@@ -16,7 +16,7 @@
     if (!micNodeId || busy) return;
     busy = true;
     try {
-      status = await startCalibrate(micNodeId, {});
+      status = await startCalibrate(micNodeId, { micDevice });
       await poll();
     } catch {
       // toast shown by api.js; leave any prior status visible

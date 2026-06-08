@@ -31,6 +31,7 @@ type NodeRecord struct {
 	OutputDelayMs int                      `json:"outputDelayMs"` // hardware latency calibration, ±500 (D36)
 	OutputDevice  string                   `json:"outputDevice"`  // selected ALSA device id (D37)
 	OutputDevices []contracts.OutputDevice `json:"outputDevices"` // enumerated devices on this node (D37)
+	InputDevices  []contracts.InputDevice  `json:"inputDevices"`  // enumerated capture devices on this node (D48)
 	Addrs         []string                 `json:"addrs"`         // self-reported CIDRs (§3.1)
 	HTTPPort      int                      `json:"httpPort"`
 	StreamPort    int                      `json:"streamPort"`
@@ -211,6 +212,9 @@ func cloneNode(r *NodeRecord) *NodeRecord {
 	}
 	if r.OutputDevices != nil {
 		cp.OutputDevices = append([]contracts.OutputDevice(nil), r.OutputDevices...)
+	}
+	if r.InputDevices != nil {
+		cp.InputDevices = append([]contracts.InputDevice(nil), r.InputDevices...)
 	}
 	if r.Disabled != nil {
 		cp.Disabled = append([]string(nil), r.Disabled...)

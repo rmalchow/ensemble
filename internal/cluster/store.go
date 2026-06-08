@@ -54,6 +54,7 @@ func nodeView(nid id.ID, r *NodeRecord, alive map[id.ID]bool, seen map[id.ID]int
 		OutputDelayMs: r.OutputDelayMs,
 		OutputDevice:  r.OutputDevice,
 		OutputDevices: append([]contracts.OutputDevice(nil), r.OutputDevices...),
+		InputDevices:  append([]contracts.InputDevice(nil), r.InputDevices...),
 		Addrs:         append([]string(nil), r.Addrs...),
 		HTTPPort:      r.HTTPPort,
 		StreamPort:    r.StreamPort,

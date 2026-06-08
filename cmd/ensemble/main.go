@@ -251,6 +251,11 @@ func run(ctx context.Context, opt options) (rerr error) {
 	outputDevices := sink.ListOutputDevices()
 	log.Info("output devices", "devices", deviceIDs(outputDevices))
 
+	// 4c. Capture-device enumeration (D48): PipeWire sources or ALSA capture PCMs,
+	//     offered as a microphone for calibration and `input:` playback.
+	inputDevices := audio.ListInputDevices()
+	log.Info("input devices", "count", len(inputDevices))
+
 	// 5. UDP mux over STREAM_PORT (not yet Run).
 	mux := stream.NewMux(streamUDP, base)
 
@@ -280,6 +285,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 		OutputDelayMs:    cfg.OutputDelayMs,
 		OutputDevice:     cfg.OutputDevice,
 		OutputDevices:    outputDevices,
+		InputDevices:     inputDevices,
 		Caps:             caps,
 		Disabled:         cfg.Disabled,
 		InitialFollowing: cfg.Following, // D45: rejoin previous group on return

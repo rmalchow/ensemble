@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 
 	"ensemble/internal/stream"
 )
@@ -18,15 +19,24 @@ type inputSource struct {
 }
 
 // openInput starts a capture subprocess emitting raw 48 kHz stereo s16le on
-// stdout and frames it live-paced.
-func openInput(ctx context.Context, _, _ string) (Source, error) {
+// stdout and frames it live-paced. The URI may name a capture device after the
+// scheme — "input:" = system default, "input:<dev>" selects a specific source
+// (a PipeWire source node name for pw-record, or an ALSA "hw:C,D" for arecord;
+// see ListInputDevices). Everything after the first colon is the device, so an
+// ALSA "hw:1,0" passes through intact.
+func openInput(ctx context.Context, uri, _ string) (Source, error) {
+	device := ""
+	if i := strings.IndexByte(uri, ':'); i >= 0 {
+		device = strings.TrimSpace(uri[i+1:])
+	}
+
 	bin := findCaptureBinary()
 	if bin == "" {
 		return nil, fmt.Errorf("%w: no capture backend (pw-record/arecord)", ErrBadMedia)
 	}
 
 	cctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(cctx, bin, captureArgs(bin)...)
+	cmd := exec.CommandContext(cctx, bin, captureArgs(bin, device)...)
 	cmd.Cancel = func() error { return cmd.Process.Kill() }
 
 	stdout, err := cmd.StdoutPipe()
@@ -52,12 +62,22 @@ func openInput(ctx context.Context, _, _ string) (Source, error) {
 }
 
 // captureArgs builds the argv for the capture tool to emit raw s16le 48k stereo.
-func captureArgs(bin string) []string {
+// A non-empty device selects a specific source: arecord takes "-D <hw:C,D>";
+// pw-record links to a "--target <node>".
+func captureArgs(bin, device string) []string {
 	switch baseName(bin) {
 	case "arecord":
-		return []string{"-f", "S16_LE", "-r", "48000", "-c", "2", "-t", "raw", "-"}
+		args := []string{"-f", "S16_LE", "-r", "48000", "-c", "2", "-t", "raw"}
+		if device != "" {
+			args = append(args, "-D", device)
+		}
+		return append(args, "-")
 	default: // pw-record and look-alikes
-		return []string{"--rate", "48000", "--channels", "2", "--format", "s16", "-"}
+		args := []string{"--rate", "48000", "--channels", "2", "--format", "s16"}
+		if device != "" {
+			args = append(args, "--target", device)
+		}
+		return append(args, "-")
 	}
 }
 

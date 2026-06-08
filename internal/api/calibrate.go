@@ -27,6 +27,9 @@ import (
 type CalibStartReq struct {
 	Volume float64 `json:"volume,omitempty"` // isolation level (default 0.8)
 	Loops  int     `json:"loops,omitempty"`  // loop periods per node (default 6)
+	// MicDevice selects the capture device on the mic node ("" = system default;
+	// an InputDevice ID from the snapshot otherwise, D48).
+	MicDevice string `json:"micDevice,omitempty"`
 }
 
 // CalibNode is one node's row in the calibration status.
@@ -134,7 +137,7 @@ func (s *Server) handleStartCalibrate(c echo.Context) error {
 	}
 
 	ctrl := &calibController{client: s.peerClient(), master: master}
-	rec := &micRecorder{clock: s.cfg.Clock, mediaDir: s.cfg.MediaDir}
+	rec := &micRecorder{clock: s.cfg.Clock, mediaDir: s.cfg.MediaDir, device: req.MicDevice}
 
 	go s.runCalibration(plan, opt, ctrl, rec, names)
 
@@ -236,6 +239,7 @@ func (c *calibController) SetOutputDelay(ctx context.Context, node id.ID, ms int
 type micRecorder struct {
 	clock    contracts.Clock
 	mediaDir string
+	device   string // capture device id ("" = system default)
 }
 
 // Record opens a fresh input capture (discarding any stale buffered audio),
@@ -244,7 +248,7 @@ type micRecorder struct {
 // constant across nodes (same mic, same fresh-open), so it cancels in the
 // pairwise differences the solver uses (docs/calibrate.md §4).
 func (r *micRecorder) Record(ctx context.Context, d time.Duration) (calibrate.Recording, error) {
-	src, err := audio.Open(ctx, "input:", r.mediaDir)
+	src, err := audio.Open(ctx, "input:"+r.device, r.mediaDir)
 	if err != nil {
 		return calibrate.Recording{}, err
 	}

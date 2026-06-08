@@ -32,6 +32,16 @@ type OutputDevice struct {
 	Desc string `json:"desc"`
 }
 
+// InputDevice is one enumerated capture device (D48). ID is what the capture
+// tool selects ("" = system default; a PipeWire source node name for pw-record,
+// or an ALSA "hw:C,D" for arecord); Desc is a human label. Enumerated once at
+// startup and reported per node so the UI can pick a microphone for calibration
+// or for playing an `input:` source.
+type InputDevice struct {
+	ID   string `json:"id"`
+	Desc string `json:"desc"`
+}
+
 // DelayReporter is an OPTIONAL Backend extension (type-asserted by the rate
 // servo in E, §8.5): the exact amount of queued audio between a Write and the
 // speaker, in nanoseconds. alsa implements it (snd_pcm_delay); exec/null/file
@@ -142,6 +152,7 @@ type NodeView struct {
 	OutputDelayMs int                `json:"outputDelayMs"` // hardware latency calibration (D36)
 	OutputDevice  string             `json:"outputDevice"`  // selected ALSA device id (D37); "default" by default
 	OutputDevices []OutputDevice     `json:"outputDevices"` // enumerated devices on this node (D37); empty when none
+	InputDevices  []InputDevice      `json:"inputDevices"`  // enumerated capture devices for calibration (D48); empty when none
 	Addrs         []string           `json:"addrs"`         // self-reported CIDRs
 	HTTPPort      int                `json:"httpPort"`
 	StreamPort    int                `json:"streamPort"`

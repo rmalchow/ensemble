@@ -49,6 +49,15 @@
   let canInput = $derived(sources.includes("input"));
   let urlValid = $derived(/^https?:\/\/\S+/.test(url.trim()));
 
+  // capture devices on the picked node (D48): pick which input to play. "" =
+  // system default.
+  let inputDevices = $derived(picked?.inputDevices ?? []);
+  let inputDeviceId = $state("");
+  $effect(() => {
+    const ids = inputDevices.map((d) => d.id);
+    if (!ids.includes(inputDeviceId)) inputDeviceId = inputDevices.length ? inputDevices[0].id : "";
+  });
+
   // directory view derived from the flat file list + current dir (pure, tree.js).
   let view = $derived(entriesFor(files, dir));
   let trail = $derived(crumbs(dir));
@@ -91,7 +100,7 @@
     if (urlValid) playHere(url.trim());
   }
   function playInput() {
-    playHere("input:");
+    playHere("input:" + inputDeviceId);
   }
 
   function enter(folder) {
@@ -135,7 +144,14 @@
     {/if}
 
     {#if canInput}
-      <div class="row" style="margin-bottom: 8px;">
+      <div class="row wrap" style="margin-bottom: 8px;">
+        {#if inputDevices.length > 0}
+          <select bind:value={inputDeviceId} aria-label="input device" title="capture device">
+            {#each inputDevices as d (d.id)}
+              <option value={d.id}>{d.desc}</option>
+            {/each}
+          </select>
+        {/if}
         <button class="btn" onclick={playInput}>Input (line-in / mic)</button>
       </div>
     {/if}

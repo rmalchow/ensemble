@@ -161,6 +161,16 @@
     if (!ids.includes(micNodeId)) micNodeId = ids[0] || "";
   });
 
+  // capture devices enumerated on the chosen mic node (D48). "" = system default.
+  let micDevices = $derived(
+    members.find((m) => m.id === micNodeId)?.inputDevices ?? [],
+  );
+  let micDeviceId = $state("");
+  $effect(() => {
+    const ids = micDevices.map((d) => d.id);
+    if (!ids.includes(micDeviceId)) micDeviceId = micDevices.length ? micDevices[0].id : "";
+  });
+
   // alive nodes not already in this group → "Add node…" select.
   let candidates = $derived(addTargets(snapshot, group));
 
@@ -270,10 +280,10 @@
       </div>
 
       <span class="lbl">Calibration</span>
-      <div class="ctl">
+      <div class="ctl stack">
         <select
           bind:value={micNodeId}
-          aria-label="calibration microphone"
+          aria-label="calibration microphone node"
           title="node whose microphone records the calibration sweep"
           disabled={micNodes.length === 0}
         >
@@ -285,7 +295,21 @@
             {/each}
           {/if}
         </select>
-        <Calibrate {micNodeId} />
+        <select
+          bind:value={micDeviceId}
+          aria-label="calibration input device"
+          title="which capture device on the mic node to record from"
+          disabled={!micNodeId || micDevices.length === 0}
+        >
+          {#if micDevices.length === 0}
+            <option value="">system default</option>
+          {:else}
+            {#each micDevices as d (d.id)}
+              <option value={d.id}>{d.desc}</option>
+            {/each}
+          {/if}
+        </select>
+        <Calibrate {micNodeId} micDevice={micDeviceId} />
       </div>
     </div>
   </details>
@@ -356,6 +380,12 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+  }
+  /* calibration stacks node + device pickers above the button/results */
+  .settings-grid .ctl.stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
   }
   .settings-grid select {
     font: inherit;
