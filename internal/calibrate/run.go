@@ -64,7 +64,9 @@ func (o Options) withDefaults() Options {
 		o.Ref = NewReference(Config{})
 	}
 	if o.Volume <= 0 {
-		o.Volume = 0.8
+		// loud as the node allows for SNR on distant speakers; the reference
+		// itself is at 0.7 amplitude so there is headroom before clipping.
+		o.Volume = 1.0
 	}
 	if o.Loops <= 0 {
 		o.Loops = 8
