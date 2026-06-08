@@ -27,17 +27,19 @@ type Config struct {
 	Amplitude  float64 // peak sample amplitude in [0,1]
 }
 
-// DefaultConfig is the calibration signal used in practice: a 100 ms 500 Hz→
-// 8 kHz sweep looped every 500 ms at half scale, with 5 ms raised-cosine edges.
+// DefaultConfig is the calibration signal used in practice: a 200 ms 500 Hz→
+// 8 kHz sweep looped every 1000 ms at high scale, with 5 ms raised-cosine edges.
+// The longer sweep raises matched-filter gain (better SNR in a real room); the
+// 1 s period gives a clear gap between repeats.
 func DefaultConfig() Config {
 	return Config{
 		SampleRate: stream.SampleRate,
 		F0:         500,
 		F1:         8000,
-		SweepMs:    100,
-		PeriodMs:   500,
+		SweepMs:    200,
+		PeriodMs:   1000,
 		WindowMs:   5,
-		Amplitude:  0.5,
+		Amplitude:  0.7,
 	}
 }
 

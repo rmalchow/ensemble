@@ -52,8 +52,9 @@ type Plan struct {
 type Options struct {
 	Ref           *Reference // reference signal (default DefaultConfig)
 	Volume        float64    // isolation level for the node under test (default 0.8)
-	Loops         int        // loop periods recorded per node (default 6)
-	SettleMs      int        // wait after a volume change before recording (default 400)
+	Loops         int        // loop periods recorded per node (default 8)
+	WarmupMs      int        // wait after starting the reference before any measuring (default 2000)
+	SettleMs      int        // wait after a volume change before recording (default 800)
 	MinConfidence float64    // nodes below this keep their prior delay (default 0.3)
 	MarginMs      float64    // buffer headroom reserved for advance mode (default 20)
 }
@@ -66,13 +67,19 @@ func (o Options) withDefaults() Options {
 		o.Volume = 0.8
 	}
 	if o.Loops <= 0 {
-		o.Loops = 4
+		o.Loops = 8
+	}
+	if o.WarmupMs <= 0 {
+		o.WarmupMs = 2000
 	}
 	if o.SettleMs <= 0 {
-		o.SettleMs = 400
+		o.SettleMs = 800
 	}
 	if o.MinConfidence <= 0 {
-		o.MinConfidence = 0.3
+		// Real acoustic captures top out around 0.3–0.45 normalized correlation
+		// (the room+speaker transfer function colours the sweep), so the bar for
+		// "measured" is modest; cross-loop consistency guards against noise.
+		o.MinConfidence = 0.12
 	}
 	if o.MarginMs <= 0 {
 		o.MarginMs = 20
@@ -145,6 +152,14 @@ func Run(ctx context.Context, ctrl Controller, rec Recorder, plan Plan, opt Opti
 	if err := ctrl.PlayReference(ctx); err != nil {
 		report(Progress{Phase: "error", Message: "play reference: " + err.Error()})
 		return nil, fmt.Errorf("calibrate: play reference: %w", err)
+	}
+
+	// Warm up: let the stream fill, the clock follower sync, and the rate servo
+	// settle before measuring anything — otherwise the first node is measured
+	// during the startup transient.
+	report(Progress{Phase: "start", Total: len(plan.Members), Message: "warming up"})
+	if err := sleep(ctx, time.Duration(opt.WarmupMs)*time.Millisecond); err != nil {
+		return nil, err
 	}
 
 	settle := time.Duration(opt.SettleMs) * time.Millisecond
