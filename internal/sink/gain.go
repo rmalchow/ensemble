@@ -27,6 +27,11 @@ func newGainStage(initial float64) *gainStage {
 	return g
 }
 
+// currentTarget returns the current target gain (for unchanged-guards).
+func (g *gainStage) currentTarget() float64 {
+	return math.Float64frombits(g.target.Load())
+}
+
 // setTarget stores a new target gain atomically (clamped to [0,1]). Lock-free;
 // safe from any goroutine. Takes effect on the next frame via the ramp.
 func (g *gainStage) setTarget(v float64) {

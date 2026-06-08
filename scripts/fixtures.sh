@@ -11,7 +11,7 @@ python3 - "$OUT" <<'PY'
 import struct, sys, math, wave
 
 path = sys.argv[1]
-rate, secs, freq, amp = 48000, 12, 440.0, 0.3
+rate, secs, freq, amp = 48000, 60, 440.0, 0.3
 n = rate * secs
 w = wave.open(path, "wb")
 w.setnchannels(2)
