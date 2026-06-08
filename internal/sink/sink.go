@@ -198,6 +198,9 @@ func (p *Playout) SetBufferMs(ms int) {
 // Lock-free: stores the gain stage's atomic target; the scheduler ramps over the
 // next frame. Safe from any goroutine, no restart, applies on every backend.
 func (p *Playout) SetGain(g float64) {
+	if p.gain.currentTarget() == g {
+		return // unchanged: silence the per-PATCH flood from a dragging slider
+	}
 	p.gain.setTarget(g)
 	p.log.Info("gain changed", "volume", g)
 }
