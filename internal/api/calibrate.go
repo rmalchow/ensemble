@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -248,65 +249,73 @@ type micRecorder struct {
 	device   string // capture device id ("" = system default)
 }
 
-// Record opens a fresh input capture (discarding any stale buffered audio),
-// drains d worth of frames into a mono buffer, and stamps the master-clock time
-// of the first frame. The capture-pipe latency between sound and that stamp is
-// constant across nodes (same mic, same fresh-open), so it cancels in the
-// pairwise differences the solver uses (docs/calibrate.md §4).
+// Record opens a fresh CONTINUOUS raw capture (not the live input: Source, which
+// inserts silence frames when read faster than real time and shreds a recording),
+// discards the capture-open transient, then reads exactly d worth of audio into a
+// mono buffer stamped with the master-clock time of its first sample. The
+// capture-pipe latency between sound and that stamp is constant across nodes
+// (same mic, same fresh-open), so it cancels in the pairwise differences the
+// solver uses (docs/calibrate.md §4).
 func (r *micRecorder) Record(ctx context.Context, d time.Duration) (calibrate.Recording, error) {
-	src, err := audio.Open(ctx, "input:"+r.device, r.mediaDir)
+	cap, err := audio.OpenRawCapture(ctx, r.device)
 	if err != nil {
 		return calibrate.Recording{}, err
 	}
-	defer src.Close()
+	defer cap.Close()
 
-	framePeriod := time.Duration(stream.FrameDuration) * time.Millisecond
-	frames := int(d/framePeriod) + 1
-	mono := make([]float32, 0, frames*stream.FrameSamples)
-	buf := make([]byte, stream.FrameBytes)
+	bytesPerSec := stream.SampleRate * stream.Channels * 2
 
-	// drain and discard the capture-open transient before measuring.
-	preroll := int(time.Duration(capturePrerollMs)*time.Millisecond/framePeriod) + 1
-	for f := 0; f < preroll; f++ {
-		select {
-		case <-ctx.Done():
-			return calibrate.Recording{}, ctx.Err()
-		default:
-		}
-		if err := src.ReadFrame(buf); err != nil {
-			return calibrate.Recording{}, fmt.Errorf("calibrate: capture ended during warmup")
-		}
+	// discard the capture-open transient (a loud clipped pop for ~the first
+	// second on PipeWire/ALSA).
+	prerollBytes := capturePrerollMs * bytesPerSec / 1000
+	if err := discardN(ctx, cap, prerollBytes); err != nil {
+		return calibrate.Recording{}, err
 	}
 
-	var t0 int64
-	stamped := false
-	for f := 0; f < frames; f++ {
-		select {
-		case <-ctx.Done():
-			return calibrate.Recording{}, ctx.Err()
-		default:
-		}
-		if err := src.ReadFrame(buf); err != nil {
-			break
-		}
-		if !stamped {
-			mt, ok := r.clock.LocalToMaster(clock.MonoNow())
-			if !ok {
-				return calibrate.Recording{}, fmt.Errorf("calibrate: clock not synced")
-			}
-			t0, stamped = mt, true
-		}
-		for i := 0; i < stream.FrameSamples; i++ {
-			off := i * stream.Channels * 2
-			l := int16(binary.LittleEndian.Uint16(buf[off:]))
-			rr := int16(binary.LittleEndian.Uint16(buf[off+2:]))
-			mono = append(mono, (float32(l)+float32(rr))*0.5/32768)
-		}
+	// stamp the first kept sample in master time, then read d worth.
+	t0, ok := r.clock.LocalToMaster(clock.MonoNow())
+	if !ok {
+		return calibrate.Recording{}, fmt.Errorf("calibrate: clock not synced")
 	}
-	if !stamped {
-		return calibrate.Recording{}, fmt.Errorf("calibrate: captured no audio")
+	total := int(d.Seconds()*float64(bytesPerSec)) &^ 3 // whole stereo frames
+	raw := make([]byte, total)
+	if _, err := io.ReadFull(cap, raw); err != nil {
+		if err == io.ErrUnexpectedEOF || err == io.EOF {
+			return calibrate.Recording{}, fmt.Errorf("calibrate: capture ended early")
+		}
+		return calibrate.Recording{}, err
+	}
+
+	mono := make([]float32, total/4)
+	for i := range mono {
+		off := i * 4
+		l := int16(binary.LittleEndian.Uint16(raw[off:]))
+		rr := int16(binary.LittleEndian.Uint16(raw[off+2:]))
+		mono[i] = (float32(l) + float32(rr)) * 0.5 / 32768
 	}
 	return calibrate.Recording{Mono: mono, T0Master: t0, SampleRate: stream.SampleRate}, nil
+}
+
+// discardN reads and drops n bytes, honoring ctx cancellation.
+func discardN(ctx context.Context, rd io.Reader, n int) error {
+	buf := make([]byte, 16*1024)
+	for n > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		chunk := len(buf)
+		if chunk > n {
+			chunk = n
+		}
+		m, err := rd.Read(buf[:chunk])
+		n -= m
+		if err != nil {
+			return fmt.Errorf("calibrate: capture ended during warmup: %w", err)
+		}
+	}
+	return nil
 }
 
 // ---- peer HTTP client -------------------------------------------------------

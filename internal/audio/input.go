@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"ensemble/internal/stream"
 )
@@ -59,6 +60,56 @@ func openInput(ctx context.Context, uri, _ string) (Source, error) {
 	}
 	lr := newLiveReader(fr, cancel, cleanup)
 	return &inputSource{liveReader: lr}, nil
+}
+
+// RawCapture is a live raw-PCM capture (48 kHz stereo s16le) straight off the
+// capture tool's stdout, with NO framing and NO silence-on-underflow. The live
+// input: Source inserts a silence frame whenever a frame isn't ready within one
+// frame period — correct for the real-time-paced playback pull, but it shreds a
+// recording read faster than real time (calibration). Recorders read this
+// instead: a plain continuous stream that paces naturally to the capture rate.
+type RawCapture struct {
+	stdout io.ReadCloser
+	cancel context.CancelFunc
+	cmd    *exec.Cmd
+	once   sync.Once
+}
+
+// OpenRawCapture starts the capture subprocess for device ("" = system default)
+// and returns its raw stdout stream. Close stops the subprocess.
+func OpenRawCapture(ctx context.Context, device string) (*RawCapture, error) {
+	bin := findCaptureBinary()
+	if bin == "" {
+		return nil, fmt.Errorf("%w: no capture backend (pw-record/arecord)", ErrBadMedia)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(cctx, bin, captureArgs(bin, device)...)
+	cmd.Cancel = func() error { return cmd.Process.Kill() }
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("%w: capture stdout: %v", ErrBadMedia, err)
+	}
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("%w: capture start: %v", ErrBadMedia, err)
+	}
+	slog.Debug("raw capture started", "comp", "audio", "bin", bin, "device", device)
+	return &RawCapture{stdout: stdout, cancel: cancel, cmd: cmd}, nil
+}
+
+// Read returns raw interleaved s16le bytes; it blocks until data is available,
+// pacing the caller to the real capture rate.
+func (c *RawCapture) Read(p []byte) (int, error) { return c.stdout.Read(p) }
+
+// Close stops the capture subprocess. Idempotent.
+func (c *RawCapture) Close() error {
+	c.once.Do(func() {
+		c.cancel()
+		_ = c.cmd.Wait()
+	})
+	return nil
 }
 
 // captureArgs builds the argv for the capture tool to emit raw s16le 48k stereo.
