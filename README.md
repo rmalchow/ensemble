@@ -90,34 +90,43 @@ Put music in the node's library directory (created on first run):
 ## Using the UI
 
 Every node serves the same app; it talks to its own node and proxies to the
-others, so it doesn't matter which one you open. Three sections:
+others, so it doesn't matter which one you open. The landing page is the
+**overview** (groups + media); a **⚙ gear** in the top-right opens the **nodes**
+page.
 
-### Groups
-Each card is a group (one or more rooms playing together).
+### Groups (overview)
+Each card is a group — including **solo** groups of a single node. Click
+anywhere on a card to select it; the Media section below then shows that
+group's **master** library.
 - The **master** is badged; everyone else follows it.
-- Per-member **volume sliders** (live), a **✕** to leave the group, and an
-  **Add node…** dropdown to pull another node in.
+- A **group volume** slider (shown for multi-node groups) scales every member
+  proportionally; each member also has its own live **volume** slider and a
+  **✕** to leave the group. An **Add node…** dropdown pulls another node in.
 - **▶ / ⏸** play/pause and **stop** for the group; the playing track and
   position are shown, with listener/reconnect counts on the master.
-- Per-group **codec** (pcm/opus), **transport** (udp/tcp) and **buffer** (ms).
-  On flaky Wi-Fi, prefer **opus** (small packets) — pcm datagrams fragment.
+- An **Advanced settings** twirl-down (collapsed by default) holds per-group
+  **codec** (pcm/opus), **transport** (udp/tcp), **buffer** (ms), and
+  **Calibrate** (acoustic auto-align, upcoming). On flaky Wi-Fi prefer **opus**
+  (small packets) — pcm datagrams fragment.
 - Click a group's name to rename it. The name is tied to that *set of rooms*,
   so it returns whenever they regroup; unnamed groups show a derived label like
   `kitchen + living room`.
 
-### Nodes
+### Media (overview)
+Defaults to the active group's master library; click a group card to point it at
+that group's master, or pick any node from the dropdown. Browse the library
+(with folders) and hit **Play here** — if that node isn't currently its group's
+master, mastership moves to it first, then it plays to the whole group. There's
+also a field to play an `http(s)://` stream and a button to play the node's
+line-in.
+
+### Nodes (⚙ gear page)
 Every known node: name (click to rename), ID, addresses, ports, and live/stale
 status. Per node you also get a **volume** slider, an **output-delay** slider
 (0–150 ms, to nudge one room earlier/later for perfect alignment), the **output
 device** picker (ALSA hosts), a **♪ test tone** button to check a speaker, and
 **feature toggles** (playback / opus / input — green = on, amber = off,
 dimmed = unavailable on that host).
-
-### Media
-Pick any node, browse its library (with folders), and hit **Play here** — if
-that node isn't currently its group's master, mastership moves to it first, then
-it plays to the whole group. There's also a field to play an `http(s)://` stream
-and a button to play the node's line-in.
 
 ---
 

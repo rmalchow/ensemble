@@ -2,7 +2,7 @@
   // Groups section (J arch §4): one GroupCard per derived group.
   import GroupCard from "../components/GroupCard.svelte";
 
-  let { snapshot, self } = $props();
+  let { snapshot, self, selectedMaster, onselect } = $props();
 
   // named first, then by id.
   let groups = $derived(
@@ -21,7 +21,13 @@
     <div class="empty">No groups yet.</div>
   {:else}
     {#each groups as group (group.id)}
-      <GroupCard {group} {snapshot} {self} />
+      <GroupCard
+        {group}
+        {snapshot}
+        {self}
+        selected={group.id === selectedMaster}
+        {onselect}
+      />
     {/each}
   {/if}
 </section>

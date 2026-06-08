@@ -23,7 +23,30 @@
     cluster.receivedAt > 0 && Date.now() - cluster.receivedAt > 10000,
   );
 
+  // Two pages via hash routing (bulletproof under the embedded SPA — no server
+  // route needed): "" → overview (groups + media), "nodes" → the node list.
+  let route = $state(parseHash());
+  function parseHash() {
+    return location.hash.replace(/^#\/?/, "");
+  }
+  function onHash() {
+    route = parseHash();
+  }
+
+  // Clicking a group card selects it → the Media section below shows that
+  // group's MASTER library. group.id === group.master (D42), so the selected
+  // master id doubles as the selected-group highlight key. selectTick bumps on
+  // every click so re-selecting the same group (after manually changing the
+  // media picker) re-applies it.
+  let selectedMaster = $state("");
+  let selectTick = $state(0);
+  function selectGroup(masterId) {
+    selectedMaster = masterId;
+    selectTick += 1;
+  }
+
   onMount(() => {
+    window.addEventListener("hashchange", onHash);
     (async () => {
       try {
         const s = await getStatus();
@@ -43,7 +66,10 @@
       connect();
     })();
 
-    return () => disconnect();
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      disconnect();
+    };
   });
 </script>
 
@@ -61,10 +87,23 @@
   {#if stale}<span class="muted small">stale</span>{/if}
   <span class="dot {cluster.status}" title={cluster.status}></span>
   <span class="muted small">{cluster.status}</span>
+  {#if route === "nodes"}
+    <a class="iconlink" href="#/" title="Back to groups" aria-label="Back to groups">←</a>
+  {:else}
+    <a class="iconlink" href="#/nodes" title="Nodes" aria-label="Nodes">⚙</a>
+  {/if}
 </header>
 
 <Toast />
 
-<Groups snapshot={cluster.snapshot} {self} />
-<Nodes snapshot={cluster.snapshot} {self} />
-<Media snapshot={cluster.snapshot} {self} />
+{#if route === "nodes"}
+  <Nodes snapshot={cluster.snapshot} {self} />
+{:else}
+  <Groups
+    snapshot={cluster.snapshot}
+    {self}
+    {selectedMaster}
+    onselect={selectGroup}
+  />
+  <Media snapshot={cluster.snapshot} {self} {selectedMaster} {selectTick} />
+{/if}

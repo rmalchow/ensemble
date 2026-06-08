@@ -85,6 +85,21 @@ export function deriveRole(snapshot, selfId, fallback) {
   return "follower";
 }
 
+// activeGroup picks the group the overview's Media section follows by default:
+// a currently-playing group wins; else the group self belongs to; else the
+// first group. Returns undefined only when there are no groups at all.
+export function activeGroup(snapshot, selfId) {
+  const groups = (snapshot && snapshot.groups) || [];
+  if (groups.length === 0) return undefined;
+  const playing = groups.find((g) => g.playback && g.playback.state === "playing");
+  if (playing) return playing;
+  if (selfId) {
+    const mine = groups.find((g) => (g.members || []).includes(selfId));
+    if (mine) return mine;
+  }
+  return groups[0];
+}
+
 // addTargets returns alive nodes that are NOT members of the given group —
 // candidates for the group card's "Add node…" control. Following one onto the
 // group's master folds it into this group (§5.1).

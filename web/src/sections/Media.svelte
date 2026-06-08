@@ -2,12 +2,12 @@
   // Media section (J arch §4): node picker → file list → Play here, plus URL
   // and Input play paths gated on the picked node's reported sources (§6.1).
   import { bytes, relTime } from "../lib/fmt.js";
-  import { nodeById } from "../lib/derive.js";
+  import { nodeById, activeGroup } from "../lib/derive.js";
   import { getMedia, playOnNode } from "../lib/api.js";
   import { cluster } from "../lib/ws.svelte.js";
   import { entriesFor, crumbs, parentDir, joinDir } from "../lib/tree.js";
 
-  let { snapshot, self } = $props();
+  let { snapshot, self, selectedMaster, selectTick } = $props();
 
   let pickedNodeId = $state("");
   let files = $state([]);
@@ -16,9 +16,24 @@
   // current directory within the picked node's media tree ("" == root).
   let dir = $state("");
 
-  // default the picker to self once self id is known.
+  // Clicking a group card (App selectTick bump) points the picker at that
+  // group's MASTER. Tracked by tick so re-selecting the same group re-applies,
+  // while a manual pick from the dropdown below still sticks in between.
+  let appliedTick = -1;
   $effect(() => {
-    if (!pickedNodeId && self.id) pickedNodeId = self.id;
+    if (selectTick !== appliedTick) {
+      appliedTick = selectTick;
+      if (selectedMaster) pickedNodeId = selectedMaster;
+    }
+  });
+
+  // Before any explicit selection, default to the active group's master
+  // (a playing group, else self's group, else the first).
+  $effect(() => {
+    if (!pickedNodeId) {
+      const g = activeGroup(snapshot, self.id);
+      pickedNodeId = (g && g.master) || self.id || "";
+    }
   });
 
   // nodes that can decode local media (non-empty formats).

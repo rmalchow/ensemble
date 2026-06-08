@@ -1,13 +1,12 @@
 <script>
   // One member inside a group card (J arch §4): name, volume, master badge,
-  // source stats (master row only when playing), make-master, leave, join.
-  import { relTime } from "../lib/fmt.js";
+  // source stats (master row only when playing), leave. Grouping a node in is
+  // done from the group's "Add node…" control, not per-member.
   import { renameNode, setVolume, unfollow } from "../lib/api.js";
   import EditableText from "./EditableText.svelte";
   import VolumeSlider from "./VolumeSlider.svelte";
-  import JoinDropdown from "./JoinDropdown.svelte";
 
-  let { member, group, self, snapshot } = $props();
+  let { member, group, self } = $props();
 
   let isThisMaster = $derived(member.id === group.master);
   let solo = $derived(group.members.length <= 1);
@@ -40,14 +39,6 @@
 
   <span class="spacer"></span>
 
-  <span class="muted small">
-    {#if member.alive}
-      {relTime(member.lastSeen)}
-    {:else}
-      offline{#if member.stale}<span class="offline"> · stale</span>{/if}
-    {/if}
-  </span>
-
   {#if !solo}
     <button
       class="btn icon-btn"
@@ -56,7 +47,6 @@
       aria-label="leave group">✕</button
     >
   {/if}
-  <JoinDropdown {member} {snapshot} />
 </div>
 
 <style>
