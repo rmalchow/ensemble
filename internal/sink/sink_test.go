@@ -113,7 +113,7 @@ func newTestPlayout(t *testing.T, clk *fakeClock, be interface {
 		BufferMs: 150,
 		Restart:  restart,
 		Volume:   1.0,
-		Watchdog: 2 * time.Second,
+		Watchdog: 30 * time.Second, // long: only the dedicated watchdog tests want it short (slow CI was tripping it mid-test)
 		now:      clk.nowNs,
 		servoCfg: fastServoCfg(),
 	})
@@ -626,6 +626,12 @@ func TestPlayoutSetDelayOffsetReanchors(t *testing.T) {
 	// Drain ALL initial frames so no stale write races the probe measurement.
 	drainUntil(t, func() bool { return p.Stats().Played >= 5 })
 
+	// Zero the counter immediately before the call: with the buffer drained, the
+	// 2s starvation watchdog can also fire the restart hook on a slow runner
+	// (seen in CI), so isolate the restart SetDelayOffset itself triggers.
+	rmu.Lock()
+	restarts = 0
+	rmu.Unlock()
 	p.SetDelayOffset(int64(50 * time.Millisecond))
 	rmu.Lock()
 	r := restarts
