@@ -14,6 +14,8 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+
+	"ensemble/internal/contracts"
 )
 
 // Config bundles everything the API needs, wired by main (K).
@@ -38,16 +40,23 @@ type Config struct {
 	Ports         PortsResp    // actually-bound ports (§2), surfaced by /api/status
 	Listener      net.Listener // HTTP listener from netx.BindTCP (K owns binding)
 	DistFS        fs.FS        // SPA build FS = web.DistFS (D15)
-	Log           *slog.Logger
+	// Clock is this node's clock follower (F). Acoustic calibration needs it to
+	// stamp mic captures in master time; nil disables the calibrate endpoints.
+	Clock contracts.Clock
+	// MediaDir bounds source resolution; the calibration recorder opens the
+	// local input capture through it.
+	MediaDir string
+	Log      *slog.Logger
 }
 
 // Server is the Echo HTTP server: REST + WebSocket + proxy + SPA.
 type Server struct {
-	e   *echo.Echo
-	cfg Config
-	hub *wsHub
-	spa *spaState
-	log *slog.Logger
+	e     *echo.Echo
+	cfg   Config
+	hub   *wsHub
+	spa   *spaState
+	calib *calibManager
+	log   *slog.Logger
 }
 
 // New builds the server, registers all routes/middleware, and starts the WS
@@ -65,10 +74,11 @@ func New(cfg Config) *Server {
 	e.HTTPErrorHandler = jsonErrorHandler(log)
 
 	s := &Server{
-		e:   e,
-		cfg: cfg,
-		hub: newWSHub(cfg.Cluster, log),
-		log: log,
+		e:     e,
+		cfg:   cfg,
+		hub:   newWSHub(cfg.Cluster, log),
+		calib: &calibManager{},
+		log:   log,
 	}
 
 	// Pre-router: observe (§3.1) + proxy (§9.3) run BEFORE routing so a request
@@ -97,6 +107,8 @@ func New(cfg Config) *Server {
 	g.GET("/group/settings", s.handleGetSettings)
 	g.POST("/group/settings", s.handleSetSettings)
 	g.POST("/tone", s.handleTone)
+	g.POST("/calibrate", s.handleStartCalibrate)
+	g.GET("/calibrate", s.handleGetCalibrate)
 	g.GET("/ws", s.handleWS)
 
 	// SPA: everything not under /api. Registered on the root Echo, last.

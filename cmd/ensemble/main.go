@@ -394,6 +394,8 @@ func run(ctx context.Context, opt options) (rerr error) {
 		},
 		Listener: httpLn,
 		DistFS:   distFS,
+		Clock:    clockFol,
+		MediaDir: cfg.MediaDir,
 		Log:      base,
 	})
 
