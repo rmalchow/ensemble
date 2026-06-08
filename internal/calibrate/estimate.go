@@ -15,39 +15,55 @@ type Estimate struct {
 	Loops      int // number of loop periods that contributed a peak
 }
 
+// maxLoopsScanned caps how many loop repeats contribute to the median (enough
+// for a robust estimate without scanning an arbitrarily long recording).
+const maxLoopsScanned = 8
+
 // EstimateDelay matched-filters the reference sweep against a recording that
 // spans one or more loop periods and returns the median per-loop lag.
 //
-// The recording is assumed to begin aligned to a loop boundary (the orchestrator
-// slices it that way). Each loop window is searched independently for the sweep;
-// the per-loop lags are reduced by their median (robust to a transient that
-// corrupts a single loop) and the spread feeds the confidence. Returns ok=false
-// when no loop yields a usable peak.
+// The recording starts at an ARBITRARY phase relative to the master's loop, so a
+// sweep may straddle a naive period boundary. Instead, a first bounded search
+// over one period-plus-template window locates the strongest occurrence; the
+// remaining loops are then read off the same loop grid (each window holds exactly
+// one full sweep at ~the same lag), giving a median that is robust to a transient
+// corrupting a single loop, with the cross-loop spread feeding the confidence.
+// The bounded first search also keeps the correlation cost ~one period, not the
+// whole recording. Returns ok=false when no loop yields a usable peak.
 func (r *Reference) EstimateDelay(rec []float32) (Estimate, bool) {
 	period := r.Period
-	if period <= 0 || len(rec) < len(r.Sweep) {
+	m := len(r.Sweep)
+	if period <= 0 || m == 0 || len(rec) < m {
 		return Estimate{}, false
 	}
 
-	// Search window inside each period: the sweep may arrive late by up to the
-	// trailing silence, so scan the whole period (minus the template length).
-	var lags []float64
-	var confs []float64
-	for start := 0; start+len(r.Sweep) <= len(rec); start += period {
-		end := start + period
-		if end > len(rec) {
-			end = len(rec)
+	// one period plus the template length guarantees the window contains exactly
+	// one full sweep regardless of phase, and excludes the next loop's repeat
+	// from the search range (so it isn't mistaken for a sidelobe).
+	win := period + m
+	if win > len(rec) {
+		win = len(rec)
+	}
+
+	g, conf, ok := bestLag(rec[:win], r.Sweep)
+	if !ok {
+		return Estimate{}, false
+	}
+	lags := []float64{g}
+	confs := []float64{conf}
+
+	// subsequent loops, aligned to the loop grid anchored at the first window.
+	for k := 1; len(lags) < maxLoopsScanned; k++ {
+		start := k * period
+		if start+win > len(rec) {
+			break
 		}
-		win := rec[start:end]
-		lag, conf, ok := bestLag(win, r.Sweep)
+		lag, c, ok := bestLag(rec[start:start+win], r.Sweep)
 		if !ok {
 			continue
 		}
 		lags = append(lags, lag)
-		confs = append(confs, conf)
-	}
-	if len(lags) == 0 {
-		return Estimate{}, false
+		confs = append(confs, c)
 	}
 
 	med := median(lags)
@@ -59,11 +75,10 @@ func (r *Reference) EstimateDelay(rec []float32) (Estimate, bool) {
 	if oneMs > 0 {
 		consistency = math.Max(0, 1-spread/oneMs)
 	}
-	peakConf := mean(confs)
 
 	return Estimate{
 		LagSamples: med,
-		Confidence: peakConf * consistency,
+		Confidence: mean(confs) * consistency,
 		Loops:      len(lags),
 	}, true
 }
