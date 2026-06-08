@@ -147,6 +147,19 @@
     }, 500);
   }
 
+  // group members that expose a microphone/line-in — the calibration recorder
+  // must be a clock-synced group member (docs/calibrate.md §6).
+  let micNodes = $derived(
+    members.filter((m) => (m.capabilities?.sources ?? []).includes("input")),
+  );
+  let micNodeId = $state("");
+  $effect(() => {
+    // default to the first capable member; keep the selection valid as members
+    // come and go.
+    const ids = micNodes.map((m) => m.id);
+    if (!ids.includes(micNodeId)) micNodeId = ids[0] || "";
+  });
+
   // alive nodes not already in this group → "Add node…" select.
   let candidates = $derived(addTargets(snapshot, group));
 
@@ -221,26 +234,27 @@
 
   <details class="advanced">
     <summary>Advanced settings</summary>
-    <div class="hint settings" title="group stream settings (applied on the master)">
-      <label>
-        codec
+    <div class="settings-grid" title="group stream settings (applied on the master)">
+      <span class="lbl">Codec</span>
+      <div class="ctl">
         <select value={codec} onchange={onCodec} aria-label="codec">
           <option value="pcm">pcm</option>
           <option value="opus">opus</option>
         </select>
-      </label>
-      <span class="dot">·</span>
-      <label>
-        transport
+      </div>
+
+      <span class="lbl">Transport</span>
+      <div class="ctl">
         <select value={transport} onchange={onTransport} aria-label="transport">
           <option value="udp">udp</option>
           <option value="tcp">tcp</option>
         </select>
-      </label>
-      <span class="dot">·</span>
-      <label class="buf">
-        buffer
+      </div>
+
+      <span class="lbl">Buffer</span>
+      <div class="ctl">
         <input
+          class="grow"
           type="range"
           min="50"
           max="500"
@@ -251,12 +265,33 @@
           onpointerup={onBufCommit}
           aria-label="buffer ms"
         />
-        <span class="bufval">{bufMs} ms</span>
-      </label>
-      <span class="dot">·</span>
-      <button class="btn" disabled title="acoustic auto-calibration (coming soon)">
-        Calibrate…
-      </button>
+        <span class="val">{bufMs} ms</span>
+      </div>
+
+      <span class="lbl">Calibration</span>
+      <div class="ctl">
+        <select
+          bind:value={micNodeId}
+          aria-label="calibration microphone"
+          title="node whose microphone records the calibration sweep"
+          disabled={micNodes.length === 0}
+        >
+          {#if micNodes.length === 0}
+            <option value="">no microphone in group</option>
+          {:else}
+            {#each micNodes as m (m.id)}
+              <option value={m.id}>🎤 {m.name}</option>
+            {/each}
+          {/if}
+        </select>
+        <button
+          class="btn"
+          disabled={!micNodeId}
+          title="acoustic auto-calibration (coming soon)"
+        >
+          Calibrate…
+        </button>
+      </div>
     </div>
   </details>
 </div>
@@ -309,35 +344,41 @@
     margin-bottom: 6px;
   }
 
-  /* compact, muted inline controls — keep the settings row small + unobtrusive */
-  .settings {
+  /* roomy two-column settings: label | control, one setting per row */
+  .settings-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    align-items: center;
+    gap: 10px 14px;
+    padding: 2px 2px 4px;
+  }
+  .settings-grid .lbl {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .settings-grid .ctl {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
+    gap: 8px;
+    min-width: 0;
   }
-  .settings label {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .settings .dot {
-    opacity: 0.5;
-  }
-  .settings select {
+  .settings-grid select {
     font: inherit;
     color: inherit;
     background: transparent;
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 4px;
-    padding: 0 2px;
+    padding: 2px 4px;
+    max-width: 14em;
   }
-  .settings .buf input[type="range"] {
-    width: 84px;
-    vertical-align: middle;
+  .settings-grid .ctl .grow {
+    flex: 1;
+    min-width: 0;
   }
-  .settings .bufval {
+  .settings-grid .val {
     min-width: 3.6em;
+    text-align: right;
+    color: var(--muted);
     font-variant-numeric: tabular-nums;
   }
 </style>
