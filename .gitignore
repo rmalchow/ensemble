@@ -16,3 +16,4 @@ web/dist/*
 
 # Audio test fixtures are real committed files despite the format ignores above.
 !internal/audio/testdata/*
+respot

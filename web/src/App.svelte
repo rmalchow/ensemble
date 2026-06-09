@@ -5,7 +5,6 @@
   import { deriveRole } from "./lib/derive.js";
   import Groups from "./sections/Groups.svelte";
   import Nodes from "./sections/Nodes.svelte";
-  import Media from "./sections/Media.svelte";
   import Toast from "./components/Toast.svelte";
 
   // self {id, name, role}; id/name seeded once from GET /api/status. The role
@@ -33,16 +32,12 @@
     route = parseHash();
   }
 
-  // Clicking a group card selects it → the Media section below shows that
-  // group's MASTER library. group.id === group.master (D42), so the selected
-  // master id doubles as the selected-group highlight key. selectTick bumps on
-  // every click so re-selecting the same group (after manually changing the
-  // media picker) re-applies it.
+  // Clicking a group card selects it → that card reveals its operational controls
+  // (assign roster, inline media browser, settings). group.id === group.master
+  // (D42), so the selected master id doubles as the selected-group highlight key.
   let selectedMaster = $state("");
-  let selectTick = $state(0);
   function selectGroup(masterId) {
     selectedMaster = masterId;
-    selectTick += 1;
   }
 
   onMount(() => {
@@ -106,5 +101,4 @@
     {selectedMaster}
     onselect={selectGroup}
   />
-  <Media snapshot={cluster.snapshot} {self} {selectedMaster} {selectTick} />
 {/if}

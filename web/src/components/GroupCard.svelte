@@ -1,34 +1,23 @@
 <script>
-  // One derived group (J arch §4): name, playback bar, members, settings text.
-  import {
-    nodeById,
-    groupLabel,
-    groupNameIsDerived,
-    addTargets,
-  } from "../lib/derive.js";
-  import {
-    renameGroup,
-    assignToGroup,
-    setGroupSettings,
-    nodeSetVolume,
-  } from "../lib/api.js";
-  import EditableText from "./EditableText.svelte";
+  // One derived group (J arch §4): headline, playback bar, members, settings.
+  import { nodeById, nameOf, addTargets, playerZone } from "../lib/derive.js";
+  import { assignToGroup, setGroupSettings, nodeSetVolume } from "../lib/api.js";
   import PlaybackBar from "./PlaybackBar.svelte";
   import MemberRow from "./MemberRow.svelte";
-  import Calibrate from "./Calibrate.svelte";
+  import MediaBrowser from "./MediaBrowser.svelte";
 
   let { group, snapshot, self, selected = false, onselect } = $props();
 
-  // The server resolves the display label (D42): an explicit override or a
-  // DERIVED label from member names. Derived labels render muted/italic; the
-  // editor edits the OVERRIDE (empty when derived), and clearing it (commit
-  // empty) resets back to the derived label.
-  let derived = $derived(groupNameIsDerived(group));
-  let derivedLabel = $derived(groupLabel(group));
-  let override = $derived(derived ? "" : group.name || "");
   // An empty group (no players — an idle zone) serializes members as null; guard it.
   let members = $derived(
     (group.members || []).map((id) => nodeById(snapshot, id)).filter(Boolean),
+  );
+  // Headline = "[master]: [player1] + [player2]" (or "[master]: no players").
+  // Names are NODE names (renamed on the Nodes page, not here). The master labels
+  // the room; the players are its other members.
+  let masterName = $derived(nameOf(snapshot, group.master));
+  let playerNames = $derived(
+    members.filter((m) => m.id !== group.master).map((m) => nameOf(snapshot, m.id)),
   );
   let settings = $derived(group.settings || {});
   let codec = $derived(settings.codec ?? "opus");
@@ -149,41 +138,15 @@
     }, 500);
   }
 
-  // group members that expose a microphone/line-in — the calibration recorder
-  // must be a clock-synced group member (docs/calibrate.md §6).
-  let micNodes = $derived(
-    members.filter((m) => (m.capabilities?.sources ?? []).includes("input")),
-  );
-  let micNodeId = $state("");
-  $effect(() => {
-    // default to the first capable member; keep the selection valid as members
-    // come and go.
-    const ids = micNodes.map((m) => m.id);
-    if (!ids.includes(micNodeId)) micNodeId = ids[0] || "";
-  });
-
-  // capture devices enumerated on the chosen mic node (D48). "" = system default.
-  let micDevices = $derived(
-    members.find((m) => m.id === micNodeId)?.inputDevices ?? [],
-  );
-  let micDeviceId = $state("");
-  $effect(() => {
-    const ids = micDevices.map((d) => d.id);
-    if (!ids.includes(micDeviceId)) micDeviceId = micDevices.length ? micDevices[0].id : "";
-  });
-
-  // alive nodes not already in this group → "Add node…" select.
+  // alive playback nodes not already in this room → the assign roster (chips).
+  // Members of THIS room are NOT here — they show as MemberRows below.
   let candidates = $derived(addTargets(snapshot, group));
 
-  // Adding node X points its player at this group's master. A gossiping node uses
-  // follow (proxy-aware); a non-gossiping playback node is patched master-side
-  // (assignToGroup routes by node.playbackNode). The WS snapshot updates the card.
-  async function onAdd(e) {
-    const nodeId = e.target.value;
-    e.target.value = "";
-    if (!nodeId) return;
-    const node = candidates.find((c) => c.id === nodeId);
-    if (!node) return;
+  // Clicking a chip points that node's player at this group's master. A gossiping
+  // node uses follow (proxy-aware); a non-gossiping playback node is patched
+  // master-side (assignToGroup routes by node.playbackNode). The WS snapshot then
+  // moves it out of its old card and into this one.
+  async function assignNode(node) {
     try {
       await assignToGroup(node, group.master);
     } catch {
@@ -199,36 +162,32 @@
   class:selected
   onclick={() => onselect && onselect(group.master)}
 >
-  <div class="row between">
-    <h3>
-      <EditableText
-        value={override}
-        placeholder={derivedLabel}
-        muted={derived}
-        allowEmpty={true}
-        onsave={(n) => renameGroup(group.id, n)}
-      />
-    </h3>
-  </div>
+  <h3 class="headline" title="{masterName}: {playerNames.join(' + ') || 'no players'}">
+    <span class="master">{masterName}</span><span class="colon">:</span>
+    {#if playerNames.length}
+      <span class="players">{playerNames.join(" + ")}</span>
+    {:else}
+      <em class="noplayers">no players</em>
+    {/if}
+  </h3>
 
   <PlaybackBar {group} />
 
-  {#if members.length > 1}
-    <div class="group-vol" title="group volume — scales every member proportionally">
-      <span class="gv-label">Group volume</span>
-      <input
-        type="range"
-        min="0"
-        max="100"
-        value={gvPct}
-        oninput={onGvInput}
-        onchange={onGvCommit}
-        onpointerup={onGvCommit}
-        aria-label="group volume"
-      />
-      <span class="gv-pct small">{gvPct}%</span>
-    </div>
-  {/if}
+  <div class="group-vol" title="group volume — scales every member proportionally">
+    <span class="gv-label">Group volume</span>
+    <input
+      type="range"
+      min="0"
+      max="100"
+      value={gvPct}
+      disabled={members.length === 0}
+      oninput={onGvInput}
+      onchange={onGvCommit}
+      onpointerup={onGvCommit}
+      aria-label="group volume"
+    />
+    <span class="gv-pct small">{gvPct}%</span>
+  </div>
 
   <div class="members">
     {#each members as member (member.id)}
@@ -236,87 +195,68 @@
     {/each}
   </div>
 
-  {#if candidates.length > 0}
-    <div class="row">
-      <select value="" onchange={onAdd} title="add a player to this room">
-        <option value="">Add player…</option>
+  <!-- Operational controls live only on the SELECTED room (Rams): assigning players,
+       choosing media, and stream settings are focused actions, not glanceable state,
+       so showing them on every card would be N-fold noise. The outline marks it. -->
+  {#if selected}
+    {#if candidates.length > 0}
+      <div class="assign-roster" role="group" aria-label="add a player to this room">
         {#each candidates as c (c.id)}
-          <option value={c.id}>{c.name}</option>
+          {@const zone = playerZone(snapshot, c)}
+          <button
+            class="assign-chip"
+            onclick={() => assignNode(c)}
+            title={zone === "idle"
+              ? `add ${c.name} (idle) to this room`
+              : `move ${c.name} here (currently in ${zone})`}
+          >
+            <span class="ac-name">{c.name}</span>
+            <span class="ac-zone" class:idle={zone === "idle"}>{zone}</span>
+          </button>
         {/each}
-      </select>
-    </div>
+      </div>
+    {/if}
+
+    <MediaBrowser {snapshot} nodeId={group.master} />
+
+    <details class="advanced">
+      <summary>Advanced settings</summary>
+      <div class="settings-grid" title="group stream settings (applied on the master)">
+        <span class="lbl">Codec</span>
+        <div class="ctl">
+          <select value={codec} onchange={onCodec} aria-label="codec">
+            <option value="pcm">pcm</option>
+            <option value="opus">opus</option>
+          </select>
+        </div>
+
+        <span class="lbl">Transport</span>
+        <div class="ctl">
+          <select value={transport} onchange={onTransport} aria-label="transport">
+            <option value="udp">udp</option>
+            <option value="tcp">tcp</option>
+          </select>
+        </div>
+
+        <span class="lbl">Buffer</span>
+        <div class="ctl">
+          <input
+            class="grow"
+            type="range"
+            min="50"
+            max="500"
+            step="25"
+            value={bufMs}
+            oninput={onBufInput}
+            onchange={onBufCommit}
+            onpointerup={onBufCommit}
+            aria-label="buffer ms"
+          />
+          <span class="val">{bufMs} ms</span>
+        </div>
+      </div>
+    </details>
   {/if}
-
-  <details class="advanced">
-    <summary>Advanced settings</summary>
-    <div class="settings-grid" title="group stream settings (applied on the master)">
-      <span class="lbl">Codec</span>
-      <div class="ctl">
-        <select value={codec} onchange={onCodec} aria-label="codec">
-          <option value="pcm">pcm</option>
-          <option value="opus">opus</option>
-        </select>
-      </div>
-
-      <span class="lbl">Transport</span>
-      <div class="ctl">
-        <select value={transport} onchange={onTransport} aria-label="transport">
-          <option value="udp">udp</option>
-          <option value="tcp">tcp</option>
-        </select>
-      </div>
-
-      <span class="lbl">Buffer</span>
-      <div class="ctl">
-        <input
-          class="grow"
-          type="range"
-          min="50"
-          max="500"
-          step="25"
-          value={bufMs}
-          oninput={onBufInput}
-          onchange={onBufCommit}
-          onpointerup={onBufCommit}
-          aria-label="buffer ms"
-        />
-        <span class="val">{bufMs} ms</span>
-      </div>
-
-      <span class="lbl">Calibration</span>
-      <div class="ctl stack">
-        <select
-          bind:value={micNodeId}
-          aria-label="calibration microphone node"
-          title="node whose microphone records the calibration sweep"
-          disabled={micNodes.length === 0}
-        >
-          {#if micNodes.length === 0}
-            <option value="">no microphone in group</option>
-          {:else}
-            {#each micNodes as m (m.id)}
-              <option value={m.id}>🎤 {m.name}</option>
-            {/each}
-          {/if}
-        </select>
-        <select
-          bind:value={micDeviceId}
-          aria-label="calibration input device"
-          title="which capture device on the mic node to record from"
-          disabled={!micNodeId || micDevices.length === 0}
-        >
-          {#if micDevices.length === 0}
-            <option value="">system default</option>
-          {:else}
-            {#each micDevices as d (d.id)}
-              <option value={d.id}>{d.desc}</option>
-            {/each}
-          {/if}
-        </select>
-        <Calibrate {micNodeId} micDevice={micDeviceId} />
-      </div>
-    </div>
-  </details>
 </div>
 
 <style>
@@ -327,13 +267,76 @@
     gap: 8px;
   }
 
-  /* the whole card selects the group (→ Media shows its master's library) */
+  /* the whole card selects the group (→ reveals its roster / media / settings) */
   .group-card {
     cursor: pointer;
   }
   .group-card.selected {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  /* headline: "[master]: [players]" — the room's self-describing label. Node
+     names (renamed on the Nodes page); not editable here. */
+  .headline {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 6px;
+    min-width: 0;
+  }
+  .headline .master {
+    font-weight: 600;
+  }
+  .headline .colon {
+    margin-left: -4px;
+    color: var(--muted);
+  }
+  .headline .players {
+    font-weight: 400;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .headline .noplayers {
+    color: var(--muted);
+  }
+
+  /* assign roster: one muted chip per player NOT in this room (members show as
+     rows above). Click moves a player here; the sub-label says where it is now. */
+  .assign-roster {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .assign-chip {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 3px 9px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--fg);
+    cursor: pointer;
+    line-height: 1.2;
+  }
+  .assign-chip:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .assign-chip .ac-name {
+    font-size: 13px;
+  }
+  .assign-chip .ac-zone {
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .assign-chip .ac-zone.idle {
+    font-style: italic;
+    opacity: 0.7;
   }
 
   /* group volume — a touch more prominent than a member row, full width */
@@ -349,13 +352,20 @@
   .group-vol input[type="range"] {
     flex: 1;
   }
+  /* disabled (a room with no players): dim the whole row */
+  .group-vol:has(input:disabled) {
+    opacity: 0.4;
+  }
+  .group-vol input[type="range"]:disabled {
+    cursor: not-allowed;
+  }
   .group-vol .gv-pct {
     min-width: 2.8em;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
 
-  /* collapsed-by-default advanced section */
+  /* advanced settings: foldable, collapsed by default, inside the selected card */
   .advanced > summary {
     cursor: pointer;
     color: var(--muted);
@@ -384,12 +394,6 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
-  }
-  /* calibration stacks node + device pickers above the button/results */
-  .settings-grid .ctl.stack {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
   }
   .settings-grid select {
     font: inherit;

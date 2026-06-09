@@ -110,3 +110,17 @@ export function addTargets(snapshot, group) {
       !!(n.capabilities && n.capabilities.playback),
   );
 }
+
+// playerZone is a short label of where a candidate player CURRENTLY plays — the
+// annotation under an assign-chip, so the user sees what a click will move. "idle"
+// when its player targets nothing (or only its own empty zone — free to grab);
+// otherwise the label of the group it currently belongs to (a shared/other room).
+export function playerZone(snapshot, node) {
+  if (!node || isIdle(node)) return "idle";
+  const groups = (snapshot && snapshot.groups) || [];
+  const g = groups.find((x) => x.master === node.following);
+  if (!g) return "idle";
+  // its OWN group with no other players is effectively idle/standalone.
+  if (g.master === node.id && (g.members || []).length <= 1) return "idle";
+  return groupLabel(g);
+}

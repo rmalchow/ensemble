@@ -34,6 +34,7 @@ import (
 	"ensemble/internal/playback"
 	"ensemble/internal/sink"
 	"ensemble/internal/source"
+	"ensemble/internal/spotify"
 	"ensemble/internal/stream"
 	"ensemble/web"
 )
@@ -273,8 +274,8 @@ func run(ctx context.Context, opt options) (rerr error) {
 	outputDevices := sink.ListOutputDevices()
 	log.Info("output devices", "devices", deviceIDs(outputDevices))
 
-	// 4c. Capture-device enumeration (D48): PipeWire sources or ALSA capture PCMs,
-	//     offered as a microphone for calibration and `input:` playback.
+	// 4c. Capture-device enumeration: PipeWire sources or ALSA capture PCMs,
+	//     offered as the device for `input:` (line-in) playback.
 	inputDevices := audio.ListInputDevices()
 	log.Info("input devices", "count", len(inputDevices))
 
@@ -429,8 +430,6 @@ func run(ctx context.Context, opt options) (rerr error) {
 		},
 		Listener: httpLn,
 		DistFS:   distFS,
-		Clock:    clockFol,
-		MediaDir: cfg.MediaDir,
 		Log:      base,
 	})
 
@@ -466,6 +465,33 @@ func run(ctx context.Context, opt options) (rerr error) {
 
 	go engine.Run(ctx)
 	stack.push("engine", func(context.Context) error { return engine.Close() })
+
+	// Spotify bridge (D57): if go-librespot/librespot is present — working dir
+	// first, then $PATH — own one Connect device named "ensemble <node>" and
+	// auto-switch THIS node's group to the spotify: source when the phone starts
+	// playing (idle on stop). Phones pick the room via the per-node device name —
+	// the phone is the controller. Pipe audio flows through the bridge into the
+	// spotify: source via SetSpotifyAttach.
+	if bin := audio.FindSpotifyBinary(); bin != "" {
+		sb, err := spotify.New(spotify.Config{
+			BinPath:    bin,
+			DeviceName: "ensemble " + cfg.NodeName,
+			StateDir:   cfg.DataDir,
+			Log:        base,
+			OnPlay:     func() { _ = engine.Play("spotify:") },
+			OnStop:     func() { _ = engine.Stop() },
+		})
+		if err != nil {
+			log.Warn("spotify bridge disabled", "err", err)
+		} else {
+			audio.SetSpotifyAttach(sb.Attach)
+			if err := sb.Run(ctx); err != nil {
+				log.Warn("spotify bridge start failed", "err", err)
+			} else {
+				stack.push("spotify", func(context.Context) error { return sb.Close() })
+			}
+		}
+	}
 
 	// Master-side control driver (D59/D62): drives the non-gossiping playback nodes
 	// assigned to the group THIS node masters, over the control plane. It sends from

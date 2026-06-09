@@ -1,8 +1,8 @@
 <script>
-  // Playback row for a group (J arch §4, D39): a single fixed-shape row — the
-  // currently-playing track (ellipsised, "idle" when stopped) on the left, a
-  // play/pause toggle + stop on the right. The controls keep the SAME width in
-  // every state; only their icon/enabled state changes with availability.
+  // Playback row for a group (J arch §4, D39): a fixed-height band — a state pill,
+  // the source-type icon + currently-playing track, position, and play/pause + stop
+  // on the right. When active it tints (accent band) so the playing room is obvious
+  // at a glance; idle keeps the SAME footprint, just emptier (no reflow either way).
   import { position } from "../lib/fmt.js";
   import { stop, pause, resume } from "../lib/api.js";
 
@@ -13,16 +13,25 @@
   let paused = $derived(pb.state === "paused");
   let active = $derived(playing || paused);
 
-  // a friendly one-line name for the source uri.
+  // a friendly one-line name + a type glyph for the source uri.
   let track = $derived(friendlyTrack(pb.uri));
+  let icon = $derived(iconFor(pb.uri));
   function friendlyTrack(uri) {
     if (!uri) return "";
+    if (uri.startsWith("spotify:")) return "Spotify";
     if (uri.startsWith("input:")) return "line-in";
     if (uri.startsWith("file:")) {
       const p = uri.slice(5);
       return p.split("/").pop() || p;
     }
     return uri; // http(s):// stream — show the url
+  }
+  function iconFor(uri) {
+    if (!uri) return "";
+    if (uri.startsWith("spotify:")) return "🟢";
+    if (uri.startsWith("input:")) return "🎙";
+    if (uri.startsWith("http")) return "📻";
+    return "♪"; // file
   }
 
   async function ontoggle() {
@@ -41,16 +50,16 @@
   }
 </script>
 
-<div class="playbar">
+<div class="playbar" class:active>
+  <span class="state-pill" class:playing class:paused>
+    {active ? (paused ? "paused" : "playing") : "idle"}
+  </span>
+
   <div class="now">
     {#if active}
-      <span class="state {paused ? 'paused' : 'playing'}"
-        >{paused ? "paused" : "playing"}</span
-      >
+      {#if icon}<span class="icon">{icon}</span>{/if}
       <span class="track" title={pb.uri}>{track}</span>
       <span class="pos small">{position(pb.positionSec)}</span>
-    {:else}
-      <span class="muted idle">idle</span>
     {/if}
   </div>
 
@@ -77,14 +86,44 @@
 </div>
 
 <style>
+  /* fixed-height band: identical footprint playing vs idle (no reflow). Tints
+     when active so the playing room is obvious across the wall of cards. */
   .playbar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin: 4px 0 8px;
+    gap: 10px;
+    min-height: 44px;
+    padding: 4px 10px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+  }
+  .playbar.active {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 38%, transparent);
   }
 
-  /* left: fills the row, ellipsises the track so the controls never move */
+  /* state pill — solid + colored so the state reads at a glance */
+  .state-pill {
+    flex: 0 0 auto;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    color: var(--muted);
+  }
+  .state-pill.playing {
+    background: var(--ok);
+    color: #04210f;
+  }
+  .state-pill.paused {
+    background: #f59e0b;
+    color: #2a1900;
+  }
+
+  /* center: icon + track (ellipsised so the controls never move) + position */
   .now {
     flex: 1;
     min-width: 0;
@@ -92,30 +131,22 @@
     align-items: center;
     gap: 8px;
   }
+  .now .icon {
+    flex: 0 0 auto;
+    font-size: 15px;
+  }
   .now .track {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: 14px;
   }
   .now .pos {
     flex: 0 0 auto;
     font-variant-numeric: tabular-nums;
     color: var(--muted);
-  }
-  .now .state {
-    flex: 0 0 auto;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--ok);
-  }
-  .now .state.paused {
-    color: #f59e0b;
-  }
-  .now .idle {
-    font-style: italic;
   }
 
   /* right: two equal-width controls, identical footprint in every state */
@@ -125,10 +156,11 @@
     gap: 6px;
   }
   .controls .ctl {
-    width: 40px;
-    padding: 4px 0;
+    width: 42px;
+    padding: 6px 0;
     text-align: center;
     line-height: 1;
+    font-size: 15px;
   }
   .controls .ctl:disabled {
     opacity: 0.4;

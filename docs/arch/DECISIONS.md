@@ -172,8 +172,8 @@ resampler between the jitter buffer and the backend. Underruns stay silence +
 watchdog → RESTART (starved >2 s → RESTART to the source; still starved →
 unsubscribe, group self-heal takes over). `SinkStats` carries `RatePPM`, `Buffered`.
 
-**D26 — media-source abstraction.** A scheme-keyed factory (`file` / `http` / `input`
-/ `calibrate:` D48) → one `Source` contract (canonical-PCM `ReadFrame(dst)`, `Close`,
+**D26 — media-source abstraction.** A scheme-keyed factory (`file` / `http` / `input`)
+→ one `Source` contract (canonical-PCM `ReadFrame(dst)`, `Close`,
 D9 EOF). Pull-paced (`file`: decode-ahead, EOF ends session) vs live-paced
 (`http`/`input`: never EOF, underflow → the release ticker emits silence, cadence
 never stalls). `input` is exec-capture (`pw-record`/`arecord`). Available schemes are
@@ -371,32 +371,14 @@ rooms a master drives; a master that is also a local player is not yet folded in
 
 ## 8. Acoustic calibration
 
-**D48 — acoustic auto-calibration (`docs/calibrate.md`).** A mic node measures every
-group member's output delay and writes their `outputDelayMs` (D36).
-- **Relative, not absolute.** The §5 solve needs only pairwise delay DIFFERENCES (the
-  shared `K` absorbs any common offset). Each node's sweep arrival is stamped in
-  master-clock time, reduced to a loop-phase delay referenced to the first node, and
-  unwrapped — so the constant mic-capture-pipe latency CANCELS (same mic, fresh capture
-  per node).
-- **The reference is a source scheme, not a file.** `calibrate:`
-  (`internal/audio/calibrate_src.go`) loops a windowed log-sweep forever (live-paced);
-  the master streams it via `group.Play("calibrate:")`. The signal comes from the same
-  `calibrate.NewReference(default)` the estimator correlates against — that identity is
-  what makes the matched filter exact.
-- **Pure core, injected edges.** `internal/calibrate` is I/O-free (sweep gen,
-  energy-normalised matched-filter estimator with parabolic sub-sample + per-loop
-  median + peak-to-sidelobe confidence, §5 solve, a `Run` state machine over
-  `Controller`/`Recorder`). The API layer wires the real `Controller` (drives
-  `/api/play|stop` + `PATCH /api/node` through a peer HTTP client — no new mutation
-  logic) and `Recorder` (the `input:` source + clock follower).
-- **API/UI.** `POST /api/calibrate` starts a run (needs `input`, a synced clock, ≥2
-  alive members); `GET /api/calibrate` reports live progress + the result table.
-  All-or-nothing on the delay set, always restores pre-run volumes, low-confidence
-  nodes keep their prior delay.
-- **Known limit.** The mic timeline anchors on the first captured frame's clock stamp
-  and the `input:` reader buffers, so absolute capture latency is approximate — fine
-  because it cancels in the relative solve; per-node envelope-ramp attribution and a
-  smaller capture buffer are follow-ups for noisy rooms.
+**D48 — acoustic auto-calibration — REMOVED.** A mic-driven auto-measurement of every
+member's output delay (matched-filter log-sweep, relative §5 solve, `calibrate:`
+source scheme, `POST/GET /api/calibrate`, the `internal/calibrate` package and a
+group-card wizard) was implemented and then removed: it was a heavyweight,
+hardware-coupled wizard that earned its place in every room card poorly, and the
+cross-room sync it chased is now handled by the master-driven equalization of D65.
+Per-node latency is still tunable by hand via `outputDelayMs` (D36). The number is
+retained as an anchor; the feature, its API, and `docs/calibrate.md` are gone.
 
 ---
 
@@ -608,7 +590,7 @@ Every decision number, with its home section or what superseded it.
 | D45 | §2 Cluster & grouping |
 | D46 | §9 Playback role split |
 | D47 | §1 Identity |
-| D48 | §8 Acoustic calibration |
+| D48 | §8 — REMOVED (acoustic auto-calibration; superseded for sync by D65) |
 | D49 | §9 Playback role split |
 | D50 | §9 Playback role split |
 | D51 | §9 Playback role split |

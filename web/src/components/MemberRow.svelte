@@ -1,15 +1,13 @@
 <script>
   // One member inside a group card (J arch §4): name, volume, master badge,
-  // source stats (master row only when playing), leave. Grouping a node in is
-  // done from the group's "Add node…" control, not per-member.
-  import { nodeRename, nodeSetVolume, leaveGroup } from "../lib/api.js";
-  import EditableText from "./EditableText.svelte";
+  // source stats (master row only when playing), remove. Renaming a node happens
+  // on the Nodes page, not here; adding one uses the room's assign roster.
+  import { nodeSetVolume, leaveGroup } from "../lib/api.js";
   import VolumeSlider from "./VolumeSlider.svelte";
 
   let { member, group, self } = $props();
 
   let isThisMaster = $derived(member.id === group.master);
-  let solo = $derived((group.members || []).length <= 1);
   let pb = $derived(group.playback || { state: "idle" });
   let src = $derived(pb.source || {});
   let showStats = $derived(isThisMaster && pb.state === "playing");
@@ -18,11 +16,7 @@
 <div class="member">
   <span class="member-id">
     <span class="dot {member.alive ? 'alive' : 'dead'}"></span>
-    <EditableText
-      value={member.name}
-      onsave={(n) => nodeRename(member, n)}
-      placeholder="(unnamed)"
-    />
+    <span class="mname" title={member.name}>{member.name || "(unnamed)"}</span>
     {#if isThisMaster}<span class="badge">master</span>{/if}
     {#if member.id === self.id}<span class="chip">this node</span>{/if}
   </span>
@@ -42,14 +36,12 @@
 
   <span class="spacer"></span>
 
-  {#if !solo}
-    <button
-      class="btn icon-btn"
-      onclick={() => leaveGroup(member)}
-      title="leave group"
-      aria-label="leave group">✕</button
-    >
-  {/if}
+  <button
+    class="btn icon-btn"
+    onclick={() => leaveGroup(member)}
+    title="remove from room"
+    aria-label="remove from room">✕</button
+  >
 </div>
 
 <style>
@@ -62,6 +54,11 @@
     width: 16rem;
     min-width: 16rem;
     overflow: hidden;
+  }
+  .mname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Leave control: icon-only, compact, no text width (Fix 2). */

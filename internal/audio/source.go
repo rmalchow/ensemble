@@ -3,15 +3,18 @@ package audio
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
 // Scheme names (§6.1).
 const (
-	SchemeFile  = "file"  // file:<rel path> or a bare path under MEDIA_DIR
-	SchemeHTTP  = "http"  // http:// or https:// remote stream/file
-	SchemeInput = "input" // input: local capture (line-in/mic), exec-captured
+	SchemeFile    = "file"    // file:<rel path> or a bare path under MEDIA_DIR
+	SchemeHTTP    = "http"    // http:// or https:// remote stream/file
+	SchemeInput   = "input"   // input: local capture (line-in/mic), exec-captured
+	SchemeSpotify = "spotify" // spotify[:<connect name>] — librespot Connect, exec-piped (D57)
 )
 
 // Errors.
@@ -46,10 +49,10 @@ type Source interface {
 type constructor func(ctx context.Context, uri, mediaDir string) (Source, error)
 
 var registry = map[string]constructor{
-	SchemeFile:      openFile,
-	SchemeHTTP:      openHTTP, // serves both http: and https:
-	SchemeInput:     openInput,
-	SchemeCalibrate: openCalibrate,
+	SchemeFile:    openFile,
+	SchemeHTTP:    openHTTP, // serves both http: and https:
+	SchemeInput:   openInput,
+	SchemeSpotify: openSpotify,
 }
 
 // Open parses uri's scheme and constructs the matching Source (D26). For a bare
@@ -78,8 +81,8 @@ func schemeOf(uri string) string {
 		return SchemeHTTP
 	case "input":
 		return SchemeInput
-	case "calibrate":
-		return SchemeCalibrate
+	case "spotify":
+		return SchemeSpotify
 	}
 	// A bare relative path that happens to contain a colon is rare; if the
 	// prefix isn't a known scheme word, treat it as an unsupported scheme so
@@ -90,13 +93,22 @@ func schemeOf(uri string) string {
 // captureBinaries, in probe order, mirror E's exec playback discovery (§6.1).
 var captureBinaries = []string{"pw-record", "arecord"}
 
+// spotifyBinaries, in probe order (D57). `go-librespot` is preferred and is often
+// dropped alongside the ensemble binary, so it is looked up in the WORKING
+// DIRECTORY first, then $PATH; `librespot` (Rust) is the fallback. Both run zeroconf
+// Connect (the phone authenticates + controls) and emit raw PCM over a pipe.
+var spotifyBinaries = []string{"go-librespot", "librespot"}
+
 // Schemes returns the media-source schemes this build can serve (§1, §6.1).
-// file and http are always present; input is reported only when a capture
-// binary is on $PATH.
+// file and http are always present; input and spotify are reported only when their
+// backing binary is on $PATH.
 func Schemes() []string {
 	out := []string{SchemeFile, SchemeHTTP}
 	if findCaptureBinary() != "" {
 		out = append(out, SchemeInput)
+	}
+	if findSpotifyBinary() != "" {
+		out = append(out, SchemeSpotify)
 	}
 	return out
 }
@@ -109,4 +121,33 @@ func findCaptureBinary() string {
 		}
 	}
 	return ""
+}
+
+// findSpotifyBinary returns the first librespot-family binary, checking the working
+// directory first (a binary shipped next to ensemble) then $PATH, or "".
+func findSpotifyBinary() string {
+	for _, b := range spotifyBinaries {
+		if p := localExecutable(b); p != "" {
+			return p
+		}
+		if p, err := exec.LookPath(b); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// localExecutable returns the absolute path of an executable named `name` in the
+// process working directory, or "". (exec needs a path with a separator to run a
+// local binary; LookPath alone would skip the CWD.)
+func localExecutable(name string) string {
+	p := "./" + name
+	fi, err := os.Stat(p)
+	if err != nil || fi.IsDir() || fi.Mode()&0o111 == 0 {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }

@@ -15,8 +15,9 @@ func TestOpenSchemeDispatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	// Unsupported schemes.
-	for _, uri := range []string{"ftp://x/y", "spotify:track:abc"} {
+	// Unsupported schemes. (spotify: is a registered scheme now — D57 — even when
+	// its binary is absent it routes to the spotify source, not ErrUnsupportedScheme.)
+	for _, uri := range []string{"ftp://x/y", "gopher://x"} {
 		if _, err := Open(ctx, uri, dir); !errors.Is(err, ErrUnsupportedScheme) {
 			t.Fatalf("%q err = %v, want ErrUnsupportedScheme", uri, err)
 		}
@@ -79,6 +80,32 @@ func TestSchemesInputDependsOnPath(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("input not advertised with capture binary on PATH")
+	}
+}
+
+func TestSchemesSpotifyDependsOnBinary(t *testing.T) {
+	// Empty PATH + no local binary → no "spotify".
+	t.Setenv("PATH", "")
+	for _, v := range Schemes() {
+		if v == SchemeSpotify {
+			t.Fatalf("spotify advertised with no librespot binary")
+		}
+	}
+
+	// A faked librespot on PATH → "spotify" present (Schemes only LookPaths it).
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "librespot"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	found := false
+	for _, v := range Schemes() {
+		if v == SchemeSpotify {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("spotify not advertised with librespot on PATH")
 	}
 }
 

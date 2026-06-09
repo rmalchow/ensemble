@@ -53,7 +53,7 @@ func openInput(ctx context.Context, uri, _ string) (Source, error) {
 	}
 	slog.Debug("capture started", "comp", "audio", "bin", bin)
 
-	dec := &rawS16Source{r: stdout}
+	dec := &rawS16Source{r: stdout, rate: stream.SampleRate}
 	fr := newFramer(dec)
 	cleanup := func() {
 		_ = cmd.Wait()
@@ -141,15 +141,22 @@ func baseName(p string) string {
 	return p
 }
 
-// rawS16Source reads raw interleaved s16le 48 kHz stereo bytes off a pipe. The
-// resampler is pass-through and there is no mono-dup.
+// rawS16Source reads raw interleaved s16le stereo bytes off a pipe at a declared
+// input rate (the framer resamples to 48 kHz when rate != 48000). There is no
+// mono-dup. Capture (input:) feeds 48 kHz; a Spotify pipe feeds 44.1 kHz.
 type rawS16Source struct {
-	r   io.Reader
-	odd []byte // carry for a partial 4-byte sample-frame
-	eof bool
+	r    io.Reader
+	rate int    // declared input sample rate, Hz (0 → 48000)
+	odd  []byte // carry for a partial 4-byte sample-frame
+	eof  bool
 }
 
-func (s *rawS16Source) info() (int, int) { return stream.SampleRate, stream.Channels }
+func (s *rawS16Source) info() (int, int) {
+	if s.rate <= 0 {
+		return stream.SampleRate, stream.Channels
+	}
+	return s.rate, stream.Channels
+}
 
 func (s *rawS16Source) Close() error { return nil }
 

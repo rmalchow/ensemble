@@ -176,11 +176,3 @@ export function resume(masterId) {
 export function setGroupSettings(masterId, settings) {
   return toasted(req("POST", base(masterId) + "/group/settings", settings));
 }
-
-// --- acoustic calibration (issued ON the mic node) ---
-export function startCalibrate(micNodeId, opts = {}) {
-  return toasted(req("POST", base(micNodeId) + "/calibrate", opts));
-}
-export function getCalibrate(micNodeId) {
-  return req("GET", base(micNodeId) + "/calibrate");
-}

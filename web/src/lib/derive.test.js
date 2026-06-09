@@ -10,6 +10,7 @@ import {
   selfNode,
   addTargets,
   deriveRole,
+  playerZone,
 } from "./derive.js";
 
 const A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -155,5 +156,40 @@ describe("addTargets", () => {
   it("empty for null inputs", () => {
     expect(addTargets(undefined, { members: [] })).toEqual([]);
     expect(addTargets(snap(), null)).toEqual([]);
+  });
+});
+
+describe("playerZone", () => {
+  const D = "dddddddddddddddddddddddddddddddd";
+  function zsnap() {
+    const caps = { capabilities: { playback: true } };
+    return {
+      nodes: [
+        { id: A, name: "alice", alive: true, following: A, ...caps }, // masters Living Room
+        { id: B, name: "bob", alive: true, following: A, ...caps }, // in Living Room
+        { id: C, name: "carol", alive: true, following: ZERO_ID, ...caps }, // idle
+        { id: D, name: "dave", alive: true, following: D, ...caps }, // solo own zone
+      ],
+      groups: [
+        { id: A, master: A, name: "Living Room", members: [A, B], nameDerived: false },
+        { id: D, master: D, name: "dave", members: [D], nameDerived: true },
+      ],
+    };
+  }
+  it("idle when following nothing", () => {
+    expect(playerZone(zsnap(), nodeById(zsnap(), C))).toBe("idle");
+  });
+  it("idle for a solo own zone with no other players", () => {
+    expect(playerZone(zsnap(), nodeById(zsnap(), D))).toBe("idle");
+  });
+  it("names the room a follower currently plays in", () => {
+    expect(playerZone(zsnap(), nodeById(zsnap(), B))).toBe("Living Room");
+  });
+  it("names the room a master currently anchors (has other members)", () => {
+    expect(playerZone(zsnap(), nodeById(zsnap(), A))).toBe("Living Room");
+  });
+  it("idle for null/missing node", () => {
+    expect(playerZone(zsnap(), null)).toBe("idle");
+    expect(playerZone(zsnap(), undefined)).toBe("idle");
   });
 });
