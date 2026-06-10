@@ -134,10 +134,12 @@ docker:
   services:
     - docker:28-dind
   variables:
-    DOCKER_HOST: tcp://docker:2376
-    DOCKER_TLS_CERTDIR: "/certs"
-    DOCKER_TLS_VERIFY: "1"
-    DOCKER_CERT_PATH: "/certs/client"
+    # Plain-TCP dind (no TLS): avoids the shared /certs volume, whose absence on
+    # some runners makes the docker client fail with "open /certs/client/ca.pem:
+    # no such file". The dind socket is only reachable on the runner's private
+    # job network, so unencrypted is acceptable here.
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
     IMAGE: "$CI_REGISTRY_IMAGE"
     PLATFORMS: "linux/amd64,linux/arm64"
   rules:
@@ -146,7 +148,9 @@ docker:
   before_script:
     - mkdir -p ~/.docker
     - cp "${CONFIG_JSON}" ~/.docker/config.json
-    # Register QEMU so the arm64 runtime-stage apt-get runs under emulation, and
+    # Wait for the dind daemon to accept connections before the first command.
+    - for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+    # Register QEMU so the arm64 runtime-stage apk add runs under emulation, and
     # spin up a buildx builder that can emit a multi-platform manifest.
     - docker run --privileged --rm tonistiigi/binfmt --install all
     - docker buildx create --use --name ensemble-builder
