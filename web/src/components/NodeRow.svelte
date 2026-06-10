@@ -185,33 +185,30 @@
 
   <section class="node-section">
     <h4 class="node-section-h">settings</h4>
-    <!-- vol + output-delay only for nodes that actually play (a --role master
-         node has playback:false — no player, no volume/delay). -->
+    <!-- vol + hw-delay only for nodes that actually play (a --role master node
+         has playback:false — no player, no volume/delay). The two sliders share a
+         fixed-width label column so their tracks line up. -->
     {#if caps.playback}
-      <div class="row wrap">
-        <span class="muted small">vol</span>
+      <div class="setting-row">
+        <span class="muted small setting-label">vol</span>
         <VolumeSlider value={node.volume} onchange={(v) => nodeSetVolume(node, v)} />
-        <span class="spacer"></span>
-        <div class="delay">
-          <div class="row small muted delay-ctl">
-            <span>output delay</span>
-            <input
-              type="range"
-              min="0"
-              max="150"
-              step="5"
-              value={delayMs}
-              oninput={onDelayInput}
-              onchange={onDelayCommit}
-              onpointerup={onDelayCommit}
-              aria-label="output delay (ms)"
-            />
-            <span class="delay-val">{delayMs} ms</span>
-          </div>
-          <div class="hint">
-            compensates fixed device latency; causes a brief local restart
-          </div>
-        </div>
+      </div>
+      <div class="setting-row">
+        <span class="muted small setting-label" title="compensates fixed device latency; causes a brief local restart">hw delay</span>
+        <span class="vol">
+          <input
+            type="range"
+            min="0"
+            max="150"
+            step="5"
+            value={delayMs}
+            oninput={onDelayInput}
+            onchange={onDelayCommit}
+            onpointerup={onDelayCommit}
+            aria-label="hw delay (ms)"
+          />
+          <span class="pct small">{delayMs} ms</span>
+        </span>
       </div>
     {/if}
 
@@ -226,7 +223,7 @@
           </select>
         </label>
       {/if}
-      <button class="small" title="play a 1s test tone on this node's output"
+      <button class="btn small" title="play a 1s test tone on this node's output"
         onclick={() => testTone(node.id)}>♪ test tone</button>
     </div>
   </section>
@@ -273,26 +270,27 @@
   .netinfo + .netinfo {
     margin-top: -2px;
   }
-  .delay {
+  /* vol + hw-delay: a fixed label column so both slider tracks start at the same
+     x and span the same width; the value sits in a fixed column on the right. */
+  .setting-row {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 2px;
-  }
-  .delay .hint {
-    text-align: right;
-  }
-  .delay-ctl {
     align-items: center;
-    gap: 6px;
+    gap: 10px;
   }
-  .delay-ctl input[type="range"] {
-    width: 110px;
+  .setting-label {
+    flex: 0 0 4.5rem;
   }
-  .delay-val {
-    min-width: 3.2rem;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
+  .setting-row :global(.vol) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .setting-row :global(.vol input[type="range"]) {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+  }
+  .setting-row :global(.vol .pct) {
+    width: 3.2rem;
   }
   .device {
     gap: 6px;
