@@ -294,8 +294,17 @@ func TestPlayoutSetGainHalves(t *testing.T) {
 		pts := base + int64(s)*stream.FrameNanos
 		p.Push(1, s, pts, audioFrame(v))
 	}
-	if !drainUntil(t, func() bool { return p.Stats().Played >= 8 }) {
-		t.Fatalf("Played=%d", p.Stats().Played)
+	// Wait until all 8 frames are PROCESSED (played, or late-dropped on a starved
+	// runner) — not until all 8 actually play. Real-time pacing drops late frames
+	// under CI scheduling jitter, so requiring Played>=8 was flaky. The gain ramp
+	// settles within one frame, so the last WRITTEN frame is fully halved as long
+	// as ≥2 frames played (the first applied frame ramps; the rest are settled).
+	if !drainUntil(t, func() bool { s := p.Stats(); return s.Played+s.LateDrop >= 8 }) {
+		s := p.Stats()
+		t.Fatalf("frames not all processed: played=%d late=%d", s.Played, s.LateDrop)
+	}
+	if got := p.Stats().Played; got < 2 {
+		t.Fatalf("too few frames played to settle the ramp: played=%d", got)
 	}
 	// A late frame (ramp settled) must be ~halved.
 	last := be.at(be.count() - 1)
