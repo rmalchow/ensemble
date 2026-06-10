@@ -264,8 +264,9 @@ func (b *Bridge) events(ctx context.Context) {
 	}
 }
 
-// spotifyEvent is the go-librespot /events envelope. The "metadata" event carries
-// the full track info (verified against go-librespot 0.7.3 /events).
+// spotifyEvent is the go-librespot /events envelope. Track info rides on the
+// "metadata" event in newer go-librespot AND on the "playing" event in 0.7.3 —
+// we capture it from whichever carries a name (see handleEvent).
 type spotifyEvent struct {
 	Type string `json:"type"`
 	Data struct {
@@ -283,19 +284,10 @@ func (b *Bridge) handleEvent(data []byte) {
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return
 	}
-	switch ev.Type {
-	case "playing":
-		b.log.Info("spotify playing", "track", ev.Data.Name, "artist", firstOf(ev.Data.ArtistNames))
-		if b.cfg.OnPlay != nil {
-			b.cfg.OnPlay()
-		}
-	case "paused", "stopped", "inactive":
-		b.log.Info("spotify stop", "event", ev.Type)
-		if b.cfg.OnStop != nil {
-			b.cfg.OnStop()
-		}
-	case "metadata":
-		b.log.Debug("spotify metadata", "track", ev.Data.Name, "artist", firstOf(ev.Data.ArtistNames))
+	// Capture track metadata from ANY event that carries a name — go-librespot
+	// 0.7.3 puts it on "playing", newer versions also emit a dedicated "metadata"
+	// event. Relying only on "metadata" left the now-playing bar empty on 0.7.3.
+	if ev.Data.Name != "" {
 		b.mu.Lock()
 		b.meta = contracts.TrackMetadata{
 			Title:       ev.Data.Name,
@@ -309,6 +301,20 @@ func (b *Bridge) handleEvent(data []byte) {
 		if b.cfg.OnMetadata != nil {
 			b.cfg.OnMetadata()
 		}
+	}
+	switch ev.Type {
+	case "playing":
+		b.log.Info("spotify playing", "track", ev.Data.Name, "artist", firstOf(ev.Data.ArtistNames))
+		if b.cfg.OnPlay != nil {
+			b.cfg.OnPlay()
+		}
+	case "paused", "stopped", "inactive":
+		b.log.Info("spotify stop", "event", ev.Type)
+		if b.cfg.OnStop != nil {
+			b.cfg.OnStop()
+		}
+	case "metadata":
+		b.log.Debug("spotify metadata", "track", ev.Data.Name, "artist", firstOf(ev.Data.ArtistNames))
 	default:
 		b.log.Debug("spotify event", "type", ev.Type)
 	}

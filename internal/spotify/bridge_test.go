@@ -34,7 +34,22 @@ func TestHandleEventMetadata(t *testing.T) {
 	}
 }
 
-// A non-metadata event (playing) drives OnPlay but does not disturb metadata.
+// go-librespot 0.7.3 carries the track info on the "playing" event — capture it.
+func TestHandleEventPlayingCarriesMetadata(t *testing.T) {
+	fired := 0
+	b := &Bridge{log: slog.Default()}
+	b.cfg.OnMetadata = func() { fired++ }
+	b.handleEvent([]byte(`{"type":"playing","data":{"uri":"spotify:track:x","name":"Song","artist_names":["A"]}}`))
+	md, ok := b.Latest()
+	if !ok || md.Title != "Song" || md.Artist != "A" {
+		t.Fatalf("playing event with a name should set metadata: %+v ok=%v", md, ok)
+	}
+	if fired != 1 {
+		t.Fatalf("OnMetadata fired %d times, want 1", fired)
+	}
+}
+
+// A name-less event (e.g. a bare "playing") drives its callback but sets no metadata.
 func TestHandleEventPlayingNoMetadata(t *testing.T) {
 	played := 0
 	b := &Bridge{log: slog.Default()}
