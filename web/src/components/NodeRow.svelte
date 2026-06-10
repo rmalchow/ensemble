@@ -136,91 +136,100 @@
     </span>
   </div>
 
-  <div class="row wrap small muted netinfo">
-    {cidrList(node.addrs)}
-  </div>
-
-  {#if portList}
+  <section class="node-section">
+    <h4 class="node-section-h">addresses</h4>
     <div class="row wrap small muted netinfo">
-      {portList}
+      {cidrList(node.addrs)}
     </div>
-  {/if}
+    {#if portList}
+      <div class="row wrap small muted netinfo">
+        {portList}
+      </div>
+    {/if}
+  </section>
 
-  <div class="row wrap feature-row">
-    <span class="muted small feat-label">features</span>
-    {#each features as f (f)}
-      {@const st = featState(f)}
-      <button
-        type="button"
-        class="chip feat {st}"
-        disabled={st === "unavailable"}
-        aria-pressed={st === "on"}
-        title={featTitle(f, st)}
-        onclick={() => toggleFeature(f)}
-      >
-        <span class="glyph" aria-hidden="true">{featGlyph(st)}</span>{f}
-      </button>
-    {/each}
-  </div>
+  <section class="node-section">
+    <h4 class="node-section-h">features</h4>
+    <div class="row wrap feature-row">
+      {#each features as f (f)}
+        {@const st = featState(f)}
+        <button
+          type="button"
+          class="chip feat {st}"
+          disabled={st === "unavailable"}
+          aria-pressed={st === "on"}
+          title={featTitle(f, st)}
+          onclick={() => toggleFeature(f)}
+        >
+          <span class="glyph" aria-hidden="true">{featGlyph(st)}</span>{f}
+        </button>
+      {/each}
+    </div>
+    {#if (caps.codecs ?? []).filter((c) => c !== "opus").length || (caps.formats ?? []).length}
+      <div class="row wrap format-row">
+        <span class="muted small feat-label">formats</span>
+        {#each (caps.codecs ?? []).filter((c) => c !== "opus") as c}
+          <span class="chip plain">{c}</span>
+        {/each}
+        {#each caps.formats ?? [] as f}<span class="chip plain">{f}</span>{/each}
+      </div>
+    {/if}
+  </section>
 
   {#if canSpotify}
-    <SpotifyEndpoints {node} {snapshot} />
+    <section class="node-section">
+      <h4 class="node-section-h">spotify endpoints</h4>
+      <SpotifyEndpoints {node} {snapshot} />
+    </section>
   {/if}
 
-  {#if (caps.codecs ?? []).filter((c) => c !== "opus").length || (caps.formats ?? []).length}
-    <div class="row wrap format-row">
-      <span class="muted small feat-label">formats</span>
-      {#each (caps.codecs ?? []).filter((c) => c !== "opus") as c}
-        <span class="chip plain">{c}</span>
-      {/each}
-      {#each caps.formats ?? [] as f}<span class="chip plain">{f}</span>{/each}
-    </div>
-  {/if}
-
-  <!-- Player controls only for nodes that actually play (a --role master node has
-       playback:false — no player, no volume/delay). -->
-  {#if caps.playback}
-    <div class="row wrap">
-      <span class="muted small">vol</span>
-      <VolumeSlider value={node.volume} onchange={(v) => nodeSetVolume(node, v)} />
-      <span class="spacer"></span>
-      <div class="delay">
-        <div class="row small muted delay-ctl">
-          <span>output delay</span>
-          <input
-            type="range"
-            min="0"
-            max="150"
-            step="5"
-            value={delayMs}
-            oninput={onDelayInput}
-            onchange={onDelayCommit}
-            onpointerup={onDelayCommit}
-            aria-label="output delay (ms)"
-          />
-          <span class="delay-val">{delayMs} ms</span>
-        </div>
-        <div class="hint">
-          compensates fixed device latency; causes a brief local restart
+  <section class="node-section">
+    <h4 class="node-section-h">settings</h4>
+    <!-- vol + output-delay only for nodes that actually play (a --role master
+         node has playback:false — no player, no volume/delay). -->
+    {#if caps.playback}
+      <div class="row wrap">
+        <span class="muted small">vol</span>
+        <VolumeSlider value={node.volume} onchange={(v) => nodeSetVolume(node, v)} />
+        <span class="spacer"></span>
+        <div class="delay">
+          <div class="row small muted delay-ctl">
+            <span>output delay</span>
+            <input
+              type="range"
+              min="0"
+              max="150"
+              step="5"
+              value={delayMs}
+              oninput={onDelayInput}
+              onchange={onDelayCommit}
+              onpointerup={onDelayCommit}
+              aria-label="output delay (ms)"
+            />
+            <span class="delay-val">{delayMs} ms</span>
+          </div>
+          <div class="hint">
+            compensates fixed device latency; causes a brief local restart
+          </div>
         </div>
       </div>
-    </div>
-  {/if}
-
-  <div class="row wrap">
-    {#if outputDevices.length > 0}
-      <label class="row small muted device">
-        output device
-        <select value={outputDevice} onchange={onDeviceChange}>
-          {#each outputDevices as d (d.id)}
-            <option value={d.id}>{d.desc} ({d.id})</option>
-          {/each}
-        </select>
-      </label>
     {/if}
-    <button class="small" title="play a 1s test tone on this node's output"
-      onclick={() => testTone(node.id)}>♪ test tone</button>
-  </div>
+
+    <div class="row wrap">
+      {#if outputDevices.length > 0}
+        <label class="row small muted device">
+          output device
+          <select value={outputDevice} onchange={onDeviceChange}>
+            {#each outputDevices as d (d.id)}
+              <option value={d.id}>{d.desc} ({d.id})</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      <button class="small" title="play a 1s test tone on this node's output"
+        onclick={() => testTone(node.id)}>♪ test tone</button>
+    </div>
+  </section>
 </div>
 
 <style>
@@ -229,6 +238,23 @@
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
+  }
+  /* each labeled section is set off by a rule above it + vertical padding, so the
+     card reads as distinct groups (addresses / features / spotify / settings). */
+  .node-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .node-section-h {
+    margin: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
   }
   /* address + port lines: breathing room and comfortable wrap spacing */
   .netinfo {

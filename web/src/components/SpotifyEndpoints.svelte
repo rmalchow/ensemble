@@ -66,9 +66,7 @@
   }
 </script>
 
-<details class="spotify-endpoints">
-  <summary>Spotify endpoints</summary>
-
+<div class="spotify-endpoints">
   <div class="ep default">
     <span class="ep-name">{baseName}</span>
     <span class="muted small">default · plays this node's current group</span>
@@ -107,17 +105,12 @@
   {/each}
 
   <button class="btn add-ep" onclick={addEndpoint}>+ Add endpoint</button>
-</details>
+</div>
 
 <style>
   .spotify-endpoints {
-    margin: 4px 0;
-  }
-  .spotify-endpoints > summary {
-    cursor: pointer;
-    color: var(--muted);
-    font-size: 13px;
-    user-select: none;
+    display: flex;
+    flex-direction: column;
   }
   .ep {
     display: flex;
@@ -155,8 +148,12 @@
     border: 1px solid var(--border);
   }
   .chip.player.on {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    background: #15803d;
+    border-color: #15803d;
+    color: #fff;
+  }
+  .chip.player.on:hover {
+    background: #166534;
   }
   .chip.player .glyph {
     margin-right: 4px;
