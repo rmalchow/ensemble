@@ -152,12 +152,13 @@ func TestGossipAddrPort(t *testing.T) {
 }
 
 func TestTXTRecords(t *testing.T) {
-	// A master (incl. the default/legacy zero-role Config) advertises its ports.
-	cfg := Config{ID: peerID, Master: true, GossipPort: 7946, HTTPPort: 8080, StreamPort: 9090, SourcePort: 9200}
+	// A master (incl. the default/legacy zero-role Config) advertises its name + ports.
+	cfg := Config{ID: peerID, Master: true, Name: "living-room", GossipPort: 7946, HTTPPort: 8080, StreamPort: 9090, SourcePort: 9200}
 	txt := txtRecords(cfg)
 	want := []string{
 		"id=" + peerID.String(),
 		"role=master",
+		"name=living-room",
 		"gossip=7946", "http=8080", "stream=9090", "source=9200",
 	}
 	if len(txt) != len(want) {

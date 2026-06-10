@@ -52,6 +52,7 @@ func parseEntry(e *zeroconfServiceEntry, self id.ID) (Peer, bool) {
 			return Peer{}, false
 		}
 		p.Master = true
+		p.Name = txt["name"] // masters advertise it too (for the mDNS-only Android picker)
 		p.GossipPort, p.HTTPPort, p.StreamPort, p.SourcePort = gossip, http, stream, source
 	case playback:
 		// A playback node must carry a control port; ports/caps follow (D50/D51).

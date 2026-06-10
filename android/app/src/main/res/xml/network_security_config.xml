@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The master serves its UI over plain HTTP on the LAN (no TLS, no auth — trusted
+     network). Android blocks cleartext by default (API 28+), so permit it. This is a
+     LAN admin tool; if you want to tighten it, restrict to your subnet with
+     <domain-config> entries instead of the blanket base-config. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

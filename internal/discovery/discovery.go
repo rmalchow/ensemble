@@ -55,7 +55,7 @@ type Peer struct {
 
 	Master   bool   // role=master: gossips
 	Playback bool   // role=playback: wire-driven, non-gossiping (D50)
-	Name     string // advertised room/speaker name (playback nodes; masters gossip theirs)
+	Name     string // advertised room/speaker name (masters + playback nodes, from TXT)
 
 	// Master fields (zero when !Master).
 	GossipPort int // from TXT "gossip="
@@ -231,7 +231,10 @@ func txtRecords(cfg Config) []string {
 		)
 	}
 	// Master advert (the default for a combined node and any legacy/zero Config).
+	// `name` lets a mDNS-only client (the Android companion app) label masters in its
+	// picker without an extra /api/status round-trip — matching the playback advert.
 	return append(recs,
+		"name="+cfg.Name,
 		"gossip="+strconv.Itoa(cfg.GossipPort),
 		"http="+strconv.Itoa(cfg.HTTPPort),
 		"stream="+strconv.Itoa(cfg.StreamPort),
