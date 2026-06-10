@@ -164,6 +164,9 @@
           <span class="glyph" aria-hidden="true">{featGlyph(st)}</span>{f}
         </button>
       {/each}
+      {#if canSpotify}
+        <span class="chip spotify" title="this node runs go-librespot (Spotify Connect)">spotify</span>
+      {/if}
     </div>
     {#if (caps.codecs ?? []).filter((c) => c !== "opus").length || (caps.formats ?? []).length}
       <div class="row wrap format-row">
@@ -369,5 +372,14 @@
   /* passive format chips: plain, never togglable, default cursor. */
   .chip.plain {
     cursor: default;
+  }
+
+  /* presence badge: this node runs go-librespot (not a toggle), Spotify green. */
+  .chip.spotify {
+    cursor: default;
+    background: #1db954;
+    border: 1px solid #1db954;
+    color: #04210f;
+    font-weight: 600;
   }
 </style>
