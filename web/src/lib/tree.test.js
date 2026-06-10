@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { entriesFor, crumbs, parentDir, joinDir } from "./tree.js";
+import { entriesFor, crumbs, parentDir, joinDir, filesUnder } from "./tree.js";
 
 // a small flat media listing, intentionally out of order and mixed-case.
 function files() {
@@ -100,5 +100,25 @@ describe("joinDir", () => {
   it("appends a segment, handling the root case", () => {
     expect(joinDir("", "albums")).toBe("albums");
     expect(joinDir("albums", "xyz")).toBe("albums/xyz");
+  });
+});
+
+describe("filesUnder", () => {
+  it("collects every file at/below a folder, recursively, sorted by path", () => {
+    const got = filesUnder(files(), "albums").map((f) => f.path);
+    // case-insensitive path order (like the rest of tree.js): abc before Xyz.
+    expect(got).toEqual([
+      "albums/abc/track.flac",
+      "albums/Xyz/01 a.mp3",
+      "albums/Xyz/02 b.mp3",
+    ]);
+  });
+
+  it("returns all files at the root", () => {
+    expect(filesUnder(files(), "").length).toBe(5);
+  });
+
+  it("returns empty for a folder with no files", () => {
+    expect(filesUnder(files(), "nope")).toEqual([]);
   });
 });

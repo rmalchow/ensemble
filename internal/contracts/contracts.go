@@ -244,6 +244,16 @@ type Playback struct {
 	Transport   string         `json:"transport"`          // "udp" | "tcp"
 	Source      SourceStats    `json:"source"`             // master's source stats (§8.2)
 	Metadata    *TrackMetadata `json:"metadata,omitempty"` // now-playing track info; nil when the source has none
+	Queue       []QueueItem    `json:"queue,omitempty"`    // UPCOMING tracks (excludes the one playing now, which is URI/Metadata above)
+}
+
+// QueueItem is one UPCOMING track in a file-source play queue. The queue rides
+// the (master-written, replicated) Playback record so any node's UI sees it over
+// the same WS path as now-playing. Metadata is read from embedded tags at enqueue
+// time; nil means the UI falls back to the URI-derived (filename) label.
+type QueueItem struct {
+	URI      string         `json:"uri"`
+	Metadata *TrackMetadata `json:"metadata,omitempty"`
 }
 
 // TrackMetadata is the optional "now playing" track info a source may expose for

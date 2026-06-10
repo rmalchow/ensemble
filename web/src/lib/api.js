@@ -166,6 +166,19 @@ export function play(nodeId, uri) {
 export async function playOnNode(nodeId, uri) {
   return play(nodeId, uri);
 }
+// enqueue appends one or more file URIs to the master's play queue. A fresh idle
+// queue auto-plays; an active queue gets them appended to the end.
+export function enqueue(masterId, uris) {
+  return toasted(req("POST", base(masterId) + "/queue", { uris }));
+}
+// queueRemove drops the upcoming item at index (0 == next); uri guards the index.
+export function queueRemove(masterId, index, uri) {
+  return toasted(req("POST", base(masterId) + "/queue/remove", { index, uri }));
+}
+// next skips to the next queued track (gaplessly).
+export function next(masterId) {
+  return toasted(req("POST", base(masterId) + "/next"));
+}
 export function stop(masterId) {
   return toasted(req("POST", base(masterId) + "/stop"));
 }

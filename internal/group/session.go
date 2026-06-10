@@ -201,6 +201,21 @@ func (s *session) playbackRecord(now time.Time, st contracts.SourceStats) contra
 		Transport:   s.transport,
 		Source:      st,
 	}
+	// A queue source drives the now-playing URI/metadata/position from its CURRENT
+	// item and carries the upcoming tracks (the file-source queue). While paused
+	// the frozen pausedSec is kept; otherwise the per-track position wins.
+	if qp, ok := s.src.(QueueProgress); ok {
+		uri, meta, posSec, upcoming := qp.Now()
+		if uri != "" {
+			rec.URI = uri
+		}
+		rec.Metadata = meta
+		rec.Queue = upcoming
+		if !s.paused.Load() {
+			rec.PositionSec = posSec
+		}
+		return rec
+	}
 	// Fold in the source's now-playing metadata, if it has any (D57 channel).
 	if ms, ok := s.src.(MetadataSource); ok {
 		if md, has := ms.Metadata(); has {

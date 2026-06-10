@@ -53,12 +53,26 @@ type MetadataSource interface {
 	Metadata() (contracts.TrackMetadata, bool)
 }
 
+// QueueProgress is the optional play-queue channel: a MediaSource backed by a
+// queue (the file-source queueSource) implements it. playbackRecord type-asserts
+// the active source and, when present, takes the now-playing URI/metadata + the
+// per-track position + the upcoming queue from it instead of the single-source
+// fields. Single sources (http/input/spotify) don't implement it.
+type QueueProgress interface {
+	Now() (uri string, meta *contracts.TrackMetadata, positionSec float64, upcoming []contracts.QueueItem)
+}
+
 // MediaFactory opens a URI into a MediaSource by scheme (§6.1/D26). The concrete
 // implementation (K's adapter) binds audio.Open's ctx + mediaDir so H's seam is
 // just Open(uri). mediaDir scoping / path-traversal rejection live in D; an
 // unsupported scheme surfaces as the factory's error.
 type MediaFactory interface {
 	Open(uri string) (MediaSource, error)
+	// Probe reads a file URI's embedded tags (title/artist/album) without opening
+	// a decoder/session, to pre-fill a queue entry's metadata at enqueue time.
+	// ok=false for non-file schemes or on any resolution/IO failure (the caller
+	// then leaves the entry's metadata nil and the UI uses the filename).
+	Probe(uri string) (contracts.TrackMetadata, bool)
 }
 
 // OpusEncoder compresses one canonical PCM frame into one opus packet (D33).

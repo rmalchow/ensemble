@@ -1033,6 +1033,11 @@ func (m mediaFactory) Open(uri string) (group.MediaSource, error) {
 	return src, nil
 }
 
+// Probe reads embedded tags for a file URI (queue metadata), bound to mediaDir.
+func (m mediaFactory) Probe(uri string) (contracts.TrackMetadata, bool) {
+	return audio.Probe(context.Background(), uri, m.mediaDir)
+}
+
 // uriScheme returns the lowercased scheme of a URI ("file" when none).
 func uriScheme(uri string) string {
 	i := strings.IndexByte(uri, ':')
@@ -1186,6 +1191,18 @@ func (g *groupAdapter) NameGroup(ctx context.Context, group id.ID, name string) 
 
 func (g *groupAdapter) Play(ctx context.Context, uri string) error {
 	return mapErr(g.e.Play(uri))
+}
+
+func (g *groupAdapter) Enqueue(ctx context.Context, uris []string) error {
+	return mapErr(g.e.Enqueue(uris))
+}
+
+func (g *groupAdapter) RemoveFromQueue(ctx context.Context, index int, uriGuard string) error {
+	return mapErr(g.e.RemoveFromQueue(index, uriGuard))
+}
+
+func (g *groupAdapter) Next(ctx context.Context) error {
+	return mapErr(g.e.Next())
 }
 
 func (g *groupAdapter) Stop(ctx context.Context) error {

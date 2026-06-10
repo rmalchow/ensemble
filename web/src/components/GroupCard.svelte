@@ -171,7 +171,7 @@
     {/if}
   </h3>
 
-  <PlaybackBar {group} />
+  <PlaybackBar {group} expanded={selected} />
 
   <div class="group-vol" title="group volume — scales every member proportionally">
     <span class="gv-label">Group volume</span>

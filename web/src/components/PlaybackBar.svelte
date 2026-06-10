@@ -4,14 +4,19 @@
   // on the right. When active it tints (accent band) so the playing room is obvious
   // at a glance; idle keeps the SAME footprint, just emptier (no reflow either way).
   import { position } from "../lib/fmt.js";
-  import { stop, pause, resume } from "../lib/api.js";
+  import { stop, pause, resume, next, queueRemove } from "../lib/api.js";
 
-  let { group } = $props();
+  let { group, expanded = false } = $props();
 
   let pb = $derived(group.playback || { state: "idle" });
   let playing = $derived(pb.state === "playing");
   let paused = $derived(pb.state === "paused");
   let active = $derived(playing || paused);
+
+  // the UPCOMING queue (the now-playing track is the bar above); next is enabled
+  // only while actually playing AND something is queued behind it.
+  let queue = $derived(pb.queue || []);
+  let canNext = $derived(playing && queue.length > 0);
 
   // a friendly one-line name + a type glyph for the source uri.
   let track = $derived(friendlyTrack(pb.uri));
@@ -56,6 +61,30 @@
       // toast shown by api.js
     }
   }
+  async function onnext() {
+    try {
+      await next(group.master);
+    } catch {
+      // toast shown by api.js
+    }
+  }
+  async function onremove(index, uri) {
+    try {
+      await queueRemove(group.master, index, uri);
+    } catch {
+      // toast shown by api.js
+    }
+  }
+
+  // a queue entry's display label: tag title (+ artist) when present, else the
+  // URI-derived (filename) fallback — same as the now-playing bar.
+  function queueTitle(item) {
+    if (item.metadata && item.metadata.title) return item.metadata.title;
+    return friendlyTrack(item.uri);
+  }
+  function queueSub(item) {
+    return item.metadata ? item.metadata.artist || "" : "";
+  }
 </script>
 
 <div class="playbar" class:active>
@@ -89,6 +118,15 @@
       {playing ? "⏸" : "▶"}
     </button>
     <button
+      class="btn ctl"
+      disabled={!canNext}
+      onclick={onnext}
+      title="next"
+      aria-label="next"
+    >
+      ⏭
+    </button>
+    <button
       class="btn btn-danger ctl"
       disabled={!active}
       onclick={onstop}
@@ -99,6 +137,35 @@
     </button>
   </div>
 </div>
+
+{#if active && queue.length > 0 && !expanded}
+  <!-- collapsed: just the count on a non-selected card (queue list is noise there). -->
+  <div class="queue-collapsed small">{queue.length} in queue</div>
+{:else if active && queue.length > 0}
+  <!-- expanded queue: the upcoming tracks under the now-playing bar, scrolling
+       internally so ~10 are visible without growing the card unbounded. -->
+  <div class="queue">
+    <div class="queue-head small">Up next · {queue.length}</div>
+    <ul class="queue-list">
+      {#each queue as item, i (item.uri + ":" + i)}
+        <li class="queue-item">
+          <span class="q-idx small">{i + 1}</span>
+          <span class="q-meta" title={item.uri}>
+            <span class="q-title">{queueTitle(item)}</span>
+            {#if queueSub(item)}<span class="q-sub small">{queueSub(item)}</span>{/if}
+          </span>
+          <span class="spacer"></span>
+          <button
+            class="btn q-rm"
+            onclick={() => onremove(i, item.uri)}
+            title="remove from queue"
+            aria-label="remove from queue"
+          >−</button>
+        </li>
+      {/each}
+    </ul>
+  </div>
+{/if}
 
 <style>
   /* fixed-height band: identical footprint playing vs idle (no reflow). Tints
@@ -203,6 +270,89 @@
   .controls .ctl:disabled {
     opacity: 0.4;
     cursor: default;
+  }
+
+  /* collapsed queue summary (non-selected card): just the count, unobtrusive. */
+  .queue-collapsed {
+    color: var(--muted);
+    padding: 0 2px 2px;
+  }
+
+  /* expanded queue under the bar: a bordered panel that scrolls internally so a
+     long queue never grows the card; ~10 rows visible at a glance. */
+  .queue {
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+    border-radius: 8px;
+    background: var(--panel-2);
+    padding: 6px 8px;
+  }
+  .queue-head {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+    padding: 2px 2px 6px;
+  }
+  .queue-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    /* ~10 rows then scroll */
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  .queue-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 2px;
+    border-radius: 6px;
+  }
+  .queue-item:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .q-idx {
+    flex: 0 0 auto;
+    width: 1.8em;
+    text-align: right;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .q-meta {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+  }
+  .q-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+  .q-sub {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted);
+  }
+  .q-rm {
+    flex: 0 0 auto;
+    width: 28px;
+    padding: 2px 0;
+    text-align: center;
+    line-height: 1;
+    font-size: 15px;
+  }
+  .q-rm:hover {
+    border-color: var(--danger);
+    color: var(--danger);
   }
 
   /* Narrow viewports: stack into two rows — the ellipsised media info on top,

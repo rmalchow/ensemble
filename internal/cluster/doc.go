@@ -80,6 +80,7 @@ type PlaybackRecord struct {
 	Transport   string                   `json:"transport"`
 	Source      contracts.SourceStats    `json:"source"`
 	Metadata    *contracts.TrackMetadata `json:"metadata,omitempty"` // now-playing track info (D57); nil when none
+	Queue       []contracts.QueueItem    `json:"queue,omitempty"`    // upcoming file-queue tracks (master-written)
 	Version     uint64                   `json:"version"`
 	UpdatedAt   int64                    `json:"updatedAt"`
 	Writer      id.ID                    `json:"writer"`

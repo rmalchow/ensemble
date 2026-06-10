@@ -279,6 +279,7 @@ func resolvePlayback(r *PlaybackRecord) contracts.Playback {
 		Transport:   r.Transport,
 		Source:      r.Source,
 		Metadata:    r.Metadata,
+		Queue:       r.Queue,
 	}
 }
 

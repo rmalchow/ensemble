@@ -108,6 +108,21 @@ type PlayReq struct {
 	File string `json:"file,omitempty"`
 }
 
+// --- POST /api/queue (file-source play queue) ------------------------------
+// Add one or more file URIs to the END of the queue (the [+] buttons). A bare
+// scheme-less path folds to a "file:" URI, like /play.
+type QueueAddReq struct {
+	URIs []string `json:"uris"`
+}
+
+// --- POST /api/queue/remove ------------------------------------------------
+// Remove the upcoming item at Index (0 == next). URI, when present, guards
+// against an index race with a concurrent snapshot update.
+type QueueRemoveReq struct {
+	Index int    `json:"index"`
+	URI   string `json:"uri,omitempty"`
+}
+
 // --- error envelope (every 4xx/5xx) ----------------------------------------
 type ErrorResp struct {
 	Error string `json:"error"`          // machine-stable short code

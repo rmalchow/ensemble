@@ -55,8 +55,16 @@ type Group interface {
 	// NameGroup sets a group's display name (LWW, any node, §4/§9.1).
 	NameGroup(ctx context.Context, group id.ID, name string) error
 	// Play starts playback of a media-source URI on THIS node's group (master
-	// only, §6/§6.1).
+	// only, §6/§6.1). A file URI plays through the gapless queue.
 	Play(ctx context.Context, uri string) error
+	// Enqueue appends file URIs to the end of the play queue (master only); a
+	// fresh idle queue auto-plays.
+	Enqueue(ctx context.Context, uris []string) error
+	// RemoveFromQueue removes the upcoming item at index (master only); uriGuard
+	// guards an index race when non-empty.
+	RemoveFromQueue(ctx context.Context, index int, uriGuard string) error
+	// Next skips to the next queued track, gaplessly (master only).
+	Next(ctx context.Context) error
 	// Stop stops THIS node's group playback; master only.
 	Stop(ctx context.Context) error
 	// Pause freezes THIS node's group playback; master only (D39).

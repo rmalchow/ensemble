@@ -149,6 +149,13 @@ type fakeGroup struct {
 	nameName       string
 	playErr        error
 	playURI        string
+	enqueueErr     error
+	enqueueURIs    []string
+	removeErr      error
+	removeIndex    int
+	removeURI      string
+	nextErr        error
+	nextN          int
 	stopErr        error
 	stopN          int
 	pauseErr       error
@@ -194,6 +201,28 @@ func (g *fakeGroup) Play(_ context.Context, uri string) error {
 	g.playURI = uri
 	g.mu.Unlock()
 	return g.playErr
+}
+
+func (g *fakeGroup) Enqueue(_ context.Context, uris []string) error {
+	g.mu.Lock()
+	g.enqueueURIs = uris
+	g.mu.Unlock()
+	return g.enqueueErr
+}
+
+func (g *fakeGroup) RemoveFromQueue(_ context.Context, index int, uriGuard string) error {
+	g.mu.Lock()
+	g.removeIndex = index
+	g.removeURI = uriGuard
+	g.mu.Unlock()
+	return g.removeErr
+}
+
+func (g *fakeGroup) Next(context.Context) error {
+	g.mu.Lock()
+	g.nextN++
+	g.mu.Unlock()
+	return g.nextErr
 }
 
 func (g *fakeGroup) Stop(context.Context) error {

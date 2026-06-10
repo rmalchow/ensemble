@@ -6,8 +6,8 @@
   // "playing into" label: the card it lives in IS the target.
   import { bytes, relTime } from "../lib/fmt.js";
   import { nodeById } from "../lib/derive.js";
-  import { getMedia, playOnNode } from "../lib/api.js";
-  import { entriesFor, crumbs, parentDir, joinDir } from "../lib/tree.js";
+  import { getMedia, playOnNode, enqueue } from "../lib/api.js";
+  import { entriesFor, crumbs, parentDir, joinDir, filesUnder } from "../lib/tree.js";
 
   let { snapshot, nodeId } = $props();
 
@@ -71,6 +71,17 @@
   function playFile(f) {
     playHere("file:" + f.path);
   }
+  // [+] on a file row: append it to the END of the queue.
+  function queueFile(f) {
+    if (nodeId) enqueue(nodeId, ["file:" + f.path]).catch(() => {});
+  }
+  // [+] on a folder row: append every file under it (recursive, sorted).
+  function queueFolder(folder) {
+    const uris = filesUnder(files, joinDir(dir, folder.name)).map(
+      (f) => "file:" + f.path,
+    );
+    if (nodeId && uris.length) enqueue(nodeId, uris).catch(() => {});
+  }
   function playUrl() {
     if (urlValid) playHere(url.trim());
   }
@@ -113,19 +124,39 @@
           </button>
         {/if}
         {#each view.folders as folder (folder.name)}
-          <button class="media-file folder-row" onclick={() => enter(folder)}>
-            <span class="glyph">📁</span>
-            <span>{folder.name}</span>
-            <span class="muted small">{folder.count} file{folder.count === 1 ? "" : "s"}</span>
-          </button>
+          <div class="media-file folder-row">
+            <button class="folder-enter" onclick={() => enter(folder)} title="open {folder.name}">
+              <span class="glyph">📁</span>
+              <span class="fname">{folder.name}</span>
+              <span class="muted small">{folder.count} file{folder.count === 1 ? "" : "s"}</span>
+            </button>
+            <span class="spacer"></span>
+            <button
+              class="btn btn-add"
+              onclick={() => queueFolder(folder)}
+              title="add folder to queue"
+              aria-label="add folder to queue"
+            >+</button>
+          </div>
         {/each}
         {#each view.files as f (f.path)}
           <div class="media-file">
-            <span title={f.path}>{f.name}</span>
+            <span class="fname" title={f.path}>{f.name}</span>
             <span class="muted small">{bytes(f.sizeBytes)}</span>
             <span class="muted small">{relTime(f.modTime)}</span>
             <span class="spacer"></span>
-            <button class="btn btn-accent" onclick={() => playFile(f)}>Play here</button>
+            <button
+              class="btn btn-add"
+              onclick={() => queueFile(f)}
+              title="add to queue"
+              aria-label="add to queue"
+            >+</button>
+            <button
+              class="btn btn-play"
+              onclick={() => playFile(f)}
+              title="play here"
+              aria-label="play here"
+            >▶</button>
           </div>
         {/each}
       </div>
@@ -199,7 +230,68 @@
     gap: 6px;
     max-height: 320px;
     overflow-y: auto;
-    /* room for the scrollbar so rows don't jump under it */
-    padding-right: 4px;
+    /* clear the scrollbar so the action buttons never sit under it */
+    padding-right: 10px;
+  }
+
+  /* file/folder name ellipsises so the action buttons never get pushed off-row */
+  .fname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* the folder name+count is a transparent button (enters the folder); the [+]
+     beside it queues the whole subtree. */
+  .folder-enter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 1 auto;
+    min-width: 0;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    text-align: left;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .folder-enter:hover {
+    color: var(--accent);
+  }
+
+  /* the two row actions share one footprint: [+] add (outlined, green) and
+     ▶ play (solid green, dark icon). */
+  .btn-add,
+  .btn-play {
+    flex: 0 0 auto;
+    /* fixed box so both stay identical regardless of glyph font-size */
+    width: 32px;
+    height: 30px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+  /* add: outlined box with a green plus */
+  .btn-add {
+    border-color: var(--accent);
+    color: var(--accent);
+    font-size: 16px;
+  }
+  /* play: filled green with a dark triangle */
+  .btn-play {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+    font-size: 11px;
+  }
+  .btn-play:hover {
+    border-color: var(--accent);
+    color: var(--bg);
+    filter: brightness(1.1);
   }
 </style>

@@ -444,6 +444,58 @@ func badMediaPath(p string) bool {
 	return false
 }
 
+// handleEnqueue appends file URIs to THIS node's group play queue; master only.
+// Each entry folds a bare path to a "file:" URI and is traversal-checked, like
+// /play. An empty list is a no-op (204).
+func (s *Server) handleEnqueue(c echo.Context) error {
+	var req QueueAddReq
+	if err := c.Bind(&req); err != nil {
+		return failCode(c, http.StatusBadRequest, "bad_request", "")
+	}
+	uris := make([]string, 0, len(req.URIs))
+	for _, raw := range req.URIs {
+		uri := resolvePlayURI(PlayReq{URI: raw})
+		if uri == "" {
+			return failCode(c, http.StatusBadRequest, "bad_request", "")
+		}
+		if path, isFile := fileURIPath(uri); isFile && badMediaPath(path) {
+			return failCode(c, http.StatusBadRequest, "bad_path", "")
+		}
+		uris = append(uris, uri)
+	}
+	if err := s.cfg.Group.Enqueue(c.Request().Context(), uris); err != nil {
+		return s.fail(c, err)
+	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "enqueue"), "count", len(uris))...)
+	return c.NoContent(http.StatusNoContent)
+}
+
+// handleQueueRemove removes an upcoming item from THIS node's group queue; master
+// only. Index 0 is the next track; uri (optional) guards an index race.
+func (s *Server) handleQueueRemove(c echo.Context) error {
+	var req QueueRemoveReq
+	if err := c.Bind(&req); err != nil {
+		return failCode(c, http.StatusBadRequest, "bad_request", "")
+	}
+	if req.Index < 0 {
+		return failCode(c, http.StatusBadRequest, "bad_request", "")
+	}
+	if err := s.cfg.Group.RemoveFromQueue(c.Request().Context(), req.Index, req.URI); err != nil {
+		return s.fail(c, err)
+	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "queueRemove"), "index", req.Index)...)
+	return c.NoContent(http.StatusNoContent)
+}
+
+// handleNext skips to the next queued track on THIS node's group; master only.
+func (s *Server) handleNext(c echo.Context) error {
+	if err := s.cfg.Group.Next(c.Request().Context()); err != nil {
+		return s.fail(c, err)
+	}
+	s.log.Info("ui mutation", auditAttrs(c, "next")...)
+	return c.NoContent(http.StatusNoContent)
+}
+
 // handleStop stops THIS node's group playback; master only.
 func (s *Server) handleStop(c echo.Context) error {
 	if err := s.cfg.Group.Stop(c.Request().Context()); err != nil {

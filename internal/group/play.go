@@ -19,51 +19,192 @@ const clockWaitTimeout = 2 * time.Second
 // clockWaitPoll is the retry cadence while waiting for clock sync.
 const clockWaitPoll = 50 * time.Millisecond
 
-// Play starts playback of uri to this node's group (§6/§8.2). Master-only:
-// returns ErrNotMaster if this node is a follower. Opens the media source via
-// the factory, validates codec/opus capability, bumps the generation, starts the
-// source session, writes playing status, and spawns the release loop. Replaces
-// any running session first (§8.6).
+// Play starts playback of uri on this node's group (§6/§8.2). Master-only.
+//
+// A FILE uri plays through the gapless play queue: if a queue session is already
+// running it is a front-switch (the current track is dropped, the new one plays
+// now, upcoming tracks are kept — §queue); otherwise a fresh queue session starts
+// seeded with the one track. Any OTHER scheme (http/input/spotify) plays as a
+// single source and clears the queue. Either way any running session is replaced
+// first (§8.6).
 func (e *Engine) Play(uri string) error {
+	if uriScheme(uri) == "file" {
+		return e.playFile(uri)
+	}
+	e.log.Info("opening source", "uri", uri, "scheme", uriScheme(uri))
+	src, err := e.p.Media.Open(uri)
+	if err != nil {
+		e.log.Warn("source open failed", "uri", uri, "scheme", uriScheme(uri), "err", err)
+		return err
+	}
+	return e.installSession(uri, src)
+}
+
+// Enqueue appends uris to the END of the file-source queue. On a live queue
+// session they are appended; otherwise (idle, or a non-file source playing) a
+// fresh queue session starts and begins playing at once (the first add to an idle
+// queue auto-plays). Tags are probed up front (off-lock) to pre-fill metadata.
+// Master-only.
+func (e *Engine) Enqueue(uris []string) error {
+	items := e.queueItems(uris)
+	if len(items) == 0 {
+		return nil
+	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
+		return ErrClosed
+	}
+	if qs := e.currentQueueLocked(); qs != nil {
+		qs.Append(items)
+		e.republishLocked()
+		e.mu.Unlock()
+		e.log.Info("queue appended", "count", len(items))
+		return nil
+	}
+	e.mu.Unlock()
+	return e.startQueue(items)
+}
+
+// Next skips to the next upcoming queued track (gaplessly). No-op when no queue
+// session is running. Master-only.
+func (e *Engine) Next() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return ErrClosed
+	}
+	qs := e.currentQueueLocked()
+	if qs == nil {
+		return nil
+	}
+	qs.Next() // takes effect on the next ReadFrame, which re-publishes via onChange
+	e.log.Info("queue next")
+	return nil
+}
+
+// RemoveFromQueue removes the upcoming item at index (0 == the next track).
+// uriGuard, when non-empty, must match that item's URI (guards an index race with
+// a concurrent snapshot). No-op when no queue session is running. Master-only.
+func (e *Engine) RemoveFromQueue(index int, uriGuard string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return ErrClosed
+	}
+	qs := e.currentQueueLocked()
+	if qs == nil {
+		return nil
+	}
+	qs.RemoveUpcoming(index, uriGuard)
+	e.republishLocked()
+	e.log.Info("queue item removed", "index", index)
+	return nil
+}
+
+// playFile routes a file URI into the queue: a gapless front-switch on a live
+// queue session, else a fresh single-track queue session.
+func (e *Engine) playFile(uri string) error {
+	item := e.queueItem(uri)
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return ErrClosed
+	}
+	if qs := e.currentQueueLocked(); qs != nil {
+		qs.PlayNow(item)
+		e.republishLocked()
+		e.mu.Unlock()
+		e.log.Info("queue play-now", "uri", uri)
+		return nil
+	}
+	e.mu.Unlock()
+	return e.startQueue([]contracts.QueueItem{item})
+}
+
+// startQueue opens the first item (validating it, so a bad file surfaces as an
+// error) and installs a gapless queue session over items. items must be non-empty.
+func (e *Engine) startQueue(items []contracts.QueueItem) error {
+	qs := newQueueSource(items, e.p.Media.Open, e.RefreshPlayback)
+	if err := qs.prime(); err != nil {
+		e.log.Warn("source open failed", "uri", items[0].URI, "scheme", uriScheme(items[0].URI), "err", err)
+		return err
+	}
+	return e.installSession(items[0].URI, qs)
+}
+
+// queueItem builds a queue entry for uri, probing embedded tags (best-effort).
+func (e *Engine) queueItem(uri string) contracts.QueueItem {
+	it := contracts.QueueItem{URI: uri}
+	if md, ok := e.p.Media.Probe(uri); ok {
+		it.Metadata = &md
+	}
+	return it
+}
+
+// queueItems builds queue entries for uris (tag probing happens here, off-lock).
+func (e *Engine) queueItems(uris []string) []contracts.QueueItem {
+	items := make([]contracts.QueueItem, 0, len(uris))
+	for _, u := range uris {
+		items = append(items, e.queueItem(u))
+	}
+	return items
+}
+
+// currentQueueLocked returns the running session's queue source, or nil when no
+// session is running or the session is a single (non-queue) source. Caller holds e.mu.
+func (e *Engine) currentQueueLocked() *queueSource {
+	if e.sess == nil {
+		return nil
+	}
+	qs, _ := e.sess.src.(*queueSource)
+	return qs
+}
+
+// republishLocked re-publishes the current session's playback record immediately
+// (after a queue mutation). Caller holds e.mu. No-op when idle.
+func (e *Engine) republishLocked() {
+	if e.sess == nil {
+		return
+	}
+	e.p.Cluster.SetPlayback(e.sess.groupID, e.sess.playbackRecord(e.now(), e.p.Source.Stats()))
+	e.lastBeat = e.now()
+}
+
+// installSession negotiates the codec, builds the opus encoder, waits for clock
+// sync, then installs src as the running session under e.mu, replacing any prior
+// one (§8.6). src is already open (and, for a queue, primed). uri is the session
+// label (a queue's now-playing URI is taken from the source per frame).
+func (e *Engine) installSession(uri string, src MediaSource) error {
+	live := src.Live()
+	pacing := "pull"
+	if live {
+		pacing = "live"
+	}
+
+	// Codec negotiation (§8.3/D33): the master picks the EFFECTIVE codec — the
+	// wanted codec iff EVERY current member's effective caps support it AND this
+	// master can encode it, else pcm (always universal, never IP-fragments).
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		_ = src.Close()
 		return ErrClosed
 	}
 	snap := e.p.Cluster.Snapshot()
 	mv := myGroup(snap, e.self)
 	if !mv.found {
 		e.mu.Unlock()
+		_ = src.Close()
 		return ErrNotSynced // self not derived yet; transient, retry
 	}
-	// Every node masters its OWN group (1:1) and may always source it (D49+); the
-	// node's player may meanwhile be elsewhere (crosswise).
+	// Every node masters its OWN group (1:1) and may always source it (D49+).
 	groupID := mv.group.ID // == e.self
 	settings := fillDefaults(mv.group.Settings)
-
-	// Codec negotiation (§8.3/D33): the master picks the EFFECTIVE codec — the
-	// wanted codec (settings.Codec) iff EVERY current member's effective caps
-	// support it AND this master can encode it, else pcm (always universal). opus
-	// keeps every frame under one MTU (raw PCM is 3864 B and IP-fragments, which
-	// collapses on lossy Wi-Fi); pcm is the universal fallback rather than a hard
-	// reject. The negotiated codec is what gets recorded + streamed.
 	settings.Codec = e.negotiateCodecLocked(snap, mv, settings.Codec)
 	e.mu.Unlock()
 
-	// Open the media source (no lock — may block on http/file). On error: no gen,
-	// no status.
-	e.log.Info("opening source", "uri", uri, "scheme", uriScheme(uri), "codec", settings.Codec, "transport", settings.Transport)
-	src, err := e.p.Media.Open(uri)
-	if err != nil {
-		e.log.Warn("source open failed", "uri", uri, "scheme", uriScheme(uri), "err", err)
-		return err
-	}
-	live := src.Live()
-	pacing := "pull"
-	if live {
-		pacing = "live"
-	}
-	e.log.Info("source opened", "uri", uri, "scheme", uriScheme(uri), "pacing", pacing)
+	e.log.Info("source opened", "uri", uri, "scheme", uriScheme(uri), "codec", settings.Codec, "transport", settings.Transport, "pacing", pacing)
 
 	// Opus encoder (D33): master encodes once for all subscribers.
 	var enc OpusEncoder
@@ -72,6 +213,7 @@ func (e *Engine) Play(uri string) error {
 			_ = src.Close()
 			return ErrNoOpus
 		}
+		var err error
 		enc, err = e.p.Opus.NewEncoder()
 		if err != nil {
 			_ = src.Close()

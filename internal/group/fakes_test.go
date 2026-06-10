@@ -213,6 +213,10 @@ func (m *fakeMedia) Open(uri string) (MediaSource, error) {
 	return m.src, nil
 }
 
+func (m *fakeMedia) Probe(string) (contracts.TrackMetadata, bool) {
+	return contracts.TrackMetadata{}, false
+}
+
 // --- fakeSourceServer --------------------------------------------------------
 
 type releaseCall struct {

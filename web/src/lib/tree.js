@@ -57,6 +57,21 @@ export function entriesFor(files, dir) {
   return { folders, files: sortedFiles };
 }
 
+// filesUnder returns EVERY file at or beneath `dir` (recursive), sorted by full
+// path — used to enqueue a whole folder subtree in a stable order.
+export function filesUnder(files, dir) {
+  const base = normDir(dir);
+  const prefix = base ? base + "/" : "";
+  return (files || [])
+    .filter((f) => f && typeof f.path === "string")
+    .filter((f) => {
+      const path = f.path.replace(/^\/+/, "");
+      return !prefix || path.startsWith(prefix);
+    })
+    .slice()
+    .sort((a, b) => caseless(a.path, b.path));
+}
+
 // crumbs turns a directory path into breadcrumb segments for navigation:
 //   crumbs("albums/xyz") → [
 //     { name: "media", dir: "" },
