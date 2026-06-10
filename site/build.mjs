@@ -63,6 +63,43 @@ const steps = C.how.steps
   )
   .join("");
 
+const qsSteps = C.quickstart.steps
+  .map((s) => {
+    const code = s.code
+      ? `<pre class="qs-code"><code>${esc(s.code)}</code></pre>`
+      : "";
+    const params = s.params
+      ? `<div class="qs-params">${s.params
+          .map(
+            (p) =>
+              `<code class="qs-flag">${esc(p.flag)}</code><span>${esc(p.what)} <em>· default ${esc(p.def)}</em></span>`
+          )
+          .join("")}</div>`
+      : "";
+    const methods = s.methods
+      ? `<div class="qs-methods">${s.methods
+          .map((m) => `<span class="qs-mlabel">${esc(m.label)}</span><code>${esc(m.cmd)}</code>`)
+          .join("")}</div>`
+      : "";
+    const action = s.action
+      ? `<a class="btn btn-solid qs-dl" href="${esc(s.action.href)}" rel="noopener">${esc(s.action.label)}<span class="arrow">→</span></a>`
+      : "";
+    const doc = s.doc
+      ? `<a class="qs-doc" href="${esc(s.doc.href)}" rel="noopener">for further details — ${esc(s.doc.label)}<span class="arrow">→</span></a>`
+      : "";
+    return `
+      <article class="qs">
+        <div class="qs-top">
+          <div class="qs-h"><span class="qs-n">${esc(s.n)}</span><h3>${esc(s.title)}</h3></div>
+          <span class="tag">${esc(s.tag)}</span>
+        </div>
+        <p class="qs-body">${esc(s.body)}</p>
+        ${code}${params}${methods}
+        <div class="qs-foot">${action}${doc}</div>
+      </article>`;
+  })
+  .join("");
+
 const techItems = C.tech.items
   .map(
     (t) => `
@@ -145,6 +182,15 @@ const page = `<!doctype html>
       <h2>${esc(C.how.title)}</h2>
     </header>
     <ol class="steps">${steps}</ol>
+  </section>
+
+  <section id="quickstart" class="quickstart">
+    <header class="sec-head">
+      <span class="eyebrow">${esc(C.quickstart.eyebrow)}</span>
+      <h2>${esc(C.quickstart.title)}</h2>
+      <p class="sec-intro">${esc(C.quickstart.intro)}</p>
+    </header>
+    <div class="qs-list">${qsSteps}</div>
   </section>
 
   <section id="tech" class="tech-sec">

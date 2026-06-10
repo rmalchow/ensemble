@@ -14,8 +14,9 @@ This guide gets you from zero to music:
 1. **[The mental model](#the-mental-model)** — the handful of ideas everything is built on.
 2. **[Three homes, one app](#three-homes-one-app)** — real setups that show what ensemble is *for*.
 3. **[Pick your setup](#pick-your-setup)** — install instructions for each kind of device.
-4. **[What can it play?](#what-can-it-play)** — local files, Spotify/podcasts, radio, line-in.
-5. **Reference** — the [UI Reference](ui-reference.md) (every screen and control) and the [Configuration Reference](config-reference.md) (every knob, explained).
+4. **[Running ensemble](running.md)** — every way to start a node and keep it running (foreground, `nohup`, systemd, Docker, Compose).
+5. **[What can it play?](#what-can-it-play)** — local files, Spotify/podcasts, radio, line-in.
+6. **Reference** — the [UI Reference](ui-reference.md) (every screen and control) and the [Configuration Reference](config-reference.md) (every knob, explained).
 
 ---
 
@@ -146,6 +147,9 @@ kitchen plays Spotify, all from the same app.
 
 ## Reference
 
+- **[Running ensemble](running.md)** — every way to launch and supervise a node:
+  foreground, `nohup`, systemd (system **and** user services), Docker, and Compose,
+  with the exact commands and unit/yml files.
 - **[UI Reference](ui-reference.md)** — a screen-by-screen tour of the web app:
   the Rooms page, room controls, the Nodes page, and the Spotify endpoints editor,
   with screenshots of every control.

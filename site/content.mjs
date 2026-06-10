@@ -4,7 +4,8 @@
 
 const REPO = "https://gitlab.rand0m.me/share/ensemble";
 const RELEASES = `${REPO}/-/releases`;
-const GUIDE = `${REPO}/-/blob/main/docs/user/README.md`;
+const DOC = (f) => `${REPO}/-/blob/main/docs/user/${f}`;
+const GUIDE = DOC("README.md");
 
 export const content = {
   meta: {
@@ -21,6 +22,7 @@ export const content = {
     { label: "Why", href: "#why" },
     { label: "Screens", href: "#screens" },
     { label: "How", href: "#how" },
+    { label: "Quickstart", href: "#quickstart" },
     { label: "Tech", href: "#tech" },
     { label: "Source", href: REPO },
   ],
@@ -135,6 +137,67 @@ export const content = {
         title: "Group and play",
         body:
           "Open the built-in UI, group devices into rooms, and play. A shared clock keeps every speaker aligned to the millisecond.",
+      },
+    ],
+  },
+
+  quickstart: {
+    eyebrow: "Quickstart",
+    title: "From download to whole-home sound in minutes.",
+    intro:
+      "You've set up software like this before — here's the shape of it. Each step links to the guide for the full version.",
+    steps: [
+      {
+        n: "01",
+        tag: "download",
+        title: "Get a build",
+        body:
+          "One static, pure-Go binary per device — no runtime, no dependencies. Prebuilt for Linux amd64, arm64, and armv6 (Pi Zero); attached to every tagged release. Or run the master in Docker, with Spotify Connect (go-librespot) baked in.",
+        code:
+          "# native — grab the binary for each device's architecture, then:\nchmod +x ./ensemble\n\n# docker — master-only image, Spotify Connect included:\ndocker pull harbor.rand0m.me/public/ensemble:latest",
+        action: { label: "Download a release", href: RELEASES },
+        doc: { label: "Install scenarios (NAS, Pi, desktop, ESP32)", href: GUIDE },
+      },
+      {
+        n: "02",
+        tag: "pair",
+        title: "Run it — nodes find each other",
+        body:
+          "Start the binary on each device with a speaker. On first run a node mints a permanent ID, advertises itself over mDNS, and gossips its state — peers appear within seconds, with no central server or broker. Every node serves the same web app and proxies to the rest, so open any one of them and group rooms by telling one node to follow another. A shared clock keeps the group aligned to the millisecond.",
+        code:
+          "./ensemble                      # on each device\n\n# then open the built-in UI on any node:\n#   http://<any-node-ip>:8080",
+        doc: { label: "Pairing, grouping & the UI", href: DOC("ui-reference.md") },
+      },
+      {
+        n: "03",
+        tag: "flags",
+        title: "The flags you'll actually use",
+        body:
+          "Every flag has an ENSEMBLE_* environment equivalent; all are optional, with sensible defaults. Ports left at their default bind-or-increment (run several nodes on one box); a port you set explicitly is pinned (binds exactly or exits).",
+        params: [
+          { flag: "--name <name>", def: "node id", what: "display name + Spotify device name (first start only)" },
+          { flag: "--role <role>", def: "both", what: "master | playback | master,playback" },
+          { flag: "--media <dir>", def: "<data>/media", what: "library directory, browsed recursively" },
+          { flag: "--data <dir>", def: "./data", what: "node.json, cluster state, Spotify creds" },
+          { flag: "--http-port <n>", def: "8080", what: "UI + REST API + WebSocket + node proxy" },
+          { flag: "ENSEMBLE_OUTPUT", def: "auto", what: "alsa · exec · null · file:<path>" },
+        ],
+        doc: { label: "Full configuration reference", href: DOC("config-reference.md") },
+      },
+      {
+        n: "04",
+        tag: "start",
+        title: "Keep it running",
+        body:
+          "However you supervise processes — from a throwaway foreground run to a boot-time service:",
+        methods: [
+          { label: "foreground", cmd: "./ensemble" },
+          { label: "detached", cmd: "nohup ./ensemble --name kitchen >ensemble.log 2>&1 &" },
+          { label: "systemd", cmd: "sudo systemctl enable --now ensemble" },
+          { label: "docker", cmd: "docker run -d --network host -v /srv/music:/media:ro … --name living-room" },
+          { label: "compose", cmd: "docker compose up -d" },
+        ],
+        doc: { label: "Startup methods in detail (units + commands)", href: DOC("running.md") },
       },
     ],
   },
