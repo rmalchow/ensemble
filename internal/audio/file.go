@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"ensemble/internal/contracts"
 )
 
 // fileSource is the pull-paced source: a file under MEDIA_DIR decoded through a
@@ -13,7 +15,17 @@ import (
 type fileSource struct {
 	f      *os.File
 	fr     *framer
+	title  string // file base name (the metadata channel; tag parsing is a later pass)
 	closed bool
+}
+
+// Metadata satisfies the optional metadata channel with the file's base name as
+// the title. Embedded-tag parsing (ID3/Vorbis) is a later pass.
+func (s *fileSource) Metadata() (contracts.TrackMetadata, bool) {
+	if s.title == "" {
+		return contracts.TrackMetadata{}, false
+	}
+	return contracts.TrackMetadata{Title: s.title}, true
 }
 
 // openFile constructs a file source for a "file:" URI or a bare path, bounding
@@ -50,7 +62,7 @@ func openFile(_ context.Context, uri, mediaDir string) (Source, error) {
 		return nil, err
 	}
 
-	return &fileSource{f: f, fr: newFramer(dec)}, nil
+	return &fileSource{f: f, fr: newFramer(dec), title: filepath.Base(full)}, nil
 }
 
 func (s *fileSource) ReadFrame(dst []byte) error { return s.fr.frame(dst) }

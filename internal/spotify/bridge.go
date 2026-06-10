@@ -12,11 +12,13 @@
 package spotify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -26,6 +28,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"ensemble/internal/contracts"
 )
 
 // Config wires a Bridge.
@@ -37,6 +41,7 @@ type Config struct {
 	Log        *slog.Logger // nil → slog.Default()
 	OnPlay     func()       // Spotify started/resumed → switch this group to spotify:
 	OnStop     func()       // Spotify paused/stopped/deselected → idle this group
+	OnMetadata func()       // track metadata changed (D57 metadata channel); nil → ignored
 }
 
 // DefaultAPIPort is go-librespot's default API port; we enable the API there.
@@ -49,14 +54,49 @@ type Bridge struct {
 	log  *slog.Logger
 
 	mu       sync.Mutex
-	active   *io.PipeWriter  // current source sink, or nil (discard the pipe)
-	cmd      *exec.Cmd       // the go-librespot process (killed on Close)
-	fifoFile *os.File        // the pump's FIFO read handle (closed to unblock pump)
-	conn     *websocket.Conn // the live events socket (closed to unblock events)
+	active   *io.PipeWriter          // current source sink, or nil (discard the pipe)
+	cmd      *exec.Cmd               // the go-librespot process (killed on Close)
+	fifoFile *os.File                // the pump's FIFO read handle (closed to unblock pump)
+	conn     *websocket.Conn         // the live events socket (closed to unblock events)
+	meta     contracts.TrackMetadata // latest track metadata (under mu); valid when metaOK
+	metaOK   bool                    // a metadata event has arrived this session
 
 	done chan struct{}
 	wg   sync.WaitGroup
 	once sync.Once
+}
+
+// Latest returns the most recent track metadata, or ok=false if none has arrived
+// (no track playing yet). Safe for any goroutine.
+func (b *Bridge) Latest() (contracts.TrackMetadata, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.meta, b.metaOK
+}
+
+// SetDeviceName renames the advertised Connect device live via go-librespot's
+// API (POST /set_device_name) — no process restart. Updates cfg.DeviceName on
+// success so later reads/log lines are consistent.
+func (b *Bridge) SetDeviceName(name string) error {
+	body, _ := json.Marshal(map[string]string{"name": name})
+	url := fmt.Sprintf("http://127.0.0.1:%d/set_device_name", b.cfg.APIPort)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("spotify: set_device_name: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("spotify: set_device_name: status %d", resp.StatusCode)
+	}
+	b.mu.Lock()
+	b.cfg.DeviceName = name
+	b.mu.Unlock()
+	return nil
 }
 
 // New builds a Bridge (no process yet — call Run). It creates the audio FIFO and
@@ -220,13 +260,17 @@ func (b *Bridge) events(ctx context.Context) {
 	}
 }
 
-// spotifyEvent is the go-librespot /events envelope.
+// spotifyEvent is the go-librespot /events envelope. The "metadata" event carries
+// the full track info (verified against go-librespot 0.7.3 /events).
 type spotifyEvent struct {
 	Type string `json:"type"`
 	Data struct {
-		URI         string   `json:"uri"`
-		Name        string   `json:"name"`
-		ArtistNames []string `json:"artist_names"`
+		URI           string   `json:"uri"`
+		Name          string   `json:"name"`
+		ArtistNames   []string `json:"artist_names"`
+		AlbumName     string   `json:"album_name"`
+		AlbumCoverURL string   `json:"album_cover_url"`
+		Duration      int      `json:"duration"` // milliseconds
 	} `json:"data"`
 }
 
@@ -248,6 +292,19 @@ func (b *Bridge) handleEvent(data []byte) {
 		}
 	case "metadata":
 		b.log.Debug("spotify metadata", "track", ev.Data.Name, "artist", firstOf(ev.Data.ArtistNames))
+		b.mu.Lock()
+		b.meta = contracts.TrackMetadata{
+			Title:       ev.Data.Name,
+			Artist:      firstOf(ev.Data.ArtistNames),
+			Album:       ev.Data.AlbumName,
+			ArtURL:      ev.Data.AlbumCoverURL,
+			DurationSec: ev.Data.Duration / 1000,
+		}
+		b.metaOK = true
+		b.mu.Unlock()
+		if b.cfg.OnMetadata != nil {
+			b.cfg.OnMetadata()
+		}
 	default:
 		b.log.Debug("spotify event", "type", ev.Type)
 	}

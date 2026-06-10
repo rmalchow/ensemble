@@ -173,6 +173,20 @@ func (e *Engine) Stop() error {
 	return nil
 }
 
+// RefreshPlayback re-publishes the current session's playback record immediately,
+// outside the heartbeat cadence (watch.go). The Spotify bridge calls this when
+// track metadata changes (D57 channel) so the now-playing UI updates at once
+// instead of waiting up to one heartbeat. No-op when idle. Master-only.
+func (e *Engine) RefreshPlayback() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.sess == nil {
+		return
+	}
+	e.p.Cluster.SetPlayback(e.sess.groupID, e.sess.playbackRecord(e.now(), e.p.Source.Stats()))
+	e.lastBeat = e.now()
+}
+
 // Pause freezes the running session (D39). Master-only. The media source and the
 // session/gen stay alive; the release loop stops emitting (position frozen). The
 // replicated playback record flips to state="paused", which the member-side

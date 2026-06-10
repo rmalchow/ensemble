@@ -192,7 +192,7 @@ func (s *session) playbackRecord(now time.Time, st contracts.SourceStats) contra
 		state = "paused"
 		pos = s.pausedSec
 	}
-	return contracts.Playback{
+	rec := contracts.Playback{
 		State:       state,
 		URI:         s.uri,
 		StartedUnix: s.startedUnix,
@@ -201,4 +201,11 @@ func (s *session) playbackRecord(now time.Time, st contracts.SourceStats) contra
 		Transport:   s.transport,
 		Source:      st,
 	}
+	// Fold in the source's now-playing metadata, if it has any (D57 channel).
+	if ms, ok := s.src.(MetadataSource); ok {
+		if md, has := ms.Metadata(); has {
+			rec.Metadata = &md
+		}
+	}
+	return rec
 }

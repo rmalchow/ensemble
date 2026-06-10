@@ -45,6 +45,14 @@ type MediaSource interface {
 	Close() error
 }
 
+// MetadataSource is the optional now-playing channel (D57): a MediaSource that can
+// describe the current track implements it. playbackRecord type-asserts the active
+// source and folds the result into the replicated Playback record. Sources without
+// metadata (e.g. line-in) simply don't implement it.
+type MetadataSource interface {
+	Metadata() (contracts.TrackMetadata, bool)
+}
+
 // MediaFactory opens a URI into a MediaSource by scheme (§6.1/D26). The concrete
 // implementation (K's adapter) binds audio.Open's ctx + mediaDir so H's seam is
 // just Open(uri). mediaDir scoping / path-traversal rejection live in D; an

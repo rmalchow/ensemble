@@ -482,11 +482,13 @@ func run(ctx context.Context, opt options) (rerr error) {
 			Log:        base,
 			OnPlay:     func() { _ = engine.Play("spotify:") },
 			OnStop:     func() { _ = engine.Stop() },
+			OnMetadata: func() { engine.RefreshPlayback() },
 		})
 		if err != nil {
 			log.Warn("spotify bridge disabled", "err", err)
 		} else {
 			audio.SetSpotifyAttach(sb.Attach)
+			audio.SetSpotifyMeta(sb.Latest)
 			if err := sb.Run(ctx); err != nil {
 				log.Warn("spotify bridge start failed", "err", err)
 			} else {

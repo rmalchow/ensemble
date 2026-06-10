@@ -16,6 +16,14 @@
   // a friendly one-line name + a type glyph for the source uri.
   let track = $derived(friendlyTrack(pb.uri));
   let icon = $derived(iconFor(pb.uri));
+
+  // now-playing metadata (the D57 source channel): title/artist/album/cover art.
+  // Falls back to the URI-derived label when the source supplies none (line-in).
+  let meta = $derived(pb.metadata || null);
+  let title = $derived(meta && meta.title ? meta.title : track);
+  let subtitle = $derived(
+    meta ? [meta.artist, meta.album].filter(Boolean).join(" · ") : "",
+  );
   function friendlyTrack(uri) {
     if (!uri) return "";
     if (uri.startsWith("spotify:")) return "Spotify";
@@ -57,8 +65,15 @@
 
   <div class="now">
     {#if active}
-      {#if icon}<span class="icon">{icon}</span>{/if}
-      <span class="track" title={pb.uri}>{track}</span>
+      {#if meta && meta.artUrl}
+        <img class="art" src={meta.artUrl} alt="" />
+      {:else if icon}
+        <span class="icon">{icon}</span>
+      {/if}
+      <span class="meta" title={pb.uri}>
+        <span class="track">{title}</span>
+        {#if subtitle}<span class="sub small">{subtitle}</span>{/if}
+      </span>
       <span class="pos small">{position(pb.positionSec)}</span>
     {/if}
   </div>
@@ -135,13 +150,36 @@
     flex: 0 0 auto;
     font-size: 15px;
   }
-  .now .track {
+  .now .art {
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    border-radius: 4px;
+    object-fit: cover;
+    background: var(--panel-2);
+  }
+  /* title + subtitle stack; ellipsised so controls never move */
+  .now .meta {
     flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    line-height: 1.2;
+  }
+  .now .track {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 14px;
+  }
+  .now .sub {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted);
   }
   .now .pos {
     flex: 0 0 auto;

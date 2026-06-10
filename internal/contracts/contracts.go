@@ -224,13 +224,25 @@ type GroupView struct {
 // Playback mirrors the replicated playback-status record (§4), written only by
 // the group's master. Source stats ride along.
 type Playback struct {
-	State       string      `json:"state"` // "idle" | "playing"
-	URI         string      `json:"uri"`   // media-source URI (§6)
-	StartedUnix int64       `json:"startedAt"`
-	PositionSec float64     `json:"positionSec"`
-	Codec       string      `json:"codec"`     // "pcm" | "opus"
-	Transport   string      `json:"transport"` // "udp" | "tcp"
-	Source      SourceStats `json:"source"`    // master's source stats (§8.2)
+	State       string         `json:"state"` // "idle" | "playing"
+	URI         string         `json:"uri"`   // media-source URI (§6)
+	StartedUnix int64          `json:"startedAt"`
+	PositionSec float64        `json:"positionSec"`
+	Codec       string         `json:"codec"`              // "pcm" | "opus"
+	Transport   string         `json:"transport"`          // "udp" | "tcp"
+	Source      SourceStats    `json:"source"`             // master's source stats (§8.2)
+	Metadata    *TrackMetadata `json:"metadata,omitempty"` // now-playing track info; nil when the source has none
+}
+
+// TrackMetadata is the optional "now playing" track info a source may expose for
+// the UI (the metadata channel). Sources without metadata (e.g. line-in) supply
+// none. Spotify fills all fields from go-librespot events; a file fills Title.
+type TrackMetadata struct {
+	Title       string `json:"title"`
+	Artist      string `json:"artist,omitempty"`
+	Album       string `json:"album,omitempty"`
+	ArtURL      string `json:"artUrl,omitempty"`
+	DurationSec int    `json:"durationSec,omitempty"`
 }
 
 // GroupSettings mirrors the per-group settings record (§8.3/§8.4/§9.1).
