@@ -5,7 +5,9 @@
   import Groups from "./sections/Groups.svelte";
   import Nodes from "./sections/Nodes.svelte";
   import Toast from "./components/Toast.svelte";
-  import wordmark from "./assets/wordmark.png";
+  // wordmark-small.png is rendered near display size (crisp); wordmark.png is the
+  // full-size master, kept for future high-res use but not referenced here.
+  import wordmark from "./assets/wordmark-small.png";
 
   // self {id, name}; id/name seeded once from GET /api/status.
   let self = $state({ id: "", name: "", role: "" });
