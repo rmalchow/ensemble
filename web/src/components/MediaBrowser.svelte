@@ -39,14 +39,18 @@
   let view = $derived(entriesFor(files, dir));
   let trail = $derived(crumbs(dir));
 
-  // (re)fetch files for this room's master; reset to the root directory.
+  // (re)fetch files + reset to root ONLY when the target node actually changes.
+  // lastNode is intentionally non-reactive: it guards against spurious effect
+  // re-runs (e.g. an unrelated signal settling a second after mount) that would
+  // otherwise throw the user back to the root mid-navigation.
+  let lastNode = null;
   $effect(() => {
     const id = nodeId;
+    if (id === lastNode) return; // same node → keep the current folder + list
+    lastNode = id;
     dir = "";
-    if (!id) {
-      files = [];
-      return;
-    }
+    files = [];
+    if (!id) return;
     loading = true;
     getMedia(id)
       .then((list) => {
@@ -101,28 +105,30 @@
     {#if view.folders.length === 0 && view.files.length === 0 && dir === ""}
       <div class="empty">{loading ? "" : "No media files."}</div>
     {:else}
-      {#if dir !== ""}
-        <button class="media-file folder-row up" onclick={goUp}>
-          <span class="glyph">▸</span>
-          <span>..</span>
-        </button>
-      {/if}
-      {#each view.folders as folder (folder.name)}
-        <button class="media-file folder-row" onclick={() => enter(folder)}>
-          <span class="glyph">📁</span>
-          <span>{folder.name}</span>
-          <span class="muted small">{folder.count} file{folder.count === 1 ? "" : "s"}</span>
-        </button>
-      {/each}
-      {#each view.files as f (f.path)}
-        <div class="media-file">
-          <span title={f.path}>{f.name}</span>
-          <span class="muted small">{bytes(f.sizeBytes)}</span>
-          <span class="muted small">{relTime(f.modTime)}</span>
-          <span class="spacer"></span>
-          <button class="btn btn-accent" onclick={() => playFile(f)}>Play here</button>
-        </div>
-      {/each}
+      <div class="file-list">
+        {#if dir !== ""}
+          <button class="media-file folder-row up" onclick={goUp}>
+            <span class="glyph">▸</span>
+            <span>..</span>
+          </button>
+        {/if}
+        {#each view.folders as folder (folder.name)}
+          <button class="media-file folder-row" onclick={() => enter(folder)}>
+            <span class="glyph">📁</span>
+            <span>{folder.name}</span>
+            <span class="muted small">{folder.count} file{folder.count === 1 ? "" : "s"}</span>
+          </button>
+        {/each}
+        {#each view.files as f (f.path)}
+          <div class="media-file">
+            <span title={f.path}>{f.name}</span>
+            <span class="muted small">{bytes(f.sizeBytes)}</span>
+            <span class="muted small">{relTime(f.modTime)}</span>
+            <span class="spacer"></span>
+            <button class="btn btn-accent" onclick={() => playFile(f)}>Play here</button>
+          </div>
+        {/each}
+      </div>
     {/if}
   </div>
 
@@ -183,5 +189,17 @@
   .media-label {
     color: var(--muted);
     font-size: 12px;
+  }
+
+  /* The file list scrolls internally so a large library never makes the card
+     (and the whole page) grow unbounded. Crumbs stay fixed above it. */
+  .file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 320px;
+    overflow-y: auto;
+    /* room for the scrollbar so rows don't jump under it */
+    padding-right: 4px;
   }
 </style>

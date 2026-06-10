@@ -204,4 +204,25 @@
     opacity: 0.4;
     cursor: default;
   }
+
+  /* Narrow viewports: stack into two rows — the ellipsised media info on top,
+     then the state pill + transport buttons below. Wide layout is unchanged. */
+  @media (max-width: 560px) {
+    .playbar {
+      flex-wrap: wrap;
+      min-height: 0;
+      row-gap: 8px;
+    }
+    .now {
+      order: 1;
+      flex-basis: 100%;
+    }
+    .state-pill {
+      order: 2;
+    }
+    .controls {
+      order: 3;
+      margin-left: auto; /* buttons to the right, state pill to the left */
+    }
+  }
 </style>
