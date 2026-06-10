@@ -109,7 +109,7 @@ Notes:
 - The unit pins `ENSEMBLE_DATA_DIR` so the node's identity lives at a stable path
   regardless of the working directory. To use **Spotify** on a system service, put
   the `go-librespot` binary in `WorkingDirectory` (or on `$PATH`) —
-  [details](scenarios/nas-master.md#where-to-get-go-librespot).
+  [details](spotify.md#native-install-go-librespot).
 
 > **Why a *system* service for a Pi but a *user* service for your desktop?** A
 > system service runs outside any login session, which is perfect for raw ALSA but

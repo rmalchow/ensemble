@@ -56,6 +56,12 @@ What a conforming node does (from the wire spec):
 > give it a comfortable buffer — the same Wi-Fi advice as for a
 > [Raspberry Pi](raspberry-pi.md#picking-the-right-output--tuning-sync).
 
+> **Spotify on the board?** The board never runs go-librespot — like any thin
+> playback node it can't advertise a Connect device. It still **plays Spotify**
+> whenever it's in a group whose master is sourcing one (start the session on a
+> [NAS master](nas-master.md) or [desktop](desktop.md)). To set up the advertised
+> Connect device on that master, see **[Spotify Connect](../spotify.md)**.
+
 ---
 
 ## Planned provisioning

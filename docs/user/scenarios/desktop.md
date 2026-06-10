@@ -106,9 +106,11 @@ ls            # ensemble  go-librespot
 ./ensemble --name studio
 ```
 
-Where to download it and exactly how ensemble locates it (working directory first,
-then `$PATH`) is in
-[Spotify Connect & podcasts](nas-master.md#spotify-connect--podcasts). Spotify
+The native binary does **not** bundle go-librespot (only the Docker master image
+does) — it's a separate, open-source project you add yourself. Where to download it,
+which release to match, and exactly how ensemble locates it (working directory
+first, then `$PATH`) is in
+**[Spotify Connect](../spotify.md#native-install-go-librespot)**. Spotify
 **Premium** is required; the login is saved in the data dir.
 
 ---

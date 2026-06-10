@@ -133,8 +133,9 @@ after a reboot.
 > **Spotify on a Pi?** A playback Pi doesn't need go-librespot — it just plays
 > whatever its group's master is sourcing, including a Spotify session started on
 > the NAS or a desktop. If you *want* the Pi itself to advertise a Spotify device,
-> drop a `go-librespot` binary next to its `ensemble` binary — see
-> [where to get go-librespot](nas-master.md#where-to-get-go-librespot).
+> install the separate `go-librespot` binary next to its `ensemble` binary — full
+> steps and release links in **[Spotify Connect](../spotify.md#native-install-go-librespot)**.
+> (The native binary does **not** bundle it; only the Docker master image does.)
 
 ---
 

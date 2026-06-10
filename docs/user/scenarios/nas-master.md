@@ -104,28 +104,15 @@ play in the Spotify app. Pausing/stopping in Spotify returns the group to idle.
 
 ### Where to get go-librespot
 
-- **Docker:** nothing to do — the official image already contains go-librespot
-  (built on the upstream `ghcr.io/devgianlu/go-librespot` image, v0.7.3).
-- **Native node:** download a prebuilt binary for your platform from the
-  [go-librespot releases](https://github.com/devgianlu/go-librespot/releases/latest)
-  (it's a separate open-source project, `github.com/devgianlu/go-librespot`), or
-  install it via `brew install go-librespot`, or build it from source.
-
-**How ensemble finds it:** at startup ensemble looks for an executable named
-`go-librespot` (then `librespot`) **in its working directory first, then on
-`$PATH`.** So the simplest deployment is to drop the `go-librespot` binary right
-next to the `ensemble` binary:
-
-```sh
-# in the directory you run ensemble from:
-ls
-# ensemble  go-librespot
-./ensemble --name house        # banner will report the resolved go-librespot path
-```
+- **Docker — included:** nothing to do. The official master image already contains
+  go-librespot (built on the upstream `ghcr.io/devgianlu/go-librespot:v0.7.3`
+  image), so Spotify Connect works out of the box.
+- **Native node:** install the separate `go-librespot` binary and drop it next to
+  `ensemble` (or on `$PATH`) — full steps, release links, and how ensemble locates
+  it are in **[Spotify Connect](../spotify.md#native-install-go-librespot)**.
 
 If no binary is found, Spotify is simply disabled and a line in the startup banner
-says so — everything else keeps working. (Audio is taken from go-librespot as s16le
-44.1 kHz over a local pipe; its localhost event API stays internal.)
+says so — everything else keeps working.
 
 ---
 

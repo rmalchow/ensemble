@@ -16,7 +16,8 @@ This guide gets you from zero to music:
 3. **[Pick your setup](#pick-your-setup)** — install instructions for each kind of device.
 4. **[Running ensemble](running.md)** — every way to start a node and keep it running (foreground, `nohup`, systemd, Docker, Compose).
 5. **[What can it play?](#what-can-it-play)** — local files, Spotify/podcasts, radio, line-in.
-6. **Reference** — the [UI Reference](ui-reference.md) (every screen and control) and the [Configuration Reference](config-reference.md) (every knob, explained).
+6. **[Spotify Connect](spotify.md)** — play Spotify & podcasts to any group (bundled in Docker; one binary to add natively).
+7. **Reference** — the [UI Reference](ui-reference.md) (every screen and control) and the [Configuration Reference](config-reference.md) (every knob, explained).
 
 ---
 
@@ -133,9 +134,9 @@ kinds:
   Set up per scenario; details in the [NAS guide](scenarios/nas-master.md#the-music-library).
 - **🟢 Spotify & podcasts (Spotify Connect)** — a node running **go-librespot**
   shows up as a device in your Spotify app; pick it and the whole group plays your
-  Spotify music *or podcasts*. Premium required. **Where to get go-librespot and
-  how ensemble finds it** is covered in
-  [Spotify Connect & podcasts](scenarios/nas-master.md#spotify-connect--podcasts).
+  Spotify music *or podcasts*. Premium required. **Bundled in the Docker master
+  image**; on native nodes you add the binary yourself — full setup, release links,
+  and how ensemble finds it in **[Spotify Connect](spotify.md)**.
 - **📻 Internet radio** — paste an `http(s)://…` stream URL in the media browser.
 - **🎚️ Line-in** — capture a sound card's input (a turntable, a TV) on nodes where
   the **input** feature is enabled, and stream *that* to the group.
