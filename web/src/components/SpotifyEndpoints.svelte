@@ -53,15 +53,20 @@
     endpoints = endpoints.filter((_, j) => j !== i);
     save();
   }
+  // Immutable updates (reassign the $state array) so the keyed {#each} item — and
+  // its EditableText value prop — reliably re-render after an edit.
   function renameEndpoint(i, name) {
-    endpoints[i].name = name;
+    endpoints = endpoints.map((e, j) => (j === i ? { ...e, name } : e));
     save();
   }
   function togglePlayer(i, pid) {
-    const ep = endpoints[i];
-    ep.players = ep.players.includes(pid)
-      ? ep.players.filter((x) => x !== pid)
-      : [...ep.players, pid];
+    endpoints = endpoints.map((e, j) => {
+      if (j !== i) return e;
+      const players = e.players.includes(pid)
+        ? e.players.filter((x) => x !== pid)
+        : [...e.players, pid];
+      return { ...e, players };
+    });
     save();
   }
 </script>
