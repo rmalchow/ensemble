@@ -34,8 +34,6 @@
     <span class="chip">{src.restarts} reconnects</span>
   {/if}
 
-  <span class="spacer"></span>
-
   <button
     class="btn icon-btn"
     onclick={() => leaveGroup(member)}
@@ -46,8 +44,7 @@
 
 <style>
   /* Leading column: prefers 16rem (so sliders line up across rows when there's
-     room) but SHRINKS when the card is narrow — the name ellipsises first and the
-     badges clip out, so the remove button never wraps to a second line. */
+     room) but shrinks on a narrow card — the name ellipsises. */
   .member-id {
     display: inline-flex;
     align-items: center;
@@ -63,16 +60,48 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* badges keep their size and simply clip out of the shrinking column */
   .member-id :global(.badge),
   .member-id :global(.chip) {
     flex: 0 0 auto;
   }
 
-  /* Leave control: icon-only, compact, pinned right (never shrinks/wraps). */
+  /* volume fills the middle of a wide row */
+  .member :global(.vol) {
+    flex: 1 1 auto;
+    min-width: 6rem;
+  }
+
+  /* Leave control: icon-only, compact, pinned to the right of the name line. */
   .icon-btn {
     flex: 0 0 auto;
+    margin-left: auto;
     line-height: 1;
     padding: 4px 7px;
+  }
+
+  /* Narrow cards: name + remove button on the first line (badges hidden), the
+     volume slider wraps to the next line. */
+  @media (max-width: 560px) {
+    .member {
+      flex-wrap: wrap;
+    }
+    .member-id {
+      order: 1;
+      flex: 1 1 auto;
+    }
+    .member-id :global(.badge),
+    .member-id :global(.chip) {
+      display: none;
+    }
+    .icon-btn {
+      order: 2;
+    }
+    .member :global(.vol) {
+      order: 3;
+      flex: 1 1 100%;
+    }
+    .member > :global(.chip) {
+      order: 3;
+    }
   }
 </style>
