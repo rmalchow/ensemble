@@ -18,6 +18,10 @@ type Engine interface {
 	Play(uri string) error
 	Stop() error
 	RefreshPlayback()
+	// Follow/Unfollow drive THIS node's own player (D49) — used to (un)join the
+	// master's own speaker to its group when it's a selected preset player.
+	Follow(target id.ID) error
+	Unfollow() error
 }
 
 // Cluster is the slice of the cluster the manager reads + writes to regroup a
@@ -281,8 +285,22 @@ func (m *Manager) setGroupMembers(players []id.ID) {
 	for _, p := range players {
 		want[p] = true
 	}
-	// Join wanted playback nodes.
+
+	// This node's OWN player is a gossiping node, not a playback node — it joins
+	// its group by following itself (the engine's canonical path), not via
+	// AssignPlaybackNode. Only unfollow when WE currently follow ourselves, so a
+	// crosswise follow of another group is left undisturbed.
+	if want[self] {
+		_ = m.engine.Follow(self)
+	} else if nv, ok := nodeByID(snap, self); ok && nv.Following == self {
+		_ = m.engine.Unfollow()
+	}
+
+	// Join wanted non-gossiping playback nodes.
 	for _, p := range players {
+		if p == self {
+			continue
+		}
 		if nv, ok := nodeByID(snap, p); ok && nv.PlaybackNode {
 			m.cluster.AssignPlaybackNode(p, self)
 		}

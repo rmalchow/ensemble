@@ -9,10 +9,12 @@ import (
 )
 
 type fakeEngine struct {
-	mu      sync.Mutex
-	plays   []string
-	stops   int
-	refresh int
+	mu        sync.Mutex
+	plays     []string
+	stops     int
+	refresh   int
+	follows   []id.ID
+	unfollows int
 }
 
 func (f *fakeEngine) Play(uri string) error {
@@ -23,6 +25,13 @@ func (f *fakeEngine) Play(uri string) error {
 }
 func (f *fakeEngine) Stop() error      { f.mu.Lock(); f.stops++; f.mu.Unlock(); return nil }
 func (f *fakeEngine) RefreshPlayback() { f.mu.Lock(); f.refresh++; f.mu.Unlock() }
+func (f *fakeEngine) Follow(t id.ID) error {
+	f.mu.Lock()
+	f.follows = append(f.follows, t)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeEngine) Unfollow() error { f.mu.Lock(); f.unfollows++; f.mu.Unlock(); return nil }
 
 type fakeCl struct {
 	self    id.ID
@@ -77,6 +86,52 @@ func TestOnPlayPresetRegroupsAndPlays(t *testing.T) {
 		if got[n] != tgt {
 			t.Fatalf("assign[%v]=%v, want %v (all=%v)", n, got[n], tgt, cl.assigns)
 		}
+	}
+}
+
+// When the master's own node is a selected player it joins by following itself
+// (gossiping node, not a playback node); other playback nodes still assign.
+func TestOnPlayIncludesMasterSelf(t *testing.T) {
+	self, p1 := mkID(1), mkID(2)
+	cl := &fakeCl{self: self, snap: contracts.Snapshot{Nodes: []contracts.NodeView{
+		{ID: self},                   // gossiping master (NOT a PlaybackNode)
+		{ID: p1, PlaybackNode: true}, // non-gossiping speaker
+	}}}
+	eng := &fakeEngine{}
+	m := newTestMgr(eng, cl)
+	m.bridges["all"] = &managed{ep: contracts.SpotifyEndpoint{ID: "all", Players: []id.ID{self, p1}}}
+
+	m.onPlay("all")
+
+	if len(eng.follows) != 1 || eng.follows[0] != self {
+		t.Fatalf("master self not joined via Follow(self): follows=%v", eng.follows)
+	}
+	found := false
+	for _, a := range cl.assigns {
+		if a == [2]id.ID{p1, self} {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("playback node p1 not assigned to self: %v", cl.assigns)
+	}
+}
+
+// When the master is NOT a selected player but currently follows itself, it
+// unfollows (leaves its own group); a crosswise follow is left alone.
+func TestOnPlayMasterSelfUnfollowsWhenNotWanted(t *testing.T) {
+	self, p1 := mkID(1), mkID(2)
+	cl := &fakeCl{self: self, snap: contracts.Snapshot{Nodes: []contracts.NodeView{
+		{ID: self, Following: self}, // currently in its own group
+		{ID: p1, PlaybackNode: true},
+	}}}
+	eng := &fakeEngine{}
+	m := newTestMgr(eng, cl)
+	m.bridges["x"] = &managed{ep: contracts.SpotifyEndpoint{ID: "x", Players: []id.ID{p1}}}
+
+	m.onPlay("x")
+	if eng.unfollows != 1 {
+		t.Fatalf("master should unfollow when not a wanted player, unfollows=%d", eng.unfollows)
 	}
 }
 
