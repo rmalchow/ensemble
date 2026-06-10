@@ -319,7 +319,8 @@ func run(ctx context.Context, opt options) (rerr error) {
 		InputDevices:     inputDevices,
 		Caps:             caps,
 		Disabled:         cfg.Disabled,
-		InitialFollowing: cfg.Following, // D45: rejoin previous group on return
+		SpotifyEndpoints: cfg.SpotifyEndpoints, // D57: seed presets from node.json so the snapshot has them on boot
+		InitialFollowing: cfg.Following,        // D45: rejoin previous group on return
 		Addrs:            addrs,
 		HTTPPort:         httpPort,
 		StreamPort:       streamPort,

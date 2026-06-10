@@ -126,9 +126,14 @@ func (m *Manager) reconcilePresetsLocked(endpoints []contracts.SpotifyEndpoint) 
 	for eid, ep := range want {
 		if mg, ok := m.bridges[eid]; ok {
 			if mg.ep.Name != ep.Name {
-				go m.renameBridge(mg.bridge, m.deviceName(eid, ep.Name))
+				// Restart so the new Connect name is re-advertised over zeroconf —
+				// go-librespot's set_device_name does not refresh the live advert,
+				// and the config dir persists auth so there is no re-login.
+				m.stopLocked(eid)
+				m.startLocked(eid, ep)
+			} else {
+				mg.ep = ep // player-set change only — applies on the next play, no restart
 			}
-			mg.ep = ep // player-set change takes effect on the next play
 			continue
 		}
 		m.startLocked(eid, ep)
@@ -182,27 +187,26 @@ func (m *Manager) stopLocked(eid string) {
 	}
 }
 
-// Rename updates the node name → renames every Connect device live (no restart).
+// Rename updates the node name → restarts every bridge so each Connect device
+// re-advertises its new "ensemble <node>[: <preset>]" name over zeroconf (a live
+// set_device_name doesn't refresh the advert; the config dir keeps auth, so no
+// re-login). Node renames are rare, so the brief re-advertise blip is acceptable.
 func (m *Manager) Rename(nodeName string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.started {
+		m.nodeName = nodeName
+		return
+	}
 	m.nodeName = nodeName
-	type job struct {
-		b    *Bridge
-		name string
+	ids := make([]string, 0, len(m.bridges))
+	for eid := range m.bridges {
+		ids = append(ids, eid)
 	}
-	jobs := make([]job, 0, len(m.bridges))
-	for eid, mg := range m.bridges {
-		jobs = append(jobs, job{mg.bridge, m.deviceName(eid, mg.ep.Name)})
-	}
-	m.mu.Unlock()
-	for _, j := range jobs {
-		m.renameBridge(j.b, j.name)
-	}
-}
-
-func (m *Manager) renameBridge(b *Bridge, name string) {
-	if err := b.SetDeviceName(name); err != nil {
-		m.log.Warn("spotify device rename failed", "name", name, "err", err)
+	for _, eid := range ids {
+		ep := m.bridges[eid].ep
+		m.stopLocked(eid)
+		m.startLocked(eid, ep)
 	}
 }
 
