@@ -55,8 +55,11 @@ e2e:
   needs: [frontend]
   # Integration smoke over a real multi-node loopback cluster. Timing-sensitive
   # in shared CI runners (slow scheduling can starve the playout deadline), so
-  # it reports but does not BLOCK — the unit `test` job is the release gate.
-  allow_failure: true
+  # it never runs automatically — trigger it by hand from the pipeline when
+  # wanted. The unit `test` job is the release gate.
+  rules:
+    - when: manual
+      allow_failure: true
   cache: { key: gomod, paths: [.gomodcache], policy: pull }
   variables:
     DEBIAN_FRONTEND: noninteractive
@@ -118,58 +121,51 @@ build-release:
       dotenv: build.env
     expire_in: never
 
-# 3b) Android companion APK (android/). Heavier than the Go builds (it provisions an
-# Android SDK), so the branch build is MANUAL/opt-in; tag pipelines build it
-# automatically for the release. Output is a DEBUG-signed, directly-installable APK
-# (no keystore to manage). For Play-Store-grade signing, add a release keystore via
-# CI variables and switch to assembleRelease.
-.android-template:
+# 3c) Multi-arch (amd64 + arm64) Docker image of an ensemble MASTER, Spotify
+# built in. The Dockerfile (docker/Dockerfile) is self-contained — it builds the
+# SPA and cross-compiles the binary in its own stages — so this job needs no
+# artifacts. Pushes :dev on the default branch, and :<tag>/:latest on a release
+# tag. Requires a registry-auth file in the CONFIG_JSON file variable and an
+# $IMAGE repo (defaults to this project's registry). buildx + QEMU run on dind.
+docker:
   stage: build
-  # Bundles the Android SDK + build-tools + a JDK, runs as root, licenses accepted —
-  # so no apt/SDK provisioning here. Pin a tag for reproducibility. (AGP can also
-  # auto-fetch any missing platform/build-tools via the image's sdkmanager.)
-  image: mingc/android-build-box:1.27.0
-  needs: [test]
+  image: docker:28-cli
+  needs: []
+  services:
+    - docker:28-dind
   variables:
-    GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
-  cache:
-    key: android-gradle          # Gradle dist + deps persist across runs (first run is slow)
-    paths: [.gradle/]
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+    IMAGE: "$CI_REGISTRY_IMAGE"
+    PLATFORMS: "linux/amd64,linux/arm64"
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - mkdir -p ~/.docker
+    - cp "${CONFIG_JSON}" ~/.docker/config.json
+    # Register QEMU so the arm64 runtime-stage apt-get runs under emulation, and
+    # spin up a buildx builder that can emit a multi-platform manifest.
+    - docker run --privileged --rm tonistiigi/binfmt --install all
+    - docker buildx create --use --name ensemble-builder
   script:
-    # Generate a wrapper pinned to Gradle 8.7 (AGP 8.5.2 needs ≥8.7) so the build is
-    # independent of whatever gradle the image ships, then build a DEBUG-signed,
-    # directly-installable APK (no keystore needed).
-    - cd android
-    - gradle wrapper --gradle-version 8.7 --no-daemon
-    - ./gradlew --no-daemon assembleDebug
-    - cd ..
-    - mv android/app/build/outputs/apk/debug/app-debug.apk ensemble-companion.apk
-    - echo "BUILD_JOB_ID_ANDROID=$CI_JOB_ID" > android.env
+    # main → "dev"; release tag → the tag itself (also moves :latest).
+    - VER="${CI_COMMIT_TAG:-dev}"
+    - TAGS="-t $IMAGE:$VER"; if [ -n "$CI_COMMIT_TAG" ]; then TAGS="$TAGS -t $IMAGE:latest"; fi
+    - docker buildx build
+      --platform "$PLATFORMS"
+      -f docker/Dockerfile
+      --build-arg VERSION="$VER"
+      $TAGS
+      --push
+      .
   tags:
     - shared
 
-android:                          # branch/MR: opt-in dev APK (manual; CI stays light)
-  extends: .android-template
-  rules:
-    - if: $CI_COMMIT_TAG
-      when: never
-    - when: manual
-      allow_failure: true
-  artifacts:
-    name: "ensemble-companion-${CI_COMMIT_REF_SLUG}"
-    paths: [ensemble-companion.apk]
-    expire_in: 4 weeks
-
-android-release:                  # tag: built automatically, linked into the release
-  extends: .android-template
-  rules:
-    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
-  artifacts:
-    name: "ensemble-companion-${CI_COMMIT_TAG}"
-    paths: [ensemble-companion.apk]
-    reports:
-      dotenv: android.env
-    expire_in: never
+# The Android companion app lives in its own repo (share/ensemble-android) and
+# builds/releases its APK there.
 
 # 4) Changelog for a tagged release: commits since the previous v* tag.
 changelog:
@@ -196,7 +192,7 @@ changelog:
         echo
         echo "Pure-Go binaries for linux/amd64 + linux/arm64 + linux/armv6 (Pi Zero W / Pi 1)."
         echo "Optional libraries (libopus, libasound) are loaded at runtime."
-        echo "Android companion APK (ensemble-companion.apk): discovers masters via mDNS."
+        echo "Android companion APK: see the share/ensemble-android project."
       } > release-notes.md
     - cat release-notes.md
   artifacts:
@@ -219,10 +215,10 @@ changelog:
 release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
-  needs: [build-release, android-release, changelog, test]
+  needs: [build-release, changelog, test]
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
-  script: [ 'echo "Releasing $CI_COMMIT_TAG (amd64 $BUILD_JOB_ID_AMD64, arm64 $BUILD_JOB_ID_ARM64, armv6 $BUILD_JOB_ID_ARMV6, android $BUILD_JOB_ID_ANDROID)"' ]
+  script: [ 'echo "Releasing $CI_COMMIT_TAG (amd64 $BUILD_JOB_ID_AMD64, arm64 $BUILD_JOB_ID_ARM64, armv6 $BUILD_JOB_ID_ARMV6)"' ]
   release:
     tag_name: "$CI_COMMIT_TAG"
     name: "Ensemble $CI_COMMIT_TAG"
@@ -235,7 +231,5 @@ release:
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARM64/artifacts/raw/bin/ensemble-linux-arm64"
         - name: "ensemble-linux-armv6 ($CI_COMMIT_TAG)"
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARMV6/artifacts/raw/bin/ensemble-linux-armv6"
-        - name: "ensemble-companion.apk ($CI_COMMIT_TAG)"
-          url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ANDROID/artifacts/raw/ensemble-companion.apk"
   tags:
     - shared

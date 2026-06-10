@@ -49,6 +49,10 @@ cd ensemble
 
 Prebuilt binaries are attached to each [tagged release](RELEASING.md).
 
+**Running in Docker?** A multi-arch master image (amd64 + arm64, Spotify Connect
+built in) plus a Compose example live in [`docker/`](docker/) — see the
+[Docker quick start](QUICKSTART.md).
+
 ### Run
 
 On each device:

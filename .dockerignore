@@ -1,0 +1,17 @@
+# Keep the build context lean. The image builds the SPA (frontend stage) and
+# cross-compiles the binary (builder stage) from source; it needs go source +
+# web/ source, nothing else. go-librespot comes from the base image, so the
+# prebuilt respot/ binaries are not part of the Docker build.
+.git
+.gitlab-ci.yml
+bin/
+docs/
+data/
+testdata/
+scripts/
+respot/                 # go-librespot ships in the base image, not here
+ensemble                # prebuilt host binary at repo root
+web/node_modules/
+web/dist/               # rebuilt in the frontend stage
+**/*_test.go
+*.md

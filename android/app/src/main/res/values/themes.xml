@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- A bare no-action-bar framework theme; the UI itself is Compose MaterialTheme,
-     so no Material Components XML dependency is needed here. -->
-<resources>
-    <style name="Theme.Ensemble" parent="@android:style/Theme.Material.Light.NoActionBar" />
-</resources>

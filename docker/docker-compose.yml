@@ -1,0 +1,37 @@
+# Ensemble master — example deployment. Full guide: ../QUICKSTART.md
+#
+#   docker compose -f docker/docker-compose.yml up -d
+#
+services:
+  ensemble:
+    # Pull the published image, or build locally (uncomment `build:`).
+    image: registry.gitlab.rand0m.me/share/ensemble:latest
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    container_name: ensemble-master
+    restart: unless-stopped
+
+    # Host networking is REQUIRED for a working cluster: playback nodes discover
+    # the master over mDNS, and the bundled go-librespot advertises Spotify
+    # Connect over zeroconf — both need real LAN presence. Ports also bind-or-
+    # increment, so there is nothing to publish. (See QUICKSTART.md for the
+    # bridge-mode fallback with explicit port mappings, which disables both.)
+    network_mode: host
+
+    environment:
+      ENSEMBLE_ROLE: master          # this image is master-only
+      ENSEMBLE_MEDIA_DIR: /media
+      ENSEMBLE_DATA_DIR: /data
+      # ENSEMBLE_LOG: info           # debug | info | warn | error
+
+    # Sets the display name + the Spotify device name ("ensemble living-room").
+    # First start only; afterwards the name lives in /data/node.json.
+    command: ["--name", "living-room"]
+
+    volumes:
+      - /srv/music:/media:ro         # your library — READ-ONLY
+      - ensemble-data:/data          # node.json, cluster.json, go-librespot creds + FIFO — READ-WRITE
+
+volumes:
+  ensemble-data:
