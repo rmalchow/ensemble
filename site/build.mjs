@@ -41,7 +41,7 @@ const screens = C.screens.items
     (s, i) => `
       <article class="screen${i % 2 ? " flip" : ""}">
         <figure class="screen-shot">
-          <img src="${esc(s.src)}" alt="${esc(s.alt)}" loading="lazy" decoding="async" />
+          <img class="lb-thumb" data-lb="${i}" role="button" tabindex="0" aria-label="Open “${esc(s.title)}” full size" src="${esc(s.src)}" alt="${esc(s.alt)}" loading="lazy" decoding="async" />
         </figure>
         <div class="screen-copy">
           <span class="kicker">${eq(5)}${esc(s.kicker)}</span>
@@ -51,6 +51,26 @@ const screens = C.screens.items
       </article>`
   )
   .join("");
+
+// Lightbox carousel — same image set as the screens gallery, in order.
+const lbSlides = C.screens.items
+  .map(
+    (s) => `
+      <figure class="lb-slide" data-cap="${esc(s.kicker)} — ${esc(s.title)}">
+        <img src="${esc(s.src)}" alt="${esc(s.alt)}" loading="lazy" decoding="async" />
+      </figure>`
+  )
+  .join("");
+
+const lbDots = C.screens.items
+  .map(
+    (s, i) =>
+      `<button class="lb-dot" type="button" data-i="${i}" aria-label="View “${esc(s.title)}”"></button>`
+  )
+  .join("");
+
+// The hero reuses one of the gallery shots; open the lightbox at its slide.
+const heroLbIdx = Math.max(0, C.screens.items.findIndex((s) => s.src === C.hero.shot.src));
 
 const steps = C.how.steps
   .map(
@@ -156,7 +176,7 @@ const page = `<!doctype html>
       </div>
     </div>
     <figure class="hero-shot">
-      <div class="frame"><img src="${esc(C.hero.shot.src)}" alt="${esc(C.hero.shot.alt)}" /></div>
+      <div class="frame"><img class="lb-thumb" data-lb="${heroLbIdx}" role="button" tabindex="0" aria-label="Open screenshots full size" src="${esc(C.hero.shot.src)}" alt="${esc(C.hero.shot.alt)}" /></div>
     </figure>
   </section>
 
@@ -217,6 +237,83 @@ const page = `<!doctype html>
   <p class="foot-note">${esc(C.footer.note)}</p>
   <nav class="foot-links">${footLinks}</nav>
 </footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Screenshots" hidden>
+  <button class="lb-btn lb-close" type="button" aria-label="Close (Esc)">✕</button>
+  <button class="lb-btn lb-nav lb-prev" type="button" aria-label="Previous">‹</button>
+  <button class="lb-btn lb-nav lb-next" type="button" aria-label="Next">›</button>
+  <div class="lb-track">${lbSlides}</div>
+  <p class="lb-cap" aria-live="polite"></p>
+  <div class="lb-dots">${lbDots}</div>
+</div>
+
+<script>
+(function () {
+  var lb = document.getElementById("lightbox");
+  if (!lb) return;
+  var track = lb.querySelector(".lb-track");
+  var slides = [].slice.call(lb.querySelectorAll(".lb-slide"));
+  var dots = [].slice.call(lb.querySelectorAll(".lb-dot"));
+  var capEl = lb.querySelector(".lb-cap");
+  var caps = slides.map(function (s) { return s.getAttribute("data-cap") || ""; });
+  var n = slides.length, idx = 0, lastFocus = null, raf = 0;
+
+  function render() {
+    dots.forEach(function (d, k) { d.setAttribute("aria-current", k === idx ? "true" : "false"); });
+    capEl.textContent = caps[idx];
+  }
+  function goTo(i, smooth) {
+    idx = Math.max(0, Math.min(n - 1, i));
+    track.scrollTo({ left: slides[idx].offsetLeft, behavior: smooth ? "smooth" : "auto" });
+    render();
+  }
+  function syncFromScroll() {
+    var i = Math.round(track.scrollLeft / track.clientWidth);
+    if (i !== idx && i >= 0 && i < n) { idx = i; render(); }
+  }
+  function open(i) {
+    lastFocus = document.activeElement;
+    lb.hidden = false;
+    document.documentElement.style.overflow = "hidden";
+    requestAnimationFrame(function () { goTo(i, false); });
+    lb.querySelector(".lb-close").focus();
+  }
+  function close() {
+    lb.hidden = true;
+    document.documentElement.style.overflow = "";
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+
+  [].slice.call(document.querySelectorAll("[data-lb]")).forEach(function (el) {
+    el.addEventListener("click", function (e) { e.preventDefault(); open(+el.getAttribute("data-lb") || 0); });
+    el.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(+el.getAttribute("data-lb") || 0); }
+    });
+  });
+
+  track.addEventListener("scroll", function () {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(syncFromScroll);
+  }, { passive: true });
+
+  lb.querySelector(".lb-prev").addEventListener("click", function () { goTo(idx - 1, true); });
+  lb.querySelector(".lb-next").addEventListener("click", function () { goTo(idx + 1, true); });
+  lb.querySelector(".lb-close").addEventListener("click", close);
+  dots.forEach(function (d) {
+    d.addEventListener("click", function () { goTo(+d.getAttribute("data-i") || 0, true); });
+  });
+  // Click outside the image (backdrop / slide padding) closes.
+  lb.addEventListener("click", function (e) {
+    if (e.target === lb || e.target.classList.contains("lb-slide") || e.target.classList.contains("lb-track")) close();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (lb.hidden) return;
+    if (e.key === "Escape") close();
+    else if (e.key === "ArrowLeft") goTo(idx - 1, true);
+    else if (e.key === "ArrowRight") goTo(idx + 1, true);
+  });
+})();
+</script>
 </body>
 </html>
 `;
