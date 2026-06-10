@@ -1,0 +1,11 @@
+{
+  "name": "ensemble-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Marketing site for ensemble — a zero-dependency static generator.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "node build.mjs && cd dist && python3 -m http.server 8000"
+  }
+}
