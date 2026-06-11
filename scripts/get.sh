@@ -63,6 +63,62 @@ fetch() { # fetch URL OUTFILE  (follows redirects; curl or wget)
   else err "need curl or wget"; fi
 }
 
+# disable_unit stops+disables a systemd unit, a safe no-op when it is absent.
+disable_unit() { systemctl disable --now "$1" >/dev/null 2>&1 || true; }
+
+# harden_appliance trims a desktop Raspberry Pi OS image down to a headless audio
+# node: boot to console (no GUI — frees the audio card from the desktop's
+# PipeWire), drop services a speaker never needs, send logs to RAM, and disable
+# swap (both reduce SD-card writes / power-loss corruption). ensemble runs its own
+# mDNS, so avahi is removed too — reach the node by IP afterwards, not <name>.local.
+harden_appliance() {
+  say "Hardening as a headless appliance…"
+
+  # Boot to the console target, not the graphical one (kills lightdm + the whole
+  # user desktop session: labwc, pcmanfm, panels, PipeWire, gvfs, portals).
+  systemctl set-default multi-user.target >/dev/null 2>&1 || true
+  disable_unit lightdm.service
+
+  for u in bluetooth.service avahi-daemon.service udisks2.service \
+           accounts-daemon.service "serial-getty@ttyS0.service"; do
+    disable_unit "$u"
+  done
+  systemctl mask packagekit.service >/dev/null 2>&1 || true
+
+  # NFS client plumbing — only when nothing is actually NFS-mounted.
+  if [ -z "$(mount -t nfs,nfs4 2>/dev/null)" ]; then
+    disable_unit rpcbind.service
+    disable_unit rpcbind.socket
+    disable_unit nfs-blkmap.service
+  else
+    say "  (NFS mounts present — keeping rpcbind/nfs)"
+  fi
+
+  # Logs to RAM (no steady /var/log writes) via a journald drop-in.
+  install -d /etc/systemd/journald.conf.d
+  cat >/etc/systemd/journald.conf.d/ensemble.conf <<'JCONF'
+# Installed by the ensemble installer (--harden): keep logs in RAM to spare the
+# SD card and avoid power-loss corruption. Logs do not survive a reboot.
+[Journal]
+Storage=volatile
+RuntimeMaxUse=32M
+JCONF
+  systemctl restart systemd-journald >/dev/null 2>&1 || true
+
+  # Disable swap (the Pi swaps to the SD card).
+  if command -v dphys-swapfile >/dev/null 2>&1; then
+    dphys-swapfile swapoff >/dev/null 2>&1 || true
+    disable_unit dphys-swapfile.service
+  fi
+
+  ok "hardened: GUI off, extra services disabled, logs→RAM, swap off"
+  say "  Not automated (edit by hand if you want them):"
+  say "    · 'noatime' on the root mount in /etc/fstab (fewer writes)"
+  say "    · read-only root + overlayfs — but then bind-mount $DATADIR to a"
+  say "      writable partition, or ensemble loses node.json and mints a NEW id"
+  say "      every boot (the duplicate-node trap)."
+}
+
 [ "$(id -u)" = 0 ] || err "run as root:  curl -fsSL $BASE/get.sh | sudo bash"
 [ "$(uname -s)" = Linux ] || err "ensemble ships Linux binaries only (got $(uname -s))"
 command -v tar >/dev/null 2>&1 || err "need tar"
@@ -176,6 +232,15 @@ UNITEOF
   ok "ensemble.service enabled + started   ·   logs:  journalctl -u ensemble -f"
 else
   say "No service installed. Run it yourself:  ensemble"
+fi
+
+# --- headless-appliance hardening (optional) ---------------------------------
+# Trims a desktop Pi image to a console-only audio node and reduces SD-card wear.
+# Skipped without systemd. Default no — it disables the desktop and other system
+# services, so it's opt-in.
+if command -v systemctl >/dev/null 2>&1 &&
+  ask "Harden as a headless audio appliance (disable desktop + extras, logs→RAM, no swap)?"; then
+  harden_appliance
 fi
 
 printf '\n%s ✓%s ensemble is ready — open the web UI at  http://<this-host>:8080\n' "$c_ok" "$c_off"
