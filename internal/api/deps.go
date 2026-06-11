@@ -95,6 +95,10 @@ type Group interface {
 // fsLister (media.go) satisfies it.
 type Media interface {
 	List() ([]MediaFile, error)
+	// Cover returns the cover-art bytes + content type for a file: URI under the
+	// media root: a sibling cover image (preferred) else the file's embedded
+	// picture. ok=false when the URI isn't a local media file or has no art.
+	Cover(uri string) (data []byte, contentType string, ok bool)
 }
 
 // NodeConfig is the on-disk persistence side of PATCH /api/node (§9.1). Piece A

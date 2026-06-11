@@ -69,6 +69,7 @@ func openFile(_ context.Context, uri, mediaDir string) (Source, error) {
 	// Read embedded tags first (consumes the reader), then rewind so the decoder
 	// sees the file from byte 0.
 	meta := ReadTags(f, filepath.Base(full))
+	meta.HasArt = meta.HasArt || folderCover(full) != "" // sibling cover.jpg/png/…
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("%w: seek %q: %v", ErrBadMedia, uri, err)

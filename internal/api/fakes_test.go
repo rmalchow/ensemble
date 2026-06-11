@@ -384,8 +384,15 @@ func (s *fakeSink) SetDelayOffset(nanos int64) {
 
 // fakeMedia implements Media.
 type fakeMedia struct {
-	files []MediaFile
-	err   error
+	files     []MediaFile
+	err       error
+	cover     []byte
+	coverType string
+	coverOK   bool
 }
 
 func (m *fakeMedia) List() ([]MediaFile, error) { return m.files, m.err }
+
+func (m *fakeMedia) Cover(string) ([]byte, string, bool) {
+	return m.cover, m.coverType, m.coverOK
+}

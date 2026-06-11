@@ -188,9 +188,9 @@
 
   <div class="now">
     {#if active}
-      {#if meta && meta.artUrl}
-        <img class="art" src={meta.artUrl} alt="" />
-      {:else if icon}
+      <!-- a small source-type glyph identifies the source at a glance; the album
+           cover (when any) is the big art slot up in the card, not here. -->
+      {#if icon}
         <span class="icon">{icon}</span>
       {/if}
       <span class="meta" title={pb.uri}>
@@ -340,14 +340,6 @@
   .now .icon {
     flex: 0 0 auto;
     font-size: 15px;
-  }
-  .now .art {
-    flex: 0 0 auto;
-    width: 34px;
-    height: 34px;
-    border-radius: 4px;
-    object-fit: cover;
-    background: var(--panel-2);
   }
   /* title + subtitle stack; ellipsised so controls never move */
   .now .meta {

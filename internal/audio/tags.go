@@ -32,6 +32,7 @@ func ReadTags(r io.ReadSeeker, fallbackName string) contracts.TrackMetadata {
 	if al := strings.TrimSpace(m.Album()); al != "" {
 		md.Album = al
 	}
+	md.HasArt = m.Picture() != nil // embedded art; callers OR-in any folder cover
 	return md
 }
 
@@ -61,5 +62,7 @@ func Probe(_ context.Context, uri, mediaDir string) (contracts.TrackMetadata, bo
 		return contracts.TrackMetadata{}, false
 	}
 	defer f.Close()
-	return ReadTags(f, filepath.Base(full)), true
+	md := ReadTags(f, filepath.Base(full))
+	md.HasArt = md.HasArt || folderCover(full) != "" // sibling cover.jpg/png/…
+	return md, true
 }

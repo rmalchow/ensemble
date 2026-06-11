@@ -108,6 +108,27 @@ func (s *Server) handleMedia(c echo.Context) error {
 	return c.JSON(http.StatusOK, files)
 }
 
+// handleCover serves a file's now-playing cover art (GET /cover?uri=file:…): a
+// sibling cover image, else the embedded picture. Proxied to the playing master
+// like /queue; the UI requests it only when TrackMetadata.HasArt was advertised.
+// 404 when there's no art so the UI's <img> onerror can collapse the slot.
+func (s *Server) handleCover(c echo.Context) error {
+	if s.cfg.Media == nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	uri := c.QueryParam("uri")
+	if uri == "" {
+		return failCode(c, http.StatusBadRequest, "bad_request", "")
+	}
+	data, ctype, ok := s.cfg.Media.Cover(uri)
+	if !ok {
+		return c.NoContent(http.StatusNotFound)
+	}
+	// Art is immutable per (uri, bytes); let the browser cache it for the session.
+	c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+	return c.Blob(http.StatusOK, ctype, data)
+}
+
 // handlePatchNode applies {name?, volume?, outputDelayMs?, outputDevice?} to THIS
 // node: persist (A) → replicate (C) → apply live (E), per field (§9.1,
 // D35/D36/D37).

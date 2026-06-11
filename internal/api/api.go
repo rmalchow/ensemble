@@ -87,6 +87,7 @@ func New(cfg Config) *Server {
 	g.PATCH("/node", s.handlePatchNode)
 	g.GET("/cluster", s.handleCluster)
 	g.GET("/media", s.handleMedia)
+	g.GET("/cover", s.handleCover)
 	g.POST("/follow", s.handleFollow)
 	g.POST("/unfollow", s.handleUnfollow)
 	g.POST("/node/forget", s.handleForgetNode)

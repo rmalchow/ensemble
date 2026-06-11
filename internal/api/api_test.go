@@ -109,6 +109,7 @@ func TestNewRegistersAllRoutes(t *testing.T) {
 		"PATCH /api/node":          false,
 		"GET /api/cluster":         false,
 		"GET /api/media":           false,
+		"GET /api/cover":           false,
 		"POST /api/follow":         false,
 		"POST /api/unfollow":       false,
 		"POST /api/group/name":     false,

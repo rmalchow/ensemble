@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"ensemble/internal/audio"
 )
 
 // mediaExts are the playable file extensions (§6, lowercase, with dot).
@@ -66,4 +68,12 @@ func (l *fsLister) List() ([]MediaFile, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// Cover resolves uri under the media root and returns its cover image (sibling
+// cover.jpg/png/… preferred, else the embedded picture). Path resolution + the
+// traversal guard live in the audio package (single source of truth for file:
+// URIs); ok=false for non-file URIs, traversal, or no art.
+func (l *fsLister) Cover(uri string) (data []byte, contentType string, ok bool) {
+	return audio.CoverArt(uri, l.dir)
 }
