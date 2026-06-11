@@ -210,7 +210,8 @@ func (s *session) playbackRecord(now time.Time, st contracts.SourceStats) contra
 			rec.URI = uri
 		}
 		rec.Metadata = meta
-		rec.Queue = upcoming
+		rec.QueueLen = len(upcoming)
+		rec.QueueRev = qp.QueueRev()
 		if !s.paused.Load() {
 			rec.PositionSec = posSec
 		}

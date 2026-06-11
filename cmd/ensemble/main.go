@@ -346,6 +346,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("sink backend %q: %w", opt.Output, err)
 	}
+	cl.SetOutputBackend(backendName) // report the CHOSEN backend so the UI can show it
 	theSink := sink.New(sink.Config{
 		Backend:       backend,
 		Clock:         clockFol,
@@ -1199,6 +1200,14 @@ func (g *groupAdapter) Enqueue(ctx context.Context, uris []string) error {
 
 func (g *groupAdapter) RemoveFromQueue(ctx context.Context, index int, uriGuard string) error {
 	return mapErr(g.e.RemoveFromQueue(index, uriGuard))
+}
+
+func (g *groupAdapter) PlayQueuedNow(ctx context.Context, index int, uriGuard string) error {
+	return mapErr(g.e.PlayQueuedNow(index, uriGuard))
+}
+
+func (g *groupAdapter) QueueList() []contracts.QueueItem {
+	return g.e.QueueSnapshot()
 }
 
 func (g *groupAdapter) Next(ctx context.Context) error {

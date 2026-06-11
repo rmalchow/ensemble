@@ -60,6 +60,10 @@ type MetadataSource interface {
 // fields. Single sources (http/input/spotify) don't implement it.
 type QueueProgress interface {
 	Now() (uri string, meta *contracts.TrackMetadata, positionSec float64, upcoming []contracts.QueueItem)
+	// QueueRev is a monotonic counter bumped on every queue change (append, skip,
+	// remove, promote, track advance). It rides the playback record so the UI knows
+	// when to re-pull the queue contents; the items themselves are NOT gossiped.
+	QueueRev() int64
 }
 
 // MediaFactory opens a URI into a MediaSource by scheme (§6.1/D26). The concrete

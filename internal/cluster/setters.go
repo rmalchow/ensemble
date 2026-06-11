@@ -105,6 +105,21 @@ func (c *Cluster) SetOutputDevice(device string) {
 	c.broadcastOwn(snap)
 }
 
+// SetOutputBackend records this node's CHOSEN sink backend ("alsa"|"exec"|"null",
+// §8.5), set once after the backend opens at boot. No-op when unchanged.
+func (c *Cluster) SetOutputBackend(backend string) {
+	c.mu.Lock()
+	if c.closed || c.own().OutputBackend == backend {
+		c.mu.Unlock()
+		return
+	}
+	r := c.bumpOwn()
+	r.OutputBackend = backend
+	snap := cloneNode(r)
+	c.mu.Unlock()
+	c.broadcastOwn(snap)
+}
+
 // SetDisabled replaces this node's operator-disabled feature list (D40, a D14
 // extension). Caller validates the subset; C stores verbatim and re-projects
 // effective caps (probed − disabled) in the NodeView. No-op when unchanged.
@@ -186,7 +201,8 @@ func (c *Cluster) SetPlayback(group id.ID, pb contracts.Playback) {
 		Transport:   pb.Transport,
 		Source:      pb.Source,
 		Metadata:    pb.Metadata,
-		Queue:       pb.Queue,
+		QueueLen:    pb.QueueLen,
+		QueueRev:    pb.QueueRev,
 		Version:     ver + 1,
 		UpdatedAt:   c.clock().Unix(),
 		Writer:      c.self,

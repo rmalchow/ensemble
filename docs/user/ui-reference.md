@@ -101,6 +101,9 @@ bar:
   one straight away, keeping the rest of the queue intact.
 - **Skip** — **⏭ next** on the now-playing bar advances to the next track (active
   only while playing with something queued).
+- **Play a queued track now** — in the expanded list, **click any upcoming track**
+  to jump straight to it: the current track is dropped and that one starts at once,
+  leaving the rest of the queue intact.
 - **Reorder by removing** — in the expanded list, **−** drops an upcoming track.
 
 The queue belongs to the room (its master), so everyone controlling that room —

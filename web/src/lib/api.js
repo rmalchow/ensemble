@@ -175,6 +175,18 @@ export function enqueue(masterId, uris) {
 export function queueRemove(masterId, index, uri) {
   return toasted(req("POST", base(masterId) + "/queue/remove", { index, uri }));
 }
+// queuePlay promotes the upcoming item at index (0 == next) to play now, dropping
+// the current track; uri guards the index.
+export function queuePlay(masterId, index, uri) {
+  return toasted(req("POST", base(masterId) + "/queue/play", { index, uri }));
+}
+// getQueue pulls the UPCOMING queue items live from the master. The queue is not
+// gossiped (only its length + a change marker ride the playback record), so the UI
+// fetches the contents here — proxied to the master — when the marker moves. Not
+// toasted: it is a background refresh, not a user action.
+export function getQueue(masterId) {
+  return req("GET", base(masterId) + "/queue");
+}
 // next skips to the next queued track (gaplessly).
 export function next(masterId) {
   return toasted(req("POST", base(masterId) + "/next"));

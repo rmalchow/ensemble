@@ -35,17 +35,23 @@ func lookExecTool() (execTool, string, bool) {
 	return execTool{}, "", false
 }
 
+// respawnThrottle bounds how often a write failure may respawn the player, so a
+// persistently-failing tool (e.g. no audio device) can't fork-bomb at frame
+// cadence. The first failure of an episode respawns immediately (lastSpawn zero).
+const respawnThrottle = time.Second
+
 // execBackend pipes canonical PCM (s16le 48k stereo) into a player subprocess.
 type execBackend struct {
-	cmd      *exec.Cmd
-	in       io.WriteCloser // stdin pipe
-	toolPath string
-	toolName string
-	toolArgs []string
-	log      *slog.Logger
-	once     sync.Once
-	mu       sync.Mutex
-	closed   bool
+	cmd       *exec.Cmd
+	in        io.WriteCloser // stdin pipe
+	toolPath  string
+	toolName  string
+	toolArgs  []string
+	log       *slog.Logger
+	once      sync.Once
+	mu        sync.Mutex
+	closed    bool
+	lastSpawn time.Time // last (re)spawn, for throttling respawn-on-write-failure
 }
 
 func newExecBackend(log *slog.Logger) (*execBackend, error) {
@@ -106,14 +112,59 @@ func (b *execBackend) Write(frame []byte) error {
 	if len(frame) != stream.FrameBytes {
 		return fmt.Errorf("exec: frame %d bytes, want %d", len(frame), stream.FrameBytes)
 	}
+	// First attempt against the live pipe, unlocked (the player may apply
+	// backpressure; holding b.mu across a blocking write would stall Close/Flush).
 	b.mu.Lock()
 	w := b.in
 	b.mu.Unlock()
-	if w == nil {
-		return fmt.Errorf("exec: closed")
+	if w != nil {
+		if _, err := w.Write(frame); err == nil {
+			return nil
+		}
 	}
-	_, err := w.Write(frame)
-	return err
+	// Write failed (broken pipe → the player process died) or no pipe. Respawn the
+	// player and retry once so playout self-heals instead of going silent forever.
+	w = b.respawn()
+	if w == nil {
+		return fmt.Errorf("exec: player down")
+	}
+	if _, err := w.Write(frame); err != nil {
+		return err
+	}
+	return nil
+}
+
+// respawn tears down the dead player and starts a fresh one, returning the new
+// stdin pipe (or nil when throttled, closing, or the spawn failed). Throttled to
+// respawnThrottle so a tool that dies on every start can't spin up processes at
+// frame cadence. Also reaps the old (possibly self-exited) process, avoiding a
+// zombie.
+func (b *execBackend) respawn() io.WriteCloser {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	now := time.Now()
+	if !b.lastSpawn.IsZero() && now.Sub(b.lastSpawn) < respawnThrottle {
+		return nil // too soon: surface the error this frame, retry the next
+	}
+	b.lastSpawn = now
+	if b.in != nil {
+		_ = b.in.Close()
+	}
+	if b.cmd != nil && b.cmd.Process != nil {
+		_ = b.cmd.Process.Kill()
+		_, _ = b.cmd.Process.Wait()
+	}
+	b.cmd, b.in = nil, nil
+	b.log.Warn("exec backend player died; respawning", "tool", b.toolName)
+	if err := b.spawnLocked(); err != nil {
+		b.log.Warn("exec backend respawn failed", "err", err)
+		b.cmd, b.in = nil, nil
+		return nil
+	}
+	return b.in
 }
 
 // Close closes stdin, waits with a short timeout, and kills the process if it

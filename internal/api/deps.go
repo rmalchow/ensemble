@@ -63,6 +63,12 @@ type Group interface {
 	// RemoveFromQueue removes the upcoming item at index (master only); uriGuard
 	// guards an index race when non-empty.
 	RemoveFromQueue(ctx context.Context, index int, uriGuard string) error
+	// PlayQueuedNow promotes the upcoming item at index to play now, dropping the
+	// current track (master only); uriGuard guards an index race when non-empty.
+	PlayQueuedNow(ctx context.Context, index int, uriGuard string) error
+	// QueueList returns the current UPCOMING queue items, read live from the
+	// running session (master only); empty when nothing is queued.
+	QueueList() []contracts.QueueItem
 	// Next skips to the next queued track, gaplessly (master only).
 	Next(ctx context.Context) error
 	// Stop stops THIS node's group playback; master only.

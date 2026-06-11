@@ -136,6 +136,74 @@ func TestQueuePlayNowReplacesCurrent(t *testing.T) {
 	}
 }
 
+func TestQueuePlayUpcomingPromotes(t *testing.T) {
+	open, _ := qOpener(map[string]int{"a": 100, "b": 1, "c": 2})
+	q := newQueueSource([]contracts.QueueItem{item("a"), item("b"), item("c")}, open, nil)
+	if err := q.prime(); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, stream.FrameBytes)
+	_ = q.ReadFrame(buf) // playing "a"; upcoming [b c]
+	// promote upcoming index 1 ("c"): drop "a", play "c" now, "c" leaves its slot.
+	q.PlayUpcoming(1, "c")
+	_ = q.ReadFrame(buf) // now "c"
+	uri, _, _, up := q.Now()
+	if uri != "c" {
+		t.Fatalf("now = %q, want c", uri)
+	}
+	if len(up) != 1 || up[0].URI != "b" {
+		t.Fatalf("upcoming = %v, want [b]", up)
+	}
+}
+
+func TestQueuePlayUpcomingStaleGuardNoop(t *testing.T) {
+	open, _ := qOpener(map[string]int{"a": 100, "b": 1, "c": 1})
+	q := newQueueSource([]contracts.QueueItem{item("a"), item("b"), item("c")}, open, nil)
+	if err := q.prime(); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, stream.FrameBytes)
+	_ = q.ReadFrame(buf) // playing "a"
+	q.PlayUpcoming(0, "wrong")
+	if uri, _, _, up := q.Now(); uri != "a" || len(up) != 2 {
+		t.Fatalf("guard mismatch should be a no-op, now = %q upcoming = %v", uri, up)
+	}
+}
+
+func TestQueueRevBumpsOnChange(t *testing.T) {
+	open, _ := qOpener(map[string]int{"a": 100, "b": 1, "c": 1, "x": 1})
+	q := newQueueSource([]contracts.QueueItem{item("a"), item("b"), item("c")}, open, nil)
+	if err := q.prime(); err != nil {
+		t.Fatal(err)
+	}
+	if q.QueueRev() != 0 {
+		t.Fatalf("initial rev = %d, want 0", q.QueueRev())
+	}
+	steps := []struct {
+		name string
+		do   func()
+	}{
+		{"append", func() { q.Append([]contracts.QueueItem{item("d")}) }},
+		{"remove", func() { q.RemoveUpcoming(0, "b") }},
+		{"playUpcoming", func() { q.PlayUpcoming(0, "c") }},
+		{"playNow", func() { q.PlayNow(item("x")) }},
+		{"next", func() { q.Next() }},
+	}
+	prev := q.QueueRev()
+	for _, s := range steps {
+		s.do()
+		if got := q.QueueRev(); got <= prev {
+			t.Fatalf("after %s, rev = %d, want > %d", s.name, got, prev)
+		}
+		prev = q.QueueRev()
+	}
+	// a no-op (stale guard) must NOT bump the rev.
+	q.RemoveUpcoming(99, "nope")
+	if got := q.QueueRev(); got != prev {
+		t.Fatalf("stale remove bumped rev to %d, want %d", got, prev)
+	}
+}
+
 func TestQueueRemoveUpcoming(t *testing.T) {
 	open, _ := qOpener(map[string]int{"a": 1, "b": 1, "c": 1})
 	q := newQueueSource([]contracts.QueueItem{item("a"), item("b"), item("c")}, open, nil)

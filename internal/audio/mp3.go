@@ -27,6 +27,17 @@ func newMP3Source(r io.Reader) (*mp3Source, error) {
 
 func (m *mp3Source) info() (int, int) { return m.rate, 2 }
 
+// duration reports the track length in seconds from the decoder's total PCM
+// length (go-mp3 emits 16-bit stereo at the file's rate, so 4 bytes/sample-frame).
+// ok=false for a zero/unknown length.
+func (m *mp3Source) duration() (float64, bool) {
+	n := m.dec.Length()
+	if n <= 0 || m.rate <= 0 {
+		return 0, false
+	}
+	return float64(n) / float64(m.rate*4), true
+}
+
 func (m *mp3Source) Close() error { return nil }
 
 func (m *mp3Source) read(dst []int16) ([]int16, error) {

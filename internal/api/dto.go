@@ -123,6 +123,15 @@ type QueueRemoveReq struct {
 	URI   string `json:"uri,omitempty"`
 }
 
+// --- POST /api/queue/play --------------------------------------------------
+// Promote the upcoming item at Index (0 == next) to play now: the current track
+// is dropped and the promoted item plays immediately, vacating its slot. URI,
+// when present, guards against an index race with a concurrent snapshot update.
+type QueuePlayReq struct {
+	Index int    `json:"index"`
+	URI   string `json:"uri,omitempty"`
+}
+
 // --- error envelope (every 4xx/5xx) ----------------------------------------
 type ErrorResp struct {
 	Error string `json:"error"`          // machine-stable short code

@@ -21,10 +21,11 @@ type wavSource struct {
 	r         io.Reader
 	rate      int
 	channels  int
-	bitsPer   int   // bits per sample
-	format    int   // wavPCM | wavIEEEFloat
-	bytesPer  int   // bytes per single sample (per channel)
-	remaining int64 // bytes left in the data chunk (math.MaxInt64 if unknown)
+	bitsPer   int     // bits per sample
+	format    int     // wavPCM | wavIEEEFloat
+	bytesPer  int     // bytes per single sample (per channel)
+	remaining int64   // bytes left in the data chunk (math.MaxInt64 if unknown)
+	durSec    float64 // track length in seconds, 0 when the data size is unknown
 	carry     []byte
 	eof       bool
 }
@@ -82,6 +83,11 @@ func newWAVSource(r io.Reader) (*wavSource, error) {
 			if err := w.validate(); err != nil {
 				return nil, err
 			}
+			if w.remaining != math.MaxInt64 {
+				if bytesPerSec := w.rate * w.channels * w.bytesPer; bytesPerSec > 0 {
+					w.durSec = float64(w.remaining) / float64(bytesPerSec)
+				}
+			}
 			return w, nil
 		default:
 			// Skip aux chunks (LIST, fact, …); chunks are word-aligned.
@@ -122,6 +128,15 @@ func (w *wavSource) validate() error {
 }
 
 func (w *wavSource) info() (int, int) { return w.rate, w.channels }
+
+// duration reports the track length in seconds from the data-chunk size.
+// ok=false when the size was unknown/streamed (durSec stayed 0).
+func (w *wavSource) duration() (float64, bool) {
+	if w.durSec <= 0 {
+		return 0, false
+	}
+	return w.durSec, true
+}
 
 func (w *wavSource) Close() error { return nil }
 

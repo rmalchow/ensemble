@@ -67,6 +67,7 @@ func nodeView(nid id.ID, r *NodeRecord, alive map[id.ID]bool, seen map[id.ID]int
 		OutputDelayMs:    r.OutputDelayMs,
 		OutputDevice:     r.OutputDevice,
 		OutputDevices:    append([]contracts.OutputDevice(nil), r.OutputDevices...),
+		OutputBackend:    r.OutputBackend,
 		InputDevices:     append([]contracts.InputDevice(nil), r.InputDevices...),
 		Addrs:            append([]string(nil), r.Addrs...),
 		HTTPPort:         r.HTTPPort,
@@ -279,7 +280,8 @@ func resolvePlayback(r *PlaybackRecord) contracts.Playback {
 		Transport:   r.Transport,
 		Source:      r.Source,
 		Metadata:    r.Metadata,
-		Queue:       r.Queue,
+		QueueLen:    r.QueueLen,
+		QueueRev:    r.QueueRev,
 	}
 }
 

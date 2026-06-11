@@ -162,12 +162,13 @@ type Snapshot struct {
 type NodeView struct {
 	ID            id.ID              `json:"id"`
 	Name          string             `json:"name"`
-	Volume        float64            `json:"volume"`        // 0.0–1.0 software gain (D35)
-	OutputDelayMs int                `json:"outputDelayMs"` // hardware latency calibration (D36)
-	OutputDevice  string             `json:"outputDevice"`  // selected ALSA device id (D37); "default" by default
-	OutputDevices []OutputDevice     `json:"outputDevices"` // enumerated devices on this node (D37); empty when none
-	InputDevices  []InputDevice      `json:"inputDevices"`  // enumerated capture devices for calibration (D48); empty when none
-	Addrs         []string           `json:"addrs"`         // self-reported CIDRs
+	Volume        float64            `json:"volume"`                  // 0.0–1.0 software gain (D35)
+	OutputDelayMs int                `json:"outputDelayMs"`           // hardware latency calibration (D36)
+	OutputDevice  string             `json:"outputDevice"`            // selected ALSA device id (D37); "default" by default
+	OutputDevices []OutputDevice     `json:"outputDevices"`           // enumerated devices on this node (D37); empty when none
+	OutputBackend string             `json:"outputBackend,omitempty"` // CHOSEN sink backend ("alsa"|"exec"|"null", §8.5); the one actually playing
+	InputDevices  []InputDevice      `json:"inputDevices"`            // enumerated capture devices for calibration (D48); empty when none
+	Addrs         []string           `json:"addrs"`                   // self-reported CIDRs
 	HTTPPort      int                `json:"httpPort"`
 	StreamPort    int                `json:"streamPort"`
 	SourcePort    int                `json:"sourcePort"`
@@ -244,13 +245,20 @@ type Playback struct {
 	Transport   string         `json:"transport"`          // "udp" | "tcp"
 	Source      SourceStats    `json:"source"`             // master's source stats (§8.2)
 	Metadata    *TrackMetadata `json:"metadata,omitempty"` // now-playing track info; nil when the source has none
-	Queue       []QueueItem    `json:"queue,omitempty"`    // UPCOMING tracks (excludes the one playing now, which is URI/Metadata above)
+	// QueueLen is the number of UPCOMING tracks (excludes the now-playing one).
+	// QueueRev is a monotonic marker bumped on every queue change. The actual queue
+	// items are NOT gossiped (a big queue would blow memberlist's UDP packet and
+	// stall propagation); the UI watches QueueRev and pulls the contents on demand
+	// from the master via GET /queue.
+	QueueLen int   `json:"queueLen,omitempty"`
+	QueueRev int64 `json:"queueRev,omitempty"`
 }
 
-// QueueItem is one UPCOMING track in a file-source play queue. The queue rides
-// the (master-written, replicated) Playback record so any node's UI sees it over
-// the same WS path as now-playing. Metadata is read from embedded tags at enqueue
-// time; nil means the UI falls back to the URI-derived (filename) label.
+// QueueItem is one UPCOMING track in a file-source play queue. The queue is NOT
+// gossiped (only QueueLen/QueueRev ride the Playback record); a node's UI pulls the
+// items on demand from the master via GET /queue. Metadata is read from embedded
+// tags at enqueue time; nil means the UI falls back to the URI-derived (filename)
+// label.
 type QueueItem struct {
 	URI      string         `json:"uri"`
 	Metadata *TrackMetadata `json:"metadata,omitempty"`

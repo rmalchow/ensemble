@@ -58,6 +58,8 @@
   // <select> is hidden when empty (no ALSA on that host).
   let outputDevices = $derived(node.outputDevices ?? []);
   let outputDevice = $derived(node.outputDevice ?? "default");
+  // the CHOSEN sink backend actually playing audio (alsa/exec/null, §8.5).
+  let outputBackend = $derived(node.outputBackend ?? "");
 
   function onDeviceChange(e) {
     const dev = e.target.value;
@@ -216,6 +218,11 @@
     {/if}
 
     <div class="row wrap">
+      {#if outputBackend}
+        <span class="small muted sink" title="the sink backend actually playing audio on this node">
+          sink <strong>{outputBackend}</strong>
+        </span>
+      {/if}
       {#if outputDevices.length > 0}
         <label class="row small muted device">
           output device
@@ -297,6 +304,15 @@
   }
   .device select {
     max-width: 16rem;
+  }
+  .sink {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .sink strong {
+    color: var(--fg);
+    font-weight: 600;
   }
   /* the two chip rows: a small leading label, then the chips */
   .feature-row,

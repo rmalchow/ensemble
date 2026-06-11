@@ -33,6 +33,7 @@ type queueSource struct {
 	pendingReopen  bool // PlayNow(): current slot replaced, reopen it in place
 
 	framesInCur int64 // frames emitted from the current item (per-track position)
+	rev         int64 // monotonic change counter (bumped on any queue mutation / track advance)
 
 	open     func(uri string) (MediaSource, error)
 	onChange func() // engine hook: re-publish the replicated record on a track change
@@ -88,6 +89,7 @@ func (q *queueSource) ReadFrame(dst []byte) error {
 				return io.EOF // queue exhausted
 			}
 			changed = true
+			q.rev++ // track advanced: the upcoming list shifted
 		}
 
 		err := q.inner.ReadFrame(dst)
@@ -188,6 +190,7 @@ func (q *queueSource) Append(items []contracts.QueueItem) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.items = append(q.items, cloneItems(items)...)
+	q.rev++
 }
 
 // PlayNow replaces the currently-playing track with item (the old one is dropped,
@@ -200,10 +203,39 @@ func (q *queueSource) PlayNow(item contracts.QueueItem) {
 	if q.cur < 0 || q.cur >= len(q.items) {
 		q.items = append(q.items, item)
 		q.pendingAdvance = true
+		q.rev++
 		return
 	}
 	q.items[q.cur] = item
 	q.pendingReopen = true
+	q.rev++
+}
+
+// PlayUpcoming promotes the upcoming item at index (0 == the next track) to play
+// now: the current track is dropped (NOT requeued), the promoted item takes the
+// current slot and reopens in place (a gapless front-switch), and it is removed
+// from its upcoming position. uriGuard, when non-empty, must match the promoted
+// item's URI — a guard against index races with concurrent snapshot updates.
+// No-op on a stale index/guard or when nothing is currently playing.
+func (q *queueSource) PlayUpcoming(index int, uriGuard string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.cur < 0 || q.cur >= len(q.items) {
+		return
+	}
+	abs := q.cur + 1 + index
+	if abs <= q.cur || abs >= len(q.items) {
+		return
+	}
+	if uriGuard != "" && q.items[abs].URI != uriGuard {
+		return
+	}
+	item := q.items[abs]
+	// abs > cur, so removing it leaves cur's index intact.
+	q.items = append(q.items[:abs], q.items[abs+1:]...)
+	q.items[q.cur] = item
+	q.pendingReopen = true
+	q.rev++
 }
 
 // Next skips to the next upcoming item (the Next button). When none remain the
@@ -212,6 +244,7 @@ func (q *queueSource) Next() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.pendingAdvance = true
+	q.rev++
 }
 
 // RemoveUpcoming removes the upcoming item at index (0 == the next track). uriGuard,
@@ -228,6 +261,15 @@ func (q *queueSource) RemoveUpcoming(index int, uriGuard string) {
 		return
 	}
 	q.items = append(q.items[:abs], q.items[abs+1:]...)
+	q.rev++
+}
+
+// QueueRev returns the monotonic change counter (QueueProgress). The UI re-pulls
+// the queue contents whenever this moves; the items are never gossiped.
+func (q *queueSource) QueueRev() int64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.rev
 }
 
 // hasUpcoming reports whether any items remain after the current one.

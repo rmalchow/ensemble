@@ -81,6 +81,14 @@ func openFile(_ context.Context, uri, mediaDir string) (Source, error) {
 		return nil, err
 	}
 
+	// Surface the track duration (for the UI transport bar) through the metadata
+	// channel when the decoder can report it (mp3/flac/wav with a known length).
+	if d, ok := dec.(interface{ duration() (float64, bool) }); ok {
+		if secs, ok := d.duration(); ok && secs > 0 {
+			meta.DurationSec = int(secs + 0.5)
+		}
+	}
+
 	return &fileSource{f: f, fr: newFramer(dec), meta: meta}, nil
 }
 

@@ -154,6 +154,10 @@ type fakeGroup struct {
 	removeErr      error
 	removeIndex    int
 	removeURI      string
+	playQErr       error
+	playQIndex     int
+	playQURI       string
+	queueList      []contracts.QueueItem
 	nextErr        error
 	nextN          int
 	stopErr        error
@@ -216,6 +220,20 @@ func (g *fakeGroup) RemoveFromQueue(_ context.Context, index int, uriGuard strin
 	g.removeURI = uriGuard
 	g.mu.Unlock()
 	return g.removeErr
+}
+
+func (g *fakeGroup) PlayQueuedNow(_ context.Context, index int, uriGuard string) error {
+	g.mu.Lock()
+	g.playQIndex = index
+	g.playQURI = uriGuard
+	g.mu.Unlock()
+	return g.playQErr
+}
+
+func (g *fakeGroup) QueueList() []contracts.QueueItem {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.queueList
 }
 
 func (g *fakeGroup) Next(context.Context) error {

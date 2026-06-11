@@ -27,12 +27,13 @@ func newDocument() *Document {
 type NodeRecord struct {
 	ID            id.ID                    `json:"id"`
 	Name          string                   `json:"name"`
-	Volume        float64                  `json:"volume"`        // playback gain 0.0–1.0 (D35)
-	OutputDelayMs int                      `json:"outputDelayMs"` // hardware latency calibration, ±500 (D36)
-	OutputDevice  string                   `json:"outputDevice"`  // selected ALSA device id (D37)
-	OutputDevices []contracts.OutputDevice `json:"outputDevices"` // enumerated devices on this node (D37)
-	InputDevices  []contracts.InputDevice  `json:"inputDevices"`  // enumerated capture devices on this node (D48)
-	Addrs         []string                 `json:"addrs"`         // self-reported CIDRs (§3.1)
+	Volume        float64                  `json:"volume"`                  // playback gain 0.0–1.0 (D35)
+	OutputDelayMs int                      `json:"outputDelayMs"`           // hardware latency calibration, ±500 (D36)
+	OutputDevice  string                   `json:"outputDevice"`            // selected ALSA device id (D37)
+	OutputDevices []contracts.OutputDevice `json:"outputDevices"`           // enumerated devices on this node (D37)
+	OutputBackend string                   `json:"outputBackend,omitempty"` // CHOSEN sink backend ("alsa"|"exec"|"null", §8.5)
+	InputDevices  []contracts.InputDevice  `json:"inputDevices"`            // enumerated capture devices on this node (D48)
+	Addrs         []string                 `json:"addrs"`                   // self-reported CIDRs (§3.1)
 	HTTPPort      int                      `json:"httpPort"`
 	StreamPort    int                      `json:"streamPort"`
 	SourcePort    int                      `json:"sourcePort"`
@@ -80,7 +81,8 @@ type PlaybackRecord struct {
 	Transport   string                   `json:"transport"`
 	Source      contracts.SourceStats    `json:"source"`
 	Metadata    *contracts.TrackMetadata `json:"metadata,omitempty"` // now-playing track info (D57); nil when none
-	Queue       []contracts.QueueItem    `json:"queue,omitempty"`    // upcoming file-queue tracks (master-written)
+	QueueLen    int                      `json:"queueLen,omitempty"` // count of UPCOMING tracks; items are NOT gossiped (pulled on demand, D-queue)
+	QueueRev    int64                    `json:"queueRev,omitempty"` // monotonic change marker; UI re-pulls the queue when it moves
 	Version     uint64                   `json:"version"`
 	UpdatedAt   int64                    `json:"updatedAt"`
 	Writer      id.ID                    `json:"writer"`

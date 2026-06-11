@@ -79,6 +79,7 @@ type Config struct {
 	OutputDelayMs    int
 	OutputDevice     string                      // selected ALSA device id (D37)
 	OutputDevices    []contracts.OutputDevice    // enumerated devices on this node (D37)
+	OutputBackend    string                      // CHOSEN sink backend ("alsa"|"exec"|"null", §8.5)
 	InputDevices     []contracts.InputDevice     // enumerated capture devices on this node (D48)
 	Caps             contracts.Capabilities      // PROBED caps (D40: effective = caps − disabled)
 	Disabled         []string                    // operator-disabled features (D40)
@@ -158,6 +159,7 @@ func New(cfg Config) (*Cluster, error) {
 		OutputDelayMs:    cfg.OutputDelayMs,
 		OutputDevice:     cfg.OutputDevice,
 		OutputDevices:    append([]contracts.OutputDevice(nil), cfg.OutputDevices...),
+		OutputBackend:    cfg.OutputBackend,
 		InputDevices:     append([]contracts.InputDevice(nil), cfg.InputDevices...),
 		Addrs:            append([]string(nil), cfg.Addrs...),
 		HTTPPort:         cfg.HTTPPort,

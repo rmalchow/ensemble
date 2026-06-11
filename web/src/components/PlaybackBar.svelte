@@ -4,7 +4,16 @@
   // on the right. When active it tints (accent band) so the playing room is obvious
   // at a glance; idle keeps the SAME footprint, just emptier (no reflow either way).
   import { position } from "../lib/fmt.js";
-  import { stop, pause, resume, next, queueRemove } from "../lib/api.js";
+  import { createPlayClock, reconcile, sample } from "../lib/playclock.js";
+  import {
+    stop,
+    pause,
+    resume,
+    next,
+    queueRemove,
+    queuePlay,
+    getQueue,
+  } from "../lib/api.js";
 
   let { group, expanded = false } = $props();
 
@@ -13,10 +22,36 @@
   let paused = $derived(pb.state === "paused");
   let active = $derived(playing || paused);
 
-  // the UPCOMING queue (the now-playing track is the bar above); next is enabled
+  // The UPCOMING queue. Only its length + a change marker (queueRev) ride the
+  // gossiped playback record — a big queue would blow memberlist's UDP packet and
+  // stall propagation — so the items themselves are pulled live from the master,
+  // proxied, whenever the marker (or now-playing track) moves. `next` is enabled
   // only while actually playing AND something is queued behind it.
-  let queue = $derived(pb.queue || []);
-  let canNext = $derived(playing && queue.length > 0);
+  let queueLen = $derived(pb.queueLen || 0);
+  let canNext = $derived(playing && queueLen > 0);
+
+  // fetched upcoming items (only while the card is expanded and there's a queue).
+  let queue = $state([]);
+  let lastQueueKey = ""; // guards refetch: only re-pull when the queue actually moved
+  $effect(() => {
+    // Reads below register as effect dependencies; position-only heartbeat ticks
+    // (not in the key) don't re-pull.
+    const key = `${group.master}|${pb.queueRev || 0}|${queueLen}|${pb.uri}|${expanded}|${active}`;
+    if (key === lastQueueKey) return;
+    lastQueueKey = key;
+    if (!expanded || !active || queueLen <= 0) {
+      queue = [];
+      return;
+    }
+    const master = group.master;
+    getQueue(master)
+      .then((list) => {
+        if (lastQueueKey === key) queue = Array.isArray(list) ? list : [];
+      })
+      .catch(() => {
+        if (lastQueueKey === key) queue = [];
+      });
+  });
 
   // a friendly one-line name + a type glyph for the source uri.
   let track = $derived(friendlyTrack(pb.uri));
@@ -29,6 +64,35 @@
   let subtitle = $derived(
     meta ? [meta.artist, meta.album].filter(Boolean).join(" · ") : "",
   );
+  // track length for the transport bar (seconds); 0 = unknown (live/line-in →
+  // the bar shows elapsed time only, no scrub track). Files report it from the
+  // decoder, Spotify from go-librespot.
+  let durationSec = $derived(meta && meta.durationSec ? meta.durationSec : 0);
+
+  // Smooth position: the server reports positionSec only ~every 5 s (group
+  // heartbeat) and a little stale, but position is realtime between events — so a
+  // local clock (lib/playclock) free-runs at 1x, gently slews toward each heartbeat,
+  // and hard-snaps only on a real discontinuity (track change, resume, seek). The
+  // clock object is PLAIN (non-reactive) so the ticker writing displayPos can't feed
+  // back into the reconcile effect; displayPos ($state) is the only reactive output.
+  let displayPos = $state(0);
+  const clock = createPlayClock();
+  $effect(() => {
+    reconcile(clock, {
+      positionSec: pb.positionSec || 0, // tracked deps: position, uri, state
+      uri: pb.uri || "",
+      playing,
+      nowMs: performance.now(),
+    });
+    displayPos = sample(clock, performance.now(), durationSec);
+  });
+  $effect(() => {
+    if (!playing) return; // frozen (paused/idle); the reconcile effect set displayPos
+    const id = setInterval(() => {
+      displayPos = sample(clock, performance.now(), durationSec);
+    }, 250);
+    return () => clearInterval(id);
+  });
   function friendlyTrack(uri) {
     if (!uri) return "";
     if (uri.startsWith("spotify:")) return "Spotify";
@@ -75,6 +139,15 @@
       // toast shown by api.js
     }
   }
+  // clicking a queue item plays it now: the current track is dropped, the clicked
+  // track jumps to the front and starts playing (gapless front-switch).
+  async function onplay(index, uri) {
+    try {
+      await queuePlay(group.master, index, uri);
+    } catch {
+      // toast shown by api.js
+    }
+  }
 
   // a queue entry's display label: tag title (+ artist) when present, else the
   // URI-derived (filename) fallback — same as the now-playing bar.
@@ -103,7 +176,6 @@
         <span class="track">{title}</span>
         {#if subtitle}<span class="sub small">{subtitle}</span>{/if}
       </span>
-      <span class="pos small">{position(pb.positionSec)}</span>
     {/if}
   </div>
 
@@ -138,22 +210,51 @@
   </div>
 </div>
 
-{#if active && queue.length > 0 && !expanded}
-  <!-- collapsed: just the count on a non-selected card (queue list is noise there). -->
-  <div class="queue-collapsed small">{queue.length} in queue</div>
-{:else if active && queue.length > 0}
+{#if active}
+  <!-- transport bar: elapsed · scrubber · total. Display-only for now (disabled);
+       seeking lands in a later pass. Sources with no known length (line-in, live
+       streams) show elapsed only and a disabled empty track. -->
+  <div class="transport">
+    <span class="t-time small">{position(displayPos)}</span>
+    <input
+      class="t-bar"
+      type="range"
+      min="0"
+      max={durationSec || 1}
+      value={durationSec ? Math.min(displayPos, durationSec) : 0}
+      step="0.1"
+      disabled
+      title="seeking coming soon"
+      aria-label="playback position"
+    />
+    <span class="t-time small">{durationSec ? position(durationSec) : "live"}</span>
+  </div>
+{/if}
+
+{#if active && queueLen > 0 && !expanded}
+  <!-- collapsed: just the count on a non-selected card (queue list is noise there).
+       Uses the gossiped length — no fetch needed when the card isn't selected. -->
+  <div class="queue-collapsed small">{queueLen} in queue</div>
+{:else if active && queueLen > 0}
   <!-- expanded queue: the upcoming tracks under the now-playing bar, scrolling
        internally so ~10 are visible without growing the card unbounded. -->
   <div class="queue">
-    <div class="queue-head small">Up next · {queue.length}</div>
+    <div class="queue-head small">Up next · {queueLen}</div>
     <ul class="queue-list">
       {#each queue as item, i (item.uri + ":" + i)}
         <li class="queue-item">
-          <span class="q-idx small">{i + 1}</span>
-          <span class="q-meta" title={item.uri}>
-            <span class="q-title">{queueTitle(item)}</span>
-            {#if queueSub(item)}<span class="q-sub small">{queueSub(item)}</span>{/if}
-          </span>
+          <button
+            class="q-play"
+            onclick={() => onplay(i, item.uri)}
+            title="play now"
+            aria-label="play {queueTitle(item)} now"
+          >
+            <span class="q-idx small">{i + 1}</span>
+            <span class="q-meta">
+              <span class="q-title">{queueTitle(item)}</span>
+              {#if queueSub(item)}<span class="q-sub small">{queueSub(item)}</span>{/if}
+            </span>
+          </button>
           <span class="spacer"></span>
           <button
             class="btn q-rm"
@@ -248,10 +349,29 @@
     white-space: nowrap;
     color: var(--muted);
   }
-  .now .pos {
+  /* transport scrubber row under the bar: elapsed · slider · total. */
+  .transport {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 2px 2px;
+  }
+  .t-time {
     flex: 0 0 auto;
+    min-width: 3em;
     font-variant-numeric: tabular-nums;
     color: var(--muted);
+    text-align: center;
+  }
+  .t-bar {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 4px;
+    accent-color: var(--accent);
+    cursor: default; /* display-only for now */
+  }
+  .t-bar:disabled {
+    opacity: 0.7;
   }
 
   /* right: two equal-width controls, identical footprint in every state */
@@ -314,9 +434,27 @@
   .queue-item:hover {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
+  /* the clickable body (index + media info) — plays that track now. A bare
+     button reset so it reads as a row, with the gap/alignment the row used to own. */
+  .q-play {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .q-play:hover .q-title {
+    color: var(--accent);
+  }
   .q-idx {
     flex: 0 0 auto;
-    align-self: flex-start;
     width: 1.8em;
     text-align: right;
     color: var(--muted);

@@ -66,6 +66,43 @@ func (e *Engine) Enqueue(uris []string) error {
 	return e.startQueue(items)
 }
 
+// PlayQueuedNow promotes the upcoming item at index (0 == the next track) to play
+// now: the current track is dropped and the promoted item plays immediately as a
+// gapless front-switch, vacating its upcoming slot. uriGuard, when non-empty,
+// guards an index race with a concurrent snapshot. No-op when no queue session is
+// running. Master-only.
+func (e *Engine) PlayQueuedNow(index int, uriGuard string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return ErrClosed
+	}
+	qs := e.currentQueueLocked()
+	if qs == nil {
+		return nil
+	}
+	qs.PlayUpcoming(index, uriGuard)
+	e.republishLocked()
+	e.log.Info("queue play-now (promote)", "index", index)
+	return nil
+}
+
+// QueueSnapshot returns the current UPCOMING queue items (excludes the now-playing
+// track), read LIVE from the running session — so the UI always sees the true
+// queue with no gossip lag. Empty when no queue session is running. Master-only;
+// served over GET /queue (the items are deliberately NOT gossiped, only QueueLen/
+// QueueRev ride the playback record).
+func (e *Engine) QueueSnapshot() []contracts.QueueItem {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	qs := e.currentQueueLocked()
+	if qs == nil {
+		return nil
+	}
+	_, _, _, upcoming := qs.Now()
+	return upcoming
+}
+
 // Next skips to the next upcoming queued track (gaplessly). No-op when no queue
 // session is running. Master-only.
 func (e *Engine) Next() error {

@@ -470,6 +470,19 @@ func (s *Server) handleEnqueue(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// handleQueueList returns the UPCOMING queue items for THIS node's group, read
+// live from the master's running session. The queue is deliberately NOT gossiped
+// (only its length + a change marker ride the playback record); the UI pulls the
+// contents here, proxied to the master, whenever that marker moves. Empty array
+// when nothing is queued (or this node isn't the master / isn't playing a queue).
+func (s *Server) handleQueueList(c echo.Context) error {
+	items := s.cfg.Group.QueueList()
+	if items == nil {
+		items = []contracts.QueueItem{}
+	}
+	return c.JSON(http.StatusOK, items)
+}
+
 // handleQueueRemove removes an upcoming item from THIS node's group queue; master
 // only. Index 0 is the next track; uri (optional) guards an index race.
 func (s *Server) handleQueueRemove(c echo.Context) error {
@@ -484,6 +497,24 @@ func (s *Server) handleQueueRemove(c echo.Context) error {
 		return s.fail(c, err)
 	}
 	s.log.Info("ui mutation", append(auditAttrs(c, "queueRemove"), "index", req.Index)...)
+	return c.NoContent(http.StatusNoContent)
+}
+
+// handleQueuePlay promotes an upcoming item in THIS node's group queue to play
+// now, dropping the current track; master only. Index 0 is the next track; uri
+// (optional) guards an index race.
+func (s *Server) handleQueuePlay(c echo.Context) error {
+	var req QueuePlayReq
+	if err := c.Bind(&req); err != nil {
+		return failCode(c, http.StatusBadRequest, "bad_request", "")
+	}
+	if req.Index < 0 {
+		return failCode(c, http.StatusBadRequest, "bad_request", "")
+	}
+	if err := s.cfg.Group.PlayQueuedNow(c.Request().Context(), req.Index, req.URI); err != nil {
+		return s.fail(c, err)
+	}
+	s.log.Info("ui mutation", append(auditAttrs(c, "queuePlay"), "index", req.Index)...)
 	return c.NoContent(http.StatusNoContent)
 }
 
