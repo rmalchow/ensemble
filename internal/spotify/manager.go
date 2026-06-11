@@ -166,7 +166,7 @@ func (m *Manager) startLocked(eid string, ep contracts.SpotifyEndpoint) {
 		m.usedPorts[port] = false
 		return
 	}
-	audio.RegisterSpotifyEndpoint(eid, b.Attach, b.Latest)
+	audio.RegisterSpotifyEndpoint(eid, b.Attach, b.Latest, b.Position)
 	if err := b.Run(m.ctx); err != nil {
 		m.log.Warn("spotify endpoint start failed", "endpoint", eid, "err", err)
 		audio.UnregisterSpotifyEndpoint(eid)

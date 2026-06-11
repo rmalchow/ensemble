@@ -218,6 +218,16 @@ func (s *session) playbackRecord(now time.Time, st contracts.SourceStats) contra
 		}
 		return rec
 	}
+	// A source with an authoritative position (Spotify) overrides the wall-clock
+	// guess: the phone seeks/replays out from under the master, so now-startedUnix
+	// drifts. The source reports go-librespot's real position (and freezes it while
+	// paused); the UI clock snaps to the discontinuity. Until one arrives (ok=false)
+	// the wall-clock value stands.
+	if ps, ok := s.src.(PositionSource); ok {
+		if sec, has := ps.Position(); has {
+			rec.PositionSec = sec
+		}
+	}
 	// Fold in the source's now-playing metadata, if it has any (D57 channel).
 	if ms, ok := s.src.(MetadataSource); ok {
 		if md, has := ms.Metadata(); has {

@@ -61,6 +61,17 @@ type Bridge struct {
 	meta     contracts.TrackMetadata // latest track metadata (under mu); valid when metaOK
 	metaOK   bool                    // a metadata event has arrived this session
 
+	// Authoritative playback position, anchored from go-librespot events. The
+	// master's session can't time position by wall-clock for Spotify — the phone
+	// seeks/replays out from under it — so we capture the position go-librespot
+	// reports (ms) on the metadata + seek events and free-run from that anchor at
+	// 1x while playing. posValid stays false until the first carrying event, so the
+	// session falls back to wall-clock until then.
+	posMs    float64   // anchored position (ms); free-runs from posAt while posPlay
+	posAt    time.Time // when posMs was captured (monotonic)
+	posPlay  bool      // playing at the anchor → interpolate; else frozen
+	posValid bool      // a position-carrying event has arrived this session
+
 	done chan struct{}
 	wg   sync.WaitGroup
 	once sync.Once
@@ -72,6 +83,53 @@ func (b *Bridge) Latest() (contracts.TrackMetadata, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.meta, b.metaOK
+}
+
+// Position returns the current playback position (seconds), interpolated from the
+// last position go-librespot reported. ok=false until the first position-carrying
+// event arrives (the session then times by wall-clock). While playing it free-runs
+// from the anchor at 1x; while paused it holds the anchored value. Safe for any
+// goroutine.
+func (b *Bridge) Position() (float64, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.posValid {
+		return 0, false
+	}
+	ms := b.posMs
+	if b.posPlay {
+		ms += float64(time.Since(b.posAt) / time.Millisecond)
+	}
+	if ms < 0 {
+		ms = 0
+	}
+	return ms / 1000, true
+}
+
+// anchorPos records an authoritative position (ms) at now, with the given play
+// state. Caller holds b.mu.
+func (b *Bridge) anchorPos(ms float64, playing bool, now time.Time) {
+	b.posMs = ms
+	b.posAt = now
+	b.posPlay = playing
+	b.posValid = true
+}
+
+// setPlaying flips the play state, re-anchoring so interpolation stays continuous:
+// freezing captures the current interpolated value as the new anchor; resuming
+// restarts the 1x free-run from where it froze. The playing/paused events carry no
+// position, so we keep the value we have. No-op until a position has been seen.
+// Caller holds b.mu.
+func (b *Bridge) setPlaying(playing bool, now time.Time) {
+	if !b.posValid || b.posPlay == playing {
+		b.posPlay = playing
+		return
+	}
+	ms := b.posMs
+	if b.posPlay {
+		ms += float64(time.Since(b.posAt) / time.Millisecond)
+	}
+	b.anchorPos(ms, playing, now)
 }
 
 // SetDeviceName renames the advertised Connect device live via go-librespot's
@@ -302,6 +360,10 @@ type spotifyEvent struct {
 		AlbumName     string   `json:"album_name"`
 		AlbumCoverURL string   `json:"album_cover_url"`
 		Duration      int      `json:"duration"` // milliseconds
+		// Position rides the metadata + seek events (ms); a pointer so an absent key
+		// (the playing/paused events carry none) is distinguishable from a real 0
+		// (track start, seek-to-zero) and never anchors us spuriously to the origin.
+		Position *int `json:"position"`
 	} `json:"data"`
 }
 
@@ -310,6 +372,7 @@ func (b *Bridge) handleEvent(data []byte) {
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return
 	}
+	now := time.Now()
 	// Capture track metadata from ANY event that carries a name — go-librespot
 	// 0.7.3 puts it on "playing", newer versions also emit a dedicated "metadata"
 	// event. Relying only on "metadata" left the now-playing bar empty on 0.7.3.
@@ -321,6 +384,7 @@ func (b *Bridge) handleEvent(data []byte) {
 			Album:       ev.Data.AlbumName,
 			ArtURL:      ev.Data.AlbumCoverURL,
 			DurationSec: ev.Data.Duration / 1000,
+			HasArt:      ev.Data.AlbumCoverURL != "",
 		}
 		b.metaOK = true
 		b.mu.Unlock()
@@ -328,13 +392,30 @@ func (b *Bridge) handleEvent(data []byte) {
 			b.cfg.OnMetadata()
 		}
 	}
+	// Anchor the authoritative position whenever an event carries one (metadata =
+	// track change, seek = scrub/replay). This is what lets a phone-side seek reach
+	// the now-playing bar and snap the UI clock — wall-clock timing on the master
+	// can't see it. The play state at the anchor decides whether it free-runs.
+	if ev.Data.Position != nil {
+		b.mu.Lock()
+		// Preserve the current play state: metadata/seek don't transition play/pause
+		// (you can seek while paused), and the playing/paused events below own that.
+		b.anchorPos(float64(*ev.Data.Position), b.posPlay, now)
+		b.mu.Unlock()
+	}
 	switch ev.Type {
 	case "playing":
+		b.mu.Lock()
+		b.setPlaying(true, now)
+		b.mu.Unlock()
 		b.log.Info("spotify playing", "track", ev.Data.Name, "artist", firstOf(ev.Data.ArtistNames))
 		if b.cfg.OnPlay != nil {
 			b.cfg.OnPlay()
 		}
 	case "paused", "stopped", "inactive":
+		b.mu.Lock()
+		b.setPlaying(false, now)
+		b.mu.Unlock()
 		b.log.Info("spotify stop", "event", ev.Type)
 		if b.cfg.OnStop != nil {
 			b.cfg.OnStop()

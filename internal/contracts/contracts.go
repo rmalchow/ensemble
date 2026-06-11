@@ -276,6 +276,11 @@ type TrackMetadata struct {
 	Album       string `json:"album,omitempty"`
 	ArtURL      string `json:"artUrl,omitempty"`
 	DurationSec int    `json:"durationSec,omitempty"`
+	// HasArt advertises that displayable cover art is available for this track,
+	// without inlining it into the gossiped record. Spotify also fills ArtURL (a
+	// remote URL the UI loads directly); a file leaves ArtURL empty and the UI
+	// fetches the bytes from the master's GET /cover?uri=… endpoint on demand.
+	HasArt bool `json:"hasArt,omitempty"`
 }
 
 // GroupSettings mirrors the per-group settings record (§8.3/§8.4/§9.1).

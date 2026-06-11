@@ -14,10 +14,12 @@ import (
 // Spotify content (44.1 kHz, s16le stereo). The framer resamples it to 48 kHz.
 const spotifyInputRate = 44100
 
-// spotifyEndpoint is a registered bridge: its live PCM tap + metadata accessor.
+// spotifyEndpoint is a registered bridge: its live PCM tap + metadata/position
+// accessors.
 type spotifyEndpoint struct {
 	attach func() (io.ReadCloser, error)
 	meta   func() (contracts.TrackMetadata, bool)
+	pos    func() (float64, bool) // authoritative position (s); ok=false → unknown yet
 }
 
 // spotifyReg maps an endpoint id to its bridge (D57: a node may run several
@@ -29,11 +31,12 @@ var (
 	spotifyReg = map[string]spotifyEndpoint{}
 )
 
-// RegisterSpotifyEndpoint wires a bridge's audio tap + metadata accessor under an
-// endpoint id ("" = the default endpoint). Replaces any existing entry.
-func RegisterSpotifyEndpoint(id string, attach func() (io.ReadCloser, error), meta func() (contracts.TrackMetadata, bool)) {
+// RegisterSpotifyEndpoint wires a bridge's audio tap + metadata/position accessors
+// under an endpoint id ("" = the default endpoint). Replaces any existing entry.
+// pos may be nil (no position channel); the source then reports none.
+func RegisterSpotifyEndpoint(id string, attach func() (io.ReadCloser, error), meta func() (contracts.TrackMetadata, bool), pos func() (float64, bool)) {
 	spotifyMu.Lock()
-	spotifyReg[id] = spotifyEndpoint{attach: attach, meta: meta}
+	spotifyReg[id] = spotifyEndpoint{attach: attach, meta: meta, pos: pos}
 	spotifyMu.Unlock()
 }
 
@@ -69,6 +72,7 @@ func spotifyEndpointID(uri string) string {
 type spotifySource struct {
 	*liveReader
 	meta func() (contracts.TrackMetadata, bool)
+	pos  func() (float64, bool)
 }
 
 // Metadata satisfies the optional metadata channel: the current Spotify track.
@@ -77,6 +81,16 @@ func (s *spotifySource) Metadata() (contracts.TrackMetadata, bool) {
 		return contracts.TrackMetadata{}, false
 	}
 	return s.meta()
+}
+
+// Position satisfies the optional authoritative-position channel: go-librespot's
+// reported position (interpolated), so a phone-side seek/replay reaches the bar
+// instead of the master's wall-clock guess. ok=false → none yet (use wall-clock).
+func (s *spotifySource) Position() (float64, bool) {
+	if s.pos == nil {
+		return 0, false
+	}
+	return s.pos()
 }
 
 // openSpotify attaches to the running Spotify bridge for the URI's endpoint id and
@@ -96,5 +110,5 @@ func openSpotify(_ context.Context, uri, _ string) (Source, error) {
 	fr := newFramer(dec)
 	cleanup := func() { _ = r.Close() }
 	lr := newLiveReader(fr, func() {}, cleanup)
-	return &spotifySource{liveReader: lr, meta: ep.meta}, nil
+	return &spotifySource{liveReader: lr, meta: ep.meta, pos: ep.pos}, nil
 }

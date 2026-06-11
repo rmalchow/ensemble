@@ -53,6 +53,15 @@ type MetadataSource interface {
 	Metadata() (contracts.TrackMetadata, bool)
 }
 
+// PositionSource is the optional authoritative-position channel: a live source
+// whose true position is driven externally (Spotify — the controlling phone seeks
+// and replays out from under the master) implements it. playbackRecord prefers it
+// over wall-clock elapsed-since-start, so a seek reflects in the bar and the UI
+// clock snaps. ok=false → fall back to wall-clock (no position reported yet).
+type PositionSource interface {
+	Position() (sec float64, ok bool)
+}
+
 // SeekableSource is the optional capability of a MediaSource that can jump to an
 // absolute position (seconds) — decoded file sources implement it; live sources
 // (http/input/spotify) do not. Type-asserted by the queue when seeking.
