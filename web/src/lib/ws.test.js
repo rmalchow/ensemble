@@ -4,6 +4,10 @@ import { cluster, connect, disconnect } from "./ws.svelte.js";
 // Minimal mock WebSocket capturing handlers and readyState.
 class MockWS {
   static instances = [];
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
   constructor(url) {
     this.url = url;
     this.readyState = 0; // CONNECTING
@@ -98,7 +102,7 @@ describe("reconnect", () => {
   function reconnectDelay() {
     const before = MockWS.instances.length;
     let elapsed = 0;
-    for (const step of [500, 1000, 2000, 4000, 8000, 8000]) {
+    for (const step of [500, 1000, 2000, 4000, 5000, 5000]) {
       const wait = step - elapsed;
       if (wait > 1) {
         vi.advanceTimersByTime(wait - 1);
@@ -111,7 +115,7 @@ describe("reconnect", () => {
     return Infinity;
   }
 
-  it("backoff grows geometrically and caps at 8s", () => {
+  it("backoff grows geometrically and caps at 5s", () => {
     connect();
     const seen = [];
     for (let i = 0; i < 5; i++) {
@@ -124,10 +128,32 @@ describe("reconnect", () => {
     expect(seen[1]).toBe(1000);
     expect(seen[2]).toBe(2000);
     expect(seen[3]).toBe(4000);
-    expect(seen[4]).toBe(8000);
+    expect(seen[4]).toBe(5000);
     // one more stays capped
     MockWS.instances[MockWS.instances.length - 1].close();
-    expect(reconnectDelay()).toBe(8000);
+    expect(reconnectDelay()).toBe(5000);
+  });
+
+  it("abandons a stalled connect attempt and retries", () => {
+    connect();
+    const ws = MockWS.instances[0];
+    expect(ws.readyState).toBe(MockWS.CONNECTING);
+    // never opens: after the connect timeout the stalled socket is force-closed...
+    vi.advanceTimersByTime(4000);
+    expect(ws.readyState).toBe(MockWS.CLOSED);
+    expect(cluster.status).toBe("reconnecting");
+    // ...and a fresh attempt follows on the backoff.
+    vi.advanceTimersByTime(500);
+    expect(MockWS.instances.length).toBe(2);
+  });
+
+  it("recovers to open when a later attempt connects", () => {
+    connect();
+    MockWS.instances[0].close(); // node down
+    vi.advanceTimersByTime(500);
+    const ws = MockWS.instances[1];
+    ws.open(); // node back
+    expect(cluster.status).toBe("open");
   });
 
   it("clean open resets backoff", () => {

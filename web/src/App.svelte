@@ -5,6 +5,7 @@
   import Groups from "./sections/Groups.svelte";
   import Nodes from "./sections/Nodes.svelte";
   import Toast from "./components/Toast.svelte";
+  import UnreachableBanner from "./components/UnreachableBanner.svelte";
   // wordmark-small.png is rendered near display size (crisp); wordmark.png is the
   // full-size master, kept for future high-res use but not referenced here.
   import wordmark from "./assets/wordmark-small.png";
@@ -29,6 +30,18 @@
         : "warn",
   );
   let statusTitle = $derived(stale ? cluster.status + " · stale" : cluster.status);
+
+  // When the serving node stays unreachable past a short grace (so brief reconnect
+  // blips don't flash), surface the fallback banner with links to reachable peers.
+  let showFallback = $state(false);
+  $effect(() => {
+    if (cluster.status === "open") {
+      showFallback = false;
+      return;
+    }
+    const id = setTimeout(() => (showFallback = true), 5000);
+    return () => clearTimeout(id);
+  });
 
   // Two pages via hash routing (bulletproof under the embedded SPA — no server
   // route needed): "" → overview (groups + media), "nodes" → the node list.
@@ -91,6 +104,10 @@
     <span class="status-pill {statusLevel}" title={statusTitle}>{self.name || "…"}</span>
   </div>
 </header>
+
+{#if showFallback}
+  <UnreachableBanner {self} />
+{/if}
 
 <Toast />
 

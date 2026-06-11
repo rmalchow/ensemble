@@ -142,7 +142,11 @@ a {
 }
 .app-header .iconlink:hover {
   color: var(--fg);
-  border-color: var(--accent);
+  /* same accent glow as a selected room (GroupCard .selected) */
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent),
+    0 0 22px -6px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 /* sections / panels */
