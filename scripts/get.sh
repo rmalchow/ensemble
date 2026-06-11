@@ -151,33 +151,50 @@ install -m 0755 "$tmp/ensemble" "$LIBDIR/ensemble"
 ln -sf "$LIBDIR/ensemble" "$BINDIR/ensemble"
 ok "installed $LIBDIR/ensemble  (→ $BINDIR/ensemble)"
 
-# --- spotify (optional) ------------------------------------------------------
-# Already installed at the expected location ⇒ the operator clearly wants it;
-# don't ask, just (re)install to pick up a newer go-librespot.
-if [ -x "$LIBDIR/go-librespot" ]; then
-  say "go-librespot already installed — updating it."
-  want_spotify=y
-elif ask "Install Spotify Connect support (go-librespot)?"; then
-  want_spotify=y
+# --- role: master (web UI) or playback-only ----------------------------------
+# Asked first because it gates the rest: a master serves the web UI, gossips, owns
+# cluster state and plays; a playback-only node is receive-only, driven by a master
+# over the control plane. A playback-only node never runs its own Spotify source, so
+# there's no point offering go-librespot there.
+if ask "Run the web UI on this node (control the whole system from here)?" y; then
+  ROLE="master,playback"
+else
+  ROLE="playback"
 fi
-if [ "${want_spotify:-}" = y ]; then
-  glurl="https://github.com/$GLR_REPO/releases/latest/download/go-librespot_linux_${GLARCH}.tar.gz"
-  say "Downloading go-librespot — $glurl"
-  if fetch "$glurl" "$tmp/glr.tar.gz"; then
-    tar -xzf "$tmp/glr.tar.gz" -C "$tmp"
-    glr="$(find "$tmp" -type f -name go-librespot | head -1 || true)"
-    if [ -n "$glr" ]; then
-      install -m 0755 "$glr" "$LIBDIR/go-librespot"
-      ln -sf "$LIBDIR/go-librespot" "$BINDIR/go-librespot"
-      ok "installed $LIBDIR/go-librespot  (→ $BINDIR/go-librespot)"
+
+# --- spotify (optional, masters only) ----------------------------------------
+# Only a master runs the Spotify Connect source; a playback-only node receives audio
+# from the master and needs no go-librespot — so for those we don't even ask.
+if [ "$ROLE" = playback ]; then
+  say "Playback-only node — Spotify Connect not needed; skipping go-librespot."
+else
+  # Already installed at the expected location ⇒ the operator clearly wants it;
+  # don't ask, just (re)install to pick up a newer go-librespot.
+  if [ -x "$LIBDIR/go-librespot" ]; then
+    say "go-librespot already installed — updating it."
+    want_spotify=y
+  elif ask "Install Spotify Connect support (go-librespot)?"; then
+    want_spotify=y
+  fi
+  if [ "${want_spotify:-}" = y ]; then
+    glurl="https://github.com/$GLR_REPO/releases/latest/download/go-librespot_linux_${GLARCH}.tar.gz"
+    say "Downloading go-librespot — $glurl"
+    if fetch "$glurl" "$tmp/glr.tar.gz"; then
+      tar -xzf "$tmp/glr.tar.gz" -C "$tmp"
+      glr="$(find "$tmp" -type f -name go-librespot | head -1 || true)"
+      if [ -n "$glr" ]; then
+        install -m 0755 "$glr" "$LIBDIR/go-librespot"
+        ln -sf "$LIBDIR/go-librespot" "$BINDIR/go-librespot"
+        ok "installed $LIBDIR/go-librespot  (→ $BINDIR/go-librespot)"
+      else
+        err "go-librespot binary not found in the archive — install it manually"
+      fi
     else
-      err "go-librespot binary not found in the archive — install it manually"
+      err "go-librespot download failed — install it manually, then re-run"
     fi
   else
-    err "go-librespot download failed — install it manually, then re-run"
+    say "Skipping Spotify support."
   fi
-else
-  say "Skipping Spotify support."
 fi
 
 # --- systemd service (optional) ----------------------------------------------
@@ -198,17 +215,8 @@ if [ "${want_service:-}" = y ]; then
     systemctl stop ensemble.service
   fi
 
-  # Role: a node that serves the web UI is a "master" (it gossips + owns cluster
-  # state + serves the SPA) and also plays; a node that only plays is "playback"
-  # (receive-only, driven by a master over the control plane).
-  if ask "Run the web UI on this node (control the whole system from here)?" y; then
-    ROLE="master,playback"
-  else
-    ROLE="playback"
-  fi
-
   # Node name: shown in the UI. Mandatory (re-asks until non-empty); defaults to
-  # the name in an existing node.json on re-install.
+  # the name in an existing node.json on re-install. ROLE was chosen up front.
   NAME="$(ask_value "Node name (shown in the UI)" "$(current_node_name)")"
 
   say "Role: $ROLE   ·   Name: $NAME"
