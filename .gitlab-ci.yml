@@ -79,15 +79,22 @@ e2e:
   cache: { key: gomod, paths: [.gomodcache], policy: pull }
   parallel:
     matrix:
-      - { GOOS: linux, GOARCH: amd64 }
-      - { GOOS: linux, GOARCH: arm64 }
-      - { GOOS: linux, GOARCH: arm, GOARM: "6" }   # Pi Zero W / Pi 1 (ARMv6); GOARM=6 mandatory
+      - { GOOS: linux, GOARCH: amd64,  ARCH: amd64 }
+      - { GOOS: linux, GOARCH: arm64,  ARCH: arm64 }
+      # Two 32-bit builds from the same GOARM=6 code (Pi Zero W / Pi 1, ARMv6; GOARM=6
+      # mandatory). purego forces dynamic linking even at CGO_ENABLED=0, and Go stamps
+      # the soft-float armel loader /lib/ld-linux.so.3 — fine on armel, but absent on
+      # hard-float armhf userlands (Raspberry Pi OS), where it dies at exec with
+      # "cannot execute: required file not found". The hf variant overrides the ELF
+      # interpreter to the armhf loader. (See scripts/build.sh for the full rationale.)
+      - { GOOS: linux, GOARCH: arm, GOARM: "6", ARCH: armv6 }                                       # soft-float armel
+      - { GOOS: linux, GOARCH: arm, GOARM: "6", ARCH: armv6hf, INTERP: "/lib/ld-linux-armhf.so.3" } # hard-float armhf
   script:
     - VER="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"   # release tag, else dev sha
-    # arm → armv<N> in the artifact name (matches scripts/build.sh); others use GOARCH as-is.
-    - if [ "$GOARCH" = "arm" ]; then ARCH="armv${GOARM}"; else ARCH="$GOARCH"; fi
     - SUFFIX="${GOOS}-${ARCH}"
-    - go build -trimpath -ldflags "-s -w -X main.version=$VER"
+    - LDFLAGS="-s -w -X main.version=$VER"
+    - if [ -n "${INTERP:-}" ]; then LDFLAGS="$LDFLAGS -I $INTERP"; fi
+    - go build -trimpath -ldflags "$LDFLAGS"
         -o "bin/ensemble-$SUFFIX" ./cmd/ensemble
     # Hand this job's id to the release stage (dotenv): release asset links
     # must address the EXACT build job — the by-ref artifacts endpoint resolves
@@ -254,6 +261,7 @@ changelog:
         fi
         echo
         echo "Pure-Go binaries for linux/amd64 + linux/arm64 + linux/armv6 (Pi Zero W / Pi 1)."
+        echo "32-bit ARM ships two variants: armv6hf (hard-float armhf — Raspberry Pi OS) and armv6 (soft-float armel)."
         echo "Optional libraries (libopus, libasound) are loaded at runtime."
         echo "Android companion APK: see the share/ensemble-android project."
       } > release-notes.md
@@ -281,7 +289,7 @@ release:
   needs: [build-release, changelog, test]
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
-  script: [ 'echo "Releasing $CI_COMMIT_TAG (amd64 $BUILD_JOB_ID_AMD64, arm64 $BUILD_JOB_ID_ARM64, armv6 $BUILD_JOB_ID_ARMV6)"' ]
+  script: [ 'echo "Releasing $CI_COMMIT_TAG (amd64 $BUILD_JOB_ID_AMD64, arm64 $BUILD_JOB_ID_ARM64, armv6 $BUILD_JOB_ID_ARMV6, armv6hf $BUILD_JOB_ID_ARMV6HF)"' ]
   release:
     tag_name: "$CI_COMMIT_TAG"
     name: "Ensemble $CI_COMMIT_TAG"
@@ -292,7 +300,9 @@ release:
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_AMD64/artifacts/raw/bin/ensemble-linux-amd64"
         - name: "ensemble-linux-arm64 ($CI_COMMIT_TAG)"
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARM64/artifacts/raw/bin/ensemble-linux-arm64"
-        - name: "ensemble-linux-armv6 ($CI_COMMIT_TAG)"
+        - name: "ensemble-linux-armv6 — soft-float armel ($CI_COMMIT_TAG)"
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARMV6/artifacts/raw/bin/ensemble-linux-armv6"
+        - name: "ensemble-linux-armv6hf — hard-float armhf / Raspberry Pi OS ($CI_COMMIT_TAG)"
+          url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARMV6HF/artifacts/raw/bin/ensemble-linux-armv6hf"
   tags:
     - shared

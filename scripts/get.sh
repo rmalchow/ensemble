@@ -127,7 +127,13 @@ command -v tar >/dev/null 2>&1 || err "need tar"
 case "$(uname -m)" in
   x86_64 | amd64)        ARCH=amd64; GLARCH=x86_64 ;;
   aarch64 | arm64)       ARCH=arm64; GLARCH=arm64 ;;
-  armv7l | armv6l | arm) ARCH=armv6; GLARCH=armv6 ;; # the armv6 build also runs on armv7
+  armv7l | armv6l | arm)
+    # uname can't tell soft- from hard-float, so pick the build whose ELF
+    # interpreter this system actually has: armhf (Raspberry Pi OS, most distros)
+    # uses /lib/ld-linux-armhf.so.3; armel uses /lib/ld-linux.so.3. Choosing the
+    # wrong one fails at exec with "cannot execute: required file not found".
+    GLARCH=armv6                                       # the armv6 build also runs on armv7
+    if [ -e /lib/ld-linux-armhf.so.3 ]; then ARCH=armv6hf; else ARCH=armv6; fi ;;
   *) err "unsupported architecture: $(uname -m)" ;;
 esac
 say "Detected linux/$ARCH"

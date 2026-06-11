@@ -349,8 +349,15 @@ export const content = {
       },
       {
         name: "Raspberry Pi — 32-bit",
-        rec: "Recommended: Raspberry Pi OS Lite (32-bit). Includes the Pi Zero / Pi 1 (armv6).",
-        arch: "linux · armv6",
+        rec: "Recommended: Raspberry Pi OS Lite (32-bit). Includes the Pi Zero / Pi 1 (armv6). Hard-float — uses /lib/ld-linux-armhf.so.3.",
+        arch: "linux · armv6 · hard-float (armhf)",
+        logos: ["raspberrypi"],
+        file: "assets/downloads/ensemble-linux-armv6hf.tar.gz",
+      },
+      {
+        name: "32-bit ARM — soft-float",
+        rec: "For armel userlands whose loader is /lib/ld-linux.so.3, not Raspberry Pi OS. Same ARMv6 code, soft-float ABI.",
+        arch: "linux · armv6 · soft-float (armel)",
         logos: ["raspberrypi"],
         file: "assets/downloads/ensemble-linux-armv6.tar.gz",
       },
