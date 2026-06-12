@@ -443,6 +443,30 @@ func run(ctx context.Context, opt options) (rerr error) {
 		NodeCfg:           cfg,
 		Spotify:           spotifyCtl,
 		Stats:             statusStats(theSink, clockFol, engine),
+		PlaybackStatuses: func() []api.PlaybackStat {
+			m := srcSrv.Statuses()
+			out := make([]api.PlaybackStat, 0, len(m))
+			for nid, ps := range m {
+				st := ps.Status
+				out = append(out, api.PlaybackStat{
+					NodeID:        nid.String(),
+					Synced:        st.Synced,
+					Playing:       st.Playing,
+					OffsetNs:      st.OffsetNs,
+					RTTNs:         st.RTTNs,
+					RatePPM:       float64(st.RatePPMx1000) / 1000.0,
+					PhaseErrNs:    st.PhaseErrNs,
+					DeviceDelayNs: st.DeviceDelayNs,
+					Buffered:      int(st.Buffered),
+					Played:        st.Played,
+					Silence:       st.Silence,
+					Late:          st.Late,
+					Calibrated:    st.Calibrated,
+					AgeMs:         time.Since(ps.LastSeen).Milliseconds(),
+				})
+			}
+			return out
+		},
 		Sink:              func() api.SinkControl { return theSink },
 		ApplyOutputDevice: applyOutputDevice(backendName, theSink, base),
 		ApplyDisabled:     applyDisabled(disabled, output, cfg.OutputDevice, theSink, base),

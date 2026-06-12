@@ -14,8 +14,17 @@
   import EditableText from "./EditableText.svelte";
   import VolumeSlider from "./VolumeSlider.svelte";
   import SpotifyEndpoints from "./SpotifyEndpoints.svelte";
+  import { playbackStats } from "../lib/stats.svelte.js";
 
   let { node, self, snapshot } = $props();
+
+  // Per-node sync-health telemetry, collected by the master from the STATUS control
+  // payload (§7, D19). Present for playback members the master tracks; greyed when
+  // stale (no STATUS in >3s). The coherence-relevant numbers are offset & phase.
+  let stat = $derived(playbackStats.byId[node.id]);
+  let statStale = $derived(stat ? stat.ageMs > 3000 : false);
+  const fmtMs = (ns) => (ns >= 0 ? "+" : "") + (ns / 1e6).toFixed(2) + " ms";
+  const fmtUs = (ns) => (ns >= 0 ? "+" : "") + (ns / 1e3).toFixed(0) + " µs";
 
   let isSelf = $derived(node.id === self.id);
   // A dead, non-self node can be forgotten: deleted from the cluster and purged
@@ -204,6 +213,23 @@
     {/if}
   </section>
 
+  {#if stat}
+    <section class="node-section sync-health" class:stale={statStale}>
+      <h4 class="node-section-h">sync health{statStale ? " · stale" : ""}</h4>
+      <div class="row wrap">
+        <span class="chip plain" title="clock offset to master (master − local)">offset {fmtMs(stat.offsetNs)}</span>
+        <span class="chip plain" title="round-trip time of the clock sync">rtt {fmtMs(stat.rttNs)}</span>
+        <span class="chip plain" title="servo rate correction (ppm)">drift {stat.ratePPM.toFixed(1)} ppm</span>
+        <span class="chip plain" title="playout phase error vs the smoothed model">phase {fmtUs(stat.phaseErrNs)}</span>
+        {#if stat.deviceDelayNs}<span class="chip plain" title="measured output (device) latency">dev {fmtMs(stat.deviceDelayNs)}</span>{/if}
+        <span class="chip plain" title="jitter-buffer depth (frames)">buf {stat.buffered}f</span>
+        <span class="chip plain" title="silent frames inserted for gaps (underrun proxy)">silence {stat.silence}</span>
+        <span class="chip plain" title="frames dropped (arrived past deadline)">late {stat.late}</span>
+        <span class="chip plain" title="servo setpoint captured (device-queue depth stable)">{stat.calibrated ? "calibrated ✓" : "uncalibrated"}</span>
+      </div>
+    </section>
+  {/if}
+
   {#if canSpotify}
     <section class="node-section">
       <h4 class="node-section-h">spotify endpoints</h4>
@@ -279,6 +305,9 @@
     margin-top: 12px;
     padding-top: 16px;
     border-top: 1px solid var(--border);
+  }
+  .sync-health.stale {
+    opacity: 0.45;
   }
   .node-section-h {
     margin: 0;

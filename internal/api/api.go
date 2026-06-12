@@ -24,7 +24,10 @@ type Config struct {
 	NodeCfg NodeConfig         // config A: persist PATCH /api/node fields
 	Spotify Spotify            // D57 bridge manager (live-apply presets/rename); nil when no go-librespot
 	Stats   func() StatusStats // closure over sink (E), clock (F), source (G) stats
-	Sink    func() SinkControl // closure → the live sink (E); may return nil
+	// PlaybackStatuses returns each playback member's STATUS telemetry as collected
+	// by the master (source server G) — see GET /api/playback/statuses. nil → empty.
+	PlaybackStatuses func() []PlaybackStat
+	Sink             func() SinkControl // closure → the live sink (E); may return nil
 	// ApplyOutputDevice reopens the output backend for the new device and swaps it
 	// into the live sink (D37, §8.5). Wired by main (K); only effective when the
 	// active backend kind is alsa (otherwise a no-op — persist+replicate still
@@ -86,6 +89,7 @@ func New(cfg Config) *Server {
 	g.GET("/status", s.handleStatus)
 	g.PATCH("/node", s.handlePatchNode)
 	g.GET("/cluster", s.handleCluster)
+	g.GET("/playback/statuses", s.handlePlaybackStatuses)
 	g.GET("/media", s.handleMedia)
 	g.GET("/cover", s.handleCover)
 	g.POST("/follow", s.handleFollow)

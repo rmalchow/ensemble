@@ -92,6 +92,18 @@ func (s *Server) handleCluster(c echo.Context) error {
 	return c.JSON(http.StatusOK, s.cfg.Cluster.Snapshot())
 }
 
+// handlePlaybackStatuses returns each playback member's live STATUS telemetry as
+// collected by the master from the STATUS control payload (GET
+// /api/playback/statuses). Lets the UI show per-member sync health even for members
+// with no reachable HTTP API (D56) or on another subnet. Empty when this node isn't
+// collecting any (not a master, or no members reporting).
+func (s *Server) handlePlaybackStatuses(c echo.Context) error {
+	if s.cfg.PlaybackStatuses == nil {
+		return c.JSON(http.StatusOK, []PlaybackStat{})
+	}
+	return c.JSON(http.StatusOK, s.cfg.PlaybackStatuses())
+}
+
 // handleMedia lists this node's local playable files (§6).
 func (s *Server) handleMedia(c echo.Context) error {
 	if s.cfg.Media == nil {

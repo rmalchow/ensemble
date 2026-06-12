@@ -77,6 +77,11 @@ export async function getStatus() {
 export async function getCluster() {
   return req("GET", "/api/cluster");
 }
+// Per-member STATUS telemetry collected by the master (works for members with no
+// reachable HTTP API). Returns [] when this node isn't a master collecting any.
+export async function getPlaybackStatuses() {
+  return req("GET", "/api/playback/statuses");
+}
 
 // --- node actions ---
 export function renameNode(nodeId, name) {

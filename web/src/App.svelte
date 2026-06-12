@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { cluster, connect, disconnect } from "./lib/ws.svelte.js";
   import { getStatus, getCluster, setSelfId } from "./lib/api.js";
+  import { startStatsPolling, stopStatsPolling } from "./lib/stats.svelte.js";
   import Groups from "./sections/Groups.svelte";
   import Nodes from "./sections/Nodes.svelte";
   import Toast from "./components/Toast.svelte";
@@ -81,11 +82,13 @@
         // non-fatal: ws will seed
       }
       connect();
+      startStatsPolling();
     })();
 
     return () => {
       window.removeEventListener("hashchange", onHash);
       disconnect();
+      stopStatsPolling();
     };
   });
 </script>

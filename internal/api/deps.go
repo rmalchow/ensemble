@@ -153,3 +153,25 @@ type ClockStat struct {
 	OffsetNs int64 `json:"offsetNs"`
 	RTTNs    int64 `json:"rttNs"`
 }
+
+// PlaybackStat is one playback member's live telemetry as collected by the MASTER
+// from the STATUS control payload (§7, D19/D63/D64). Exposed by GET
+// /api/playback/statuses so the UI and tools can see every member's sync health —
+// even members with no reachable HTTP API (D56) or on a different subnet. AgeMs is
+// staleness since the last STATUS was received.
+type PlaybackStat struct {
+	NodeID        string  `json:"nodeId"`
+	Synced        bool    `json:"synced"`
+	Playing       bool    `json:"playing"`
+	OffsetNs      int64   `json:"offsetNs"`      // clock offset master−local
+	RTTNs         int64   `json:"rttNs"`         // smallest RTT in the clock window
+	RatePPM       float64 `json:"ratePPM"`       // servo rate correction
+	PhaseErrNs    int64   `json:"phaseErrNs"`    // playout phase error vs model
+	DeviceDelayNs int64   `json:"deviceDelayNs"` // measured output latency, 0 if unknown
+	Buffered      int     `json:"buffered"`      // jitter-buffer depth, frames
+	Played        uint64  `json:"played"`
+	Silence       uint64  `json:"silence"`
+	Late          uint64  `json:"late"`
+	Calibrated    bool    `json:"calibrated"`
+	AgeMs         int64   `json:"ageMs"` // ms since last STATUS (staleness)
+}
