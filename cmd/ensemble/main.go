@@ -437,12 +437,12 @@ func run(ctx context.Context, opt options) (rerr error) {
 		distFS = nil
 	}
 	apiSrv := api.New(api.Config{
-		Cluster:           cl,
-		Group:             &groupAdapter{e: engine, cl: cl},
-		Media:             api.NewMediaLister(cfg.MediaDir),
-		NodeCfg:           cfg,
-		Spotify:           spotifyCtl,
-		Stats:             statusStats(theSink, clockFol, engine),
+		Cluster: cl,
+		Group:   &groupAdapter{e: engine, cl: cl},
+		Media:   api.NewMediaLister(cfg.MediaDir),
+		NodeCfg: cfg,
+		Spotify: spotifyCtl,
+		Stats:   statusStats(theSink, clockFol, engine),
 		PlaybackStatuses: func() []api.PlaybackStat {
 			m := srcSrv.Statuses()
 			out := make([]api.PlaybackStat, 0, len(m))
