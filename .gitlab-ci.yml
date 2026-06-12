@@ -306,3 +306,27 @@ release:
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARMV6HF/artifacts/raw/bin/ensemble-linux-armv6hf"
   tags:
     - shared
+
+# 6) Mirror the release to GitHub (github.com/rmalchow/ensemble) — TAGS ONLY.
+# Runs only after the full test/build/release stages succeed (no `needs`, so it
+# waits on the prior stages), so a broken tag never reaches GitHub. Pushes the
+# tag's commit to GitHub `main` and the tag itself; histories already match, so
+# this fast-forwards. Requires a CI/CD variable GITHUB_TOKEN holding a GitHub PAT
+# with Contents: read/write on the repo (fine-grained PAT, or a classic token
+# with `repo` scope). Mark it Masked.
+github-mirror:
+  stage: release
+  image: alpine:latest
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  variables:
+    GIT_DEPTH: "0"   # full history so the fast-forward push has every ancestor
+    GITHUB_REPO: "github.com/rmalchow/ensemble.git"
+  script:
+    - apk add --no-cache git
+    - git remote remove github 2>/dev/null || true
+    - git remote add github "https://x-access-token:${GITHUB_TOKEN}@${GITHUB_REPO}"
+    - git push github "HEAD:refs/heads/main"   # advance GitHub main to the tagged commit
+    - git push github "refs/tags/$CI_COMMIT_TAG"
+  tags:
+    - shared
