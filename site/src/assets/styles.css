@@ -691,6 +691,8 @@ section { padding: clamp(72px, 12vw, 140px) 0; }
   box-shadow: 0 40px 100px -30px rgba(0, 0, 0, 0.85);
   cursor: default;
 }
+/* Coherence graphs are wide, not portrait phone shots — give them room. */
+.lb-slide.wide img { max-width: min(94vw, 1000px); }
 
 .lb-cap {
   grid-row: 2;

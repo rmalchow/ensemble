@@ -67,20 +67,28 @@ const screens = C.screens.items
   )
   .join("");
 
-// Lightbox carousel — same image set as the screens gallery, in order.
-const lbSlides = C.screens.items
+// Lightbox carousel — the screenshot gallery followed by the measured-coherence
+// graphs, in order. data-lb indices on the thumbs are global across both sets, so
+// the proof graphs open at C.screens.items.length + their own index. The graphs are
+// wide (not portrait phone shots), so they carry a `wide` flag for a larger cap.
+const lbItems = [
+  ...C.screens.items.map((s) => ({ src: s.src, alt: s.alt, cap: `${s.kicker} — ${s.title}` })),
+  ...C.proof.items.map((s) => ({ src: s.src, alt: s.alt, cap: `${s.kicker} — ${s.title}`, wide: true })),
+];
+
+const lbSlides = lbItems
   .map(
     (s) => `
-      <figure class="lb-slide" data-cap="${esc(s.kicker)} — ${esc(s.title)}">
+      <figure class="lb-slide${s.wide ? " wide" : ""}" data-cap="${esc(s.cap)}">
         <img src="${esc(s.src)}" alt="${esc(s.alt)}" loading="lazy" decoding="async" />
       </figure>`
   )
   .join("");
 
-const lbDots = C.screens.items
+const lbDots = lbItems
   .map(
     (s, i) =>
-      `<button class="lb-dot" type="button" data-i="${i}" aria-label="View “${esc(s.title)}”"></button>`
+      `<button class="lb-dot" type="button" data-i="${i}" aria-label="View “${esc(s.cap)}”"></button>`
   )
   .join("");
 
@@ -148,12 +156,13 @@ const techItems = C.tech.items
 
 // Measured-coherence proof: a branded graph (bare PNG from tools/calib/) with the
 // headline + honest judgement set in the brand font. Alternates side like screens.
+const proofLbBase = C.screens.items.length;
 const proof = C.proof.items
   .map(
     (s, i) => `
       <article class="proof-item${i % 2 ? " flip" : ""}">
         <figure class="proof-shot">
-          <img src="${esc(s.src)}" alt="${esc(s.alt)}" loading="lazy" decoding="async" />
+          <img class="lb-thumb" data-lb="${proofLbBase + i}" role="button" tabindex="0" aria-label="Open “${esc(s.title)}” full size" src="${esc(s.src)}" alt="${esc(s.alt)}" loading="lazy" decoding="async" />
         </figure>
         <div class="proof-copy">
           <span class="kicker">${eq(5)}${esc(s.kicker)}</span>
