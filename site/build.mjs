@@ -146,6 +146,25 @@ const techItems = C.tech.items
   )
   .join("");
 
+// Measured-coherence proof: a branded graph (bare PNG from tools/calib/) with the
+// headline + honest judgement set in the brand font. Alternates side like screens.
+const proof = C.proof.items
+  .map(
+    (s, i) => `
+      <article class="proof-item${i % 2 ? " flip" : ""}">
+        <figure class="proof-shot">
+          <img src="${esc(s.src)}" alt="${esc(s.alt)}" loading="lazy" decoding="async" />
+        </figure>
+        <div class="proof-copy">
+          <span class="kicker">${eq(5)}${esc(s.kicker)}</span>
+          ${s.metric ? `<span class="proof-metric">${esc(s.metric)}</span>` : ""}
+          <h3>${esc(s.title)}</h3>
+          <p>${esc(s.body)}</p>
+        </div>
+      </article>`
+  )
+  .join("");
+
 const testimonials = C.testimonials.items
   .map(
     (t) => `
@@ -246,6 +265,15 @@ const page = `<!doctype html>
       <p class="sec-intro">${esc(C.tech.intro)}</p>
     </header>
     <div class="tech-grid">${techItems}</div>
+  </section>
+
+  <section id="proof" class="proof">
+    <header class="sec-head">
+      <span class="eyebrow">${esc(C.proof.eyebrow)}</span>
+      <h2>${esc(C.proof.title)}</h2>
+      <p class="sec-intro">${esc(C.proof.intro)}</p>
+    </header>
+    <div class="proof-list">${proof}</div>
   </section>
 
   <section id="praise" class="praise">

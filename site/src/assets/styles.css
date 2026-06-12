@@ -341,6 +341,43 @@ section { padding: clamp(72px, 12vw, 140px) 0; }
 }
 .screen-copy p { margin: 0; color: var(--muted); max-width: 30rem; }
 
+/* ── proof / measured coherence ─────────────────────────────────────── */
+.proof-list { display: flex; flex-direction: column; gap: clamp(56px, 9vw, 110px); }
+.proof-item {
+  display: grid;
+  grid-template-columns: 1.25fr 0.75fr;
+  gap: clamp(28px, 5vw, 64px);
+  align-items: center;
+}
+.proof-item.flip .proof-shot { order: 2; }
+.proof-shot { margin: 0; }
+.proof-shot img {
+  display: block;
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid var(--line-2);
+  box-shadow: 0 40px 90px -40px rgba(0, 0, 0, 0.8);
+}
+.proof-copy { display: flex; flex-direction: column; }
+.proof-metric {
+  font-family: var(--serif);
+  font-weight: 380;
+  font-size: clamp(40px, 6vw, 64px);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  margin: 10px 0 2px;
+}
+.proof-copy h3 {
+  font-family: var(--serif);
+  font-weight: 380;
+  font-size: clamp(24px, 3.4vw, 33px);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin: 6px 0 12px;
+}
+.proof-copy p { margin: 0; color: var(--muted); max-width: 34rem; }
+
 /* ── how / steps ────────────────────────────────────────────────────── */
 .steps {
   list-style: none;
@@ -593,6 +630,8 @@ section { padding: clamp(72px, 12vw, 140px) 0; }
   .tech-grid { grid-template-columns: 1fr; }
   .screen, .screen.flip .screen-shot { grid-template-columns: 1fr; order: 0; }
   .screen-shot { order: -1 !important; }
+  .proof-item, .proof-item.flip .proof-shot { grid-template-columns: 1fr; order: 0; }
+  .proof-shot { order: -1 !important; }
   .steps { grid-template-columns: 1fr; }
   .step:not(:last-child)::after { display: none; }
   .nav-links { display: none; }

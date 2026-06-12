@@ -21,6 +21,58 @@ Three goals, three pieces:
 
 ---
 
+## Findings — what the microphone measured (2026-06)
+
+Piece 1 is built and validated on the live cluster: two Raspberry-Pi players
+(`pi01` → left, `pi02` → right) and a single USB microphone in the room. The
+measurement is a wideband log-sine-sweep, time-interleaved L/R so the two
+speakers never overlap, matched-filtered with sub-sample parabolic interpolation.
+Each `pi02` sweep is referenced to the **midpoint of its bracketing `pi01`
+sweeps** — that midpoint trick cancels the (large, common) playback-vs-microphone
+clock rate exactly, leaving only the `pi01`↔`pi02` acoustic offset. Tooling:
+[`tools/calib/`](../tools/calib/) (`lr_drift.py`, `compare_drift.py`).
+
+A deliberate ~50 cm speaker move was recovered as **46 cm** purely from the
+acoustic measurement, so the absolute scale is trustworthy.
+
+### Inter-speaker coherence — ±716 µs RMS
+
+![Inter-speaker drift](img/coherence_interspeaker.png)
+
+Over a 12-minute run the two speakers held to **716 µs RMS**, peak-to-peak
+**~2.7 ms**. The curve is a smooth thermal "bowl", not jitter — it wanders slowly
+as the sound-card crystals warm up, with no fast hops. That matters acoustically:
+the precedence (Haas) effect fuses two arrivals into one perceived source up to
+roughly **5–10 ms**, so this offset stays comfortably inside the "single source"
+range the whole time. **Honest read:** sub-millisecond most of the session, with
+a slow multi-millisecond thermal excursion the rate-servo does not currently
+cancel — inaudible, but real, and the thing Piece 2 calibration would null.
+
+### What the servo can — and can't — see
+
+![Microphone vs servo telemetry](img/compare.png)
+
+We polled the master's per-node STATUS telemetry (`GET /api/playback/statuses`)
+during the same run and plotted the players' **self-reported clock-offset
+difference** (`pi02.offsetNs − pi01.offsetNs`) against what the microphone heard.
+The correlation is only **r = +0.20**: the servo's books stay nearly flat while
+the microphone sees the ~2.7 ms thermal wander. The drift therefore lives
+**downstream of the clock the servo controls** — in the DAC / analog output path —
+where the current chain is effectively *blind* to it. This is the central
+motivation for acoustic calibration (Piece 2): close the loop on what the
+speakers actually emit, not just on what their clocks agree to.
+
+### vs the recording clock
+
+![Playback drift vs recording clock](img/coherence_vsclock.png)
+
+For completeness, `pi01`'s arrivals detrended of nominal cadence show the shared
+playback-vs-recording-clock drift (~−3 ppm with small servo wiggle and visible
+re-sync steps). Both speakers move together here — cluster re-syncs preserve
+coherence; they don't split the speakers apart.
+
+---
+
 ## Background: what the system already knows and does
 
 - **Canonical audio:** 48 kHz, stereo, s16le, 20 ms frames (960 samples/ch = 3840 B).

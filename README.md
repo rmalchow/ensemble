@@ -168,8 +168,47 @@ servo'd playout so the audio leaves every speaker at the same instant.
 Deeper docs live in [`docs/`](docs/): [`README.md`](docs/README.md) is the full
 spec, [`arch/`](docs/arch) has per-component design and the decision log,
 [`DUMB-CLIENT.md`](docs/DUMB-CLIENT.md) is the wire protocol,
-[`esp32.md`](docs/esp32.md) the ESP32-S2 hardware node, [`calibrate.md`](docs/calibrate.md)
-the acoustic auto-calibration, and [`RELEASING.md`](RELEASING.md) covers releases.
+[`esp32.md`](docs/esp32.md) the ESP32-S2 hardware node, [`calibration.md`](docs/calibration.md)
+the acoustic coherence measurement & calibration, and [`RELEASING.md`](RELEASING.md) covers releases.
+
+## Measured coherence
+
+Sync is easy to claim, so we measured it. With a single USB microphone in the
+room and two Raspberry-Pi players (`pi01` → left, `pi02` → right) we recorded the
+real acoustic gap between the speakers over a 12-minute run.
+
+**How it's measured.** Each speaker plays a wideband log-sine sweep, time-
+interleaved L/R so the two never overlap. The recording is matched-filtered
+against the reference sweep with sub-sample parabolic interpolation to pin each
+arrival. The trick that makes it robust: every `pi02` sweep is referenced to the
+**midpoint of its two bracketing `pi01` sweeps**, which cancels the (large,
+common) playback-vs-microphone clock rate exactly and leaves only the
+`pi01`↔`pi02` offset. As a ground-truth check, a deliberate ~50 cm speaker move
+was recovered as 46 cm from the audio alone. The toolkit is pure Python in
+[`tools/calib/`](tools/calib/) (`lr_drift.py`, `compare_drift.py`); the full
+write-up is in [`docs/calibration.md`](docs/calibration.md).
+
+### Inter-speaker offset: 716 µs RMS
+
+![Inter-speaker coherence drift](docs/img/coherence_interspeaker.png)
+
+The two speakers held to **716 µs RMS**, peak-to-peak ~2.7 ms. The curve is a
+smooth thermal "bowl" (sound-card crystals warming up), not fast jitter. The
+precedence/Haas effect fuses two arrivals into one perceived source up to ~5–10
+ms, so this stays well inside the single-source range — sub-millisecond most of
+the session, with a slow multi-ms thermal excursion the rate-servo doesn't cancel.
+
+### What the servo can't see
+
+![Microphone vs servo telemetry](docs/img/compare.png)
+
+Polling the master's per-node STATUS telemetry (`GET /api/playback/statuses`)
+during the same run, the players' self-reported clock-offset difference stays
+nearly flat while the microphone sees the full ~2.7 ms wander — correlation
+**r = +0.20**. The drift lives **downstream of the clock the servo controls**, in
+the DAC/analog path, where the chain is currently blind to it. That gap is small
+enough to be inaudible, but it's exactly what on-demand acoustic calibration
+(`outputDelayMs`) is designed to measure and null.
 
 ## Status & scope
 

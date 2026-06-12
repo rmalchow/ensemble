@@ -258,6 +258,35 @@ export const content = {
     ],
   },
 
+  // Measured-coherence proof. Branded graphs (rendered bare by tools/calib/, the
+  // headline + judgement live here as brand-font text). Honest, not just flattering.
+  proof: {
+    eyebrow: "Measured, not promised",
+    title: "We put a microphone in the room.",
+    intro:
+      "Anyone can claim “perfect sync.” So we recorded two Raspberry-Pi speakers with a single microphone and measured the real acoustic gap between them — over twelve minutes, warts and all.",
+    items: [
+      {
+        src: "assets/img/coherence_interspeaker.png",
+        alt: "Inter-speaker drift over 12 minutes: a smooth thermal curve staying within ±716 µs of zero.",
+        kicker: "Inter-speaker offset",
+        metric: "716 µs",
+        title: "Sub-millisecond, all session long",
+        body:
+          "Across a twelve-minute run the two speakers held to 716 µs RMS — a smooth thermal drift as the sound cards warm up, not nervous jitter. Your ears fuse two arrivals into one source up to roughly five milliseconds (the precedence effect), so this sits comfortably inside “one sound.” Honest read: sub-millisecond most of the time, with a slow couple-of-milliseconds thermal wander at the extremes.",
+      },
+      {
+        src: "assets/img/compare.png",
+        alt: "Microphone-measured drift versus the servo's self-reported clock offset; the two barely correlate (r = +0.20).",
+        kicker: "Microphone vs the servo's own books",
+        metric: "r = 0.20",
+        title: "And we measured where it still falls short",
+        body:
+          "We overlaid what the microphone heard against what the players report to each other. They barely agree (r = +0.20): the clocks stay locked while the real drift hides in the sound-card output path, downstream of everything the servo can see. It's small enough to be inaudible — and it's exactly the gap on-demand acoustic calibration is built to close.",
+      },
+    ],
+  },
+
   // Tongue-in-cheek "testimonials". Every quote is invented; the disclaimer makes
   // that unmistakable. Portraits are from Wikimedia Commons, vendored locally.
   testimonials: {
