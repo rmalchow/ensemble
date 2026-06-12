@@ -1,0 +1,5 @@
+.venv/
+*.wav
+__pycache__/
+*.pyc
+results/
