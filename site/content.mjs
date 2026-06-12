@@ -3,6 +3,7 @@
 // needs to change to update the words on the page.
 
 const REPO = "https://gitlab.rand0m.me/share/ensemble";
+const GITHUB = "https://github.com/rmalchow/ensemble";
 const RELEASES = `${REPO}/-/releases`;
 const DOC = (f) => `${REPO}/-/blob/main/docs/user/${f}`;
 const GUIDE = DOC("README.md");
@@ -18,14 +19,14 @@ export const content = {
 
   brand: { name: "ensemble" },
 
+  // Header nav is deliberately trimmed to four links — every section still
+  // exists on the page, this is just the top-bar shortlist. The GitHub entry
+  // renders with an icon (see renderNav in build.mjs).
   nav: [
     { label: "Why", href: "#why" },
-    { label: "Screens", href: "#screens" },
     { label: "How", href: "#how" },
     { label: "Quickstart", href: "#quickstart" },
-    { label: "Tech", href: "#tech" },
-    { label: "Praise", href: "#praise" },
-    { label: "Source", href: REPO },
+    { label: "GitHub", href: GITHUB, icon: "github" },
   ],
 
   hero: {
