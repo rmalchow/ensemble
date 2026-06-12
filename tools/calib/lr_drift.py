@@ -53,6 +53,7 @@ def main():
     ap.add_argument("--discard", type=float, default=4.0)
     ap.add_argument("--out", default="results/wideband")
     ap.add_argument("--label", default="wideband L/R interleave, 12 min")
+    ap.add_argument("--bare", action="store_true", help="omit baked-in titles (site adds brand-font text)")
     args = ap.parse_args()
 
     m = load_mono(args.rec); print(f"recording {len(m)/SR:.0f}s")
@@ -68,30 +69,52 @@ def main():
             break
         pk.append(k); c[max(0, k - minsep):k + minsep] = 0
     pk = sorted(pk)
-    subs = np.array([parab(mag, k) - off for k in pk])      # arrival samples
-    t = subs / SR
+    subs = np.array([parab(mag, k) - off for k in pk])      # arrival samples, sorted
     print(f"  {len(subs)} sweeps found")
-    # even index = L (pi01), odd = R (pi02). Drop a leading R if first peak is odd parity
-    # (assume first detected is an L; gaps could break parity — verify by spacing)
 
-    # vs-clock: L arrivals (even idx) detrended of cadence (period) → drift vs mic clock
-    Lidx = np.arange(0, len(subs), 2)
-    Larr = subs[Lidx]; Lt = t[Lidx]
-    cyc = np.arange(len(Larr)); M = np.vstack([cyc, np.ones(len(cyc))]).T
-    sl, b = np.linalg.lstsq(M, Larr, rcond=None)[0]
-    vs_us = (Larr - (sl * cyc + b)) / SR * 1e6
-    ppm = (sl / (args.period * SR) - 1) * 1e6
-    print(f"  vs-clock: {ppm:+.1f} ppm, wiggle rms {np.std(vs_us):.1f}µs")
+    # Classify each sweep as L (pi01) or R (pi02) by its CYCLE PHASE — robust to a
+    # missed sweep. Detection-order parity would slip on one miss and flip the sign for
+    # the entire tail (the ~10 min break we saw); phase classification can't.
+    persamp = args.period * SR
+    anchor = subs[0]
+    ci = (subs - anchor) / persamp               # cycle index: ~integer for L, +gap/period for R
+    frac = ci - np.floor(ci)
+    isL = np.minimum(frac, 1 - frac) < 0.25      # near phase 0 → L; near gap/period (0.5) → R
+    Lci, Larr = ci[isL], subs[isL]
+    Rci, Rarr = ci[~isL], subs[~isL]
 
-    # inter-speaker: each R (odd) referenced to midpoint of neighbour Ls → rate-cancelled
-    rel_t, rel = [], []
-    for j in range(1, len(subs) - 1, 2):
-        interpL = (subs[j - 1] + subs[j + 1]) / 2
-        rel_t.append(t[j]); rel.append((subs[j] - interpL) / SR * 1e6)
-    rel_t = np.array(rel_t); rel = np.array(rel)
-    # robust outlier purge (reverb mis-picks): keep within 4*MAD of median
-    med = np.median(rel); mad = np.median(np.abs(rel - med)) + 1e-9
-    good = np.abs(rel - med) < 6 * mad
+    # vs-clock: L arrivals detrended of cadence. Fit against the NOMINAL integer cycle
+    # number (round(Lci)), not the measured Lci — Lci is derived from Larr, so fitting
+    # against it is circular (residual ≡ 0). round(Lci) is "which sweep", robust to misses.
+    Lk = np.round(Lci)
+    sl, b = np.polyfit(Lk, Larr, 1)
+    Lt = Larr / SR
+    vs_us = (Larr - (sl * Lk + b)) / SR * 1e6
+    ppm = (sl / persamp - 1) * 1e6
+    # drop reverb mis-picks (local-median purge, as for inter-speaker)
+    lmv = np.array([np.median(vs_us[max(0, i - 4):i + 5]) for i in range(len(vs_us))])
+    rv = vs_us - lmv; sv = np.median(np.abs(rv)) * 1.4826 + 1e-9
+    keepL = np.abs(rv) < max(5 * sv, 200.0)
+    Lt, vs_us = Lt[keepL], vs_us[keepL]
+    print(f"  vs-clock: {ppm:+.1f} ppm, wiggle rms {np.std(vs_us):.1f}µs ({keepL.sum()}/{len(keepL)} kept)")
+
+    # inter-speaker: L arrival at each R's NOMINAL cycle position (k + gap/period) — the
+    # midpoint of the bracketing Ls. (Interpolating at R's *measured* ci would just
+    # recover R, since arrivals are ~linear in ci.) offset = R − that. Cancels the
+    # common playback-vs-mic rate; robust to a missed sweep via the phase-classified Ls.
+    gfrac = args.gap / args.period
+    nomRci = np.round(Rci - gfrac) + gfrac
+    interpL = np.interp(nomRci, Lci, Larr)
+    rel_t = Rarr / SR
+    rel = (Rarr - interpL) / SR * 1e6
+    # robust LOCAL outlier purge: the true inter-speaker drift is smooth, so reject
+    # points that jump far from a rolling median — these are reverb mis-picks at the
+    # tight sweep spacing, not real drift.
+    w = 9
+    locmed = np.array([np.median(rel[max(0, i - w // 2):i + w // 2 + 1]) for i in range(len(rel))])
+    resid = rel - locmed
+    sig = np.median(np.abs(resid)) * 1.4826 + 1e-9
+    good = np.abs(resid) < max(5 * sig, 200.0)  # 200 µs floor
     rel_t, rel = rel_t[good], rel[good]; rel -= np.median(rel)
     print(f"  inter-speaker: rms {np.std(rel):.1f}µs, span {rel.max()-rel.min():.1f}µs over {rel_t[-1]/60:.1f}min "
           f"({good.sum()}/{len(good)} kept)")
@@ -106,10 +129,11 @@ def main():
     fig, ax = plt.subplots(figsize=(11, 4.6), dpi=160)
     ax.plot(Lt/60, vs_us/1000, color=ACCENT, lw=1.3)
     ax.set_xlabel("time (minutes)"); ax.set_ylabel("drift vs recording clock (ms)")
-    fig.text(0.09, 0.95, f"Playback drift vs the recording clock  ({ppm:+.0f} ppm)", color=FG, fontsize=16, fontweight="bold")
-    fig.text(0.063, 0.955, "•", color=ACCENT, fontsize=17)
-    fig.text(0.5, 0.005, args.label, color=MUTED, ha="center", fontsize=10)
-    fig.subplots_adjust(top=0.86, bottom=0.13)
+    if not args.bare:
+        fig.text(0.09, 0.95, f"Playback drift vs the recording clock  ({ppm:+.0f} ppm)", color=FG, fontsize=16, fontweight="bold")
+        fig.text(0.063, 0.955, "•", color=ACCENT, fontsize=17)
+        fig.text(0.5, 0.005, args.label, color=MUTED, ha="center", fontsize=10)
+    fig.subplots_adjust(top=0.97 if args.bare else 0.86, bottom=0.13)
     fig.savefig(args.out + "_vsclock.svg"); fig.savefig(args.out + "_vsclock.png")
 
     fig2, ax2 = plt.subplots(figsize=(11, 4.6), dpi=160)
@@ -119,11 +143,12 @@ def main():
     ax2.plot(rel_t/60, rel, color=ACCENT, lw=0.9, alpha=0.5)
     ax2.scatter(rel_t/60, rel, s=8, color=ACCENT, edgecolors="none")
     ax2.set_xlabel("time (minutes)"); ax2.set_ylabel("inter-speaker drift (µs)")
-    fig2.text(0.09, 0.95, "Inter-speaker coherence drift  (pi02 − pi01)", color=FG, fontsize=16, fontweight="bold")
-    fig2.text(0.063, 0.955, "•", color=ACCENT, fontsize=17)
-    fig2.text(0.975, 0.95, f"±{rms:.0f} µs", color=ACCENT, fontsize=22, fontweight="bold", ha="right")
-    fig2.text(0.5, 0.005, args.label, color=MUTED, ha="center", fontsize=10)
-    fig2.subplots_adjust(top=0.86, bottom=0.13)
+    if not args.bare:
+        fig2.text(0.09, 0.95, "Inter-speaker coherence drift  (pi02 − pi01)", color=FG, fontsize=16, fontweight="bold")
+        fig2.text(0.063, 0.955, "•", color=ACCENT, fontsize=17)
+        fig2.text(0.975, 0.95, f"±{rms:.0f} µs", color=ACCENT, fontsize=22, fontweight="bold", ha="right")
+        fig2.text(0.5, 0.005, args.label, color=MUTED, ha="center", fontsize=10)
+    fig2.subplots_adjust(top=0.97 if args.bare else 0.86, bottom=0.13)
     fig2.savefig(args.out + "_interspeaker.svg"); fig2.savefig(args.out + "_interspeaker.png")
     print("wrote", args.out + "_vsclock.* and _interspeaker.*")
 
