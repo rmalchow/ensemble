@@ -225,6 +225,8 @@
         <span class="chip plain" title="jitter-buffer depth (frames)">buf {stat.buffered}f</span>
         <span class="chip plain" title="silent frames inserted for gaps (underrun proxy)">silence {stat.silence}</span>
         <span class="chip plain" title="frames dropped (arrived past deadline)">late {stat.late}</span>
+        <span class="chip plain" title="cumulative samples the rate-servo duplicated into the output (realized correction, not commanded ppm)">inj {stat.samplesInjected} ({(stat.samplesInjected / 48).toFixed(0)} ms)</span>
+        <span class="chip plain" title="cumulative samples the rate-servo dropped from the output (realized correction, not commanded ppm)">drop {stat.samplesDropped} ({(stat.samplesDropped / 48).toFixed(0)} ms)</span>
         <span class="chip plain" title="servo setpoint captured (device-queue depth stable)">{stat.calibrated ? "calibrated ✓" : "uncalibrated"}</span>
       </div>
     </section>

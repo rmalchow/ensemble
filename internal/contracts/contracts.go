@@ -111,6 +111,11 @@ type SinkStats struct {
 	DeviceDelayNs int64   // last measured output (device) latency, ns; 0 if unreported (D63 telemetry)
 	PhaseErrNs    int64   // playout phase error vs the smoothed model, ns (D64 telemetry)
 	Calibrated    bool    // servo setpoint captured → DeviceDelayNs−PhaseErrNs is stable (D65)
+	// Grounded resample accounting: cumulative samples the rate-servo actually
+	// duplicated into / dropped from the output (per-channel sample units). The
+	// realized correction at the DAC, not the commanded RatePPM.
+	SamplesInjected uint64
+	SamplesDropped  uint64
 }
 
 // SourceStats is surfaced by a node running an audio source (§8.2/§9.1).

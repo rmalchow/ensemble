@@ -129,20 +129,22 @@ func TestSetEqualizeRoundTrip(t *testing.T) {
 
 func TestStatusRoundTrip(t *testing.T) {
 	s := StatusPayload{
-		NodeID:        [16]byte{0x4e, 0xd7, 0x95, 0xd4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
-		Synced:        true,
-		Playing:       true,
-		Calibrated:    true,
-		Buffered:      9,
-		LastSeq:       1 << 40,
-		OffsetNs:      -123456789,
-		RTTNs:         420000,
-		RatePPMx1000:  -31250, // -31.25 ppm
-		Played:        100000,
-		Silence:       42,
-		Late:          7,
-		DeviceDelayNs: 185_000_000, // 185 ms (D63 telemetry)
-		PhaseErrNs:    -2_500_000,  // -2.5 ms (D64 telemetry)
+		NodeID:          [16]byte{0x4e, 0xd7, 0x95, 0xd4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
+		Synced:          true,
+		Playing:         true,
+		Calibrated:      true,
+		Buffered:        9,
+		LastSeq:         1 << 40,
+		OffsetNs:        -123456789,
+		RTTNs:           420000,
+		RatePPMx1000:    -31250, // -31.25 ppm
+		Played:          100000,
+		Silence:         42,
+		Late:            7,
+		DeviceDelayNs:   185_000_000, // 185 ms (D63 telemetry)
+		PhaseErrNs:      -2_500_000,  // -2.5 ms (D64 telemetry)
+		SamplesInjected: 1_234,       // grounded resample counts
+		SamplesDropped:  5_678,
 	}
 	buf := s.AppendTo(nil)
 	if len(buf) != StatusLen {

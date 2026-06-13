@@ -178,17 +178,19 @@ func (p *localPlayer) SetCap(capID uint8, on bool) {}
 func (p *localPlayer) Status() stream.StatusPayload {
 	st := p.sink.Stats()
 	s := stream.StatusPayload{
-		NodeID:        [16]byte(p.self),
-		Synced:        st.Synced,
-		Playing:       p.playing,
-		Buffered:      clampU16(st.Buffered),
-		RatePPMx1000:  int32(st.RatePPM * 1000),
-		Played:        st.Played,
-		Silence:       st.Silence,
-		Late:          st.LateDrop,
-		DeviceDelayNs: st.DeviceDelayNs,
-		PhaseErrNs:    st.PhaseErrNs,
-		Calibrated:    st.Calibrated,
+		NodeID:          [16]byte(p.self),
+		Synced:          st.Synced,
+		Playing:         p.playing,
+		Buffered:        clampU16(st.Buffered),
+		RatePPMx1000:    int32(st.RatePPM * 1000),
+		Played:          st.Played,
+		Silence:         st.Silence,
+		Late:            st.LateDrop,
+		DeviceDelayNs:   st.DeviceDelayNs,
+		PhaseErrNs:      st.PhaseErrNs,
+		Calibrated:      st.Calibrated,
+		SamplesInjected: st.SamplesInjected,
+		SamplesDropped:  st.SamplesDropped,
 	}
 	if p.clockStats != nil {
 		off, rtt, synced := p.clockStats()

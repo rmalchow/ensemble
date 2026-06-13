@@ -41,12 +41,12 @@ func ParseCodec(s string) Codec {
 
 // Control-payload sizes (bytes), exact on-wire lengths.
 const (
-	AttachLen   = 16 // §6.1
-	SetVolLen   = 2  // §6.2
-	SetDelayLen = 2  // §6.2
-	SetCapLen   = 2  // §6.2
-	SetEqLen    = 2  // D65: master-driven cross-room equalization delay
-	StatusLen   = 87 // §6.3 (71 + 8 DeviceDelayNs + 8 PhaseErrNs)
+	AttachLen   = 16  // §6.1
+	SetVolLen   = 2   // §6.2
+	SetDelayLen = 2   // §6.2
+	SetCapLen   = 2   // §6.2
+	SetEqLen    = 2   // D65: master-driven cross-room equalization delay
+	StatusLen   = 103 // §6.3 (87 + 8 SamplesInjected + 8 SamplesDropped)
 )
 
 // errBadControl is returned when a control payload is too short / malformed.
@@ -207,9 +207,14 @@ type StatusPayload struct {
 	DeviceDelayNs int64 // measured output (device) latency, ns; 0 if the backend can't report it. The master diffs this across rooms to see inter-node skew (D63 telemetry).
 	PhaseErrNs    int64 // playout phase error vs the smoothed model, ns (D64 telemetry)
 	Calibrated    bool  // servo setpoint captured → DeviceDelayNs−PhaseErrNs is the stable per-room device-queue depth (D65; flag, not a payload field)
+	// Grounded resample accounting: cumulative samples the rate-servo actually
+	// duplicated into / dropped from the output (per-channel sample units) — the
+	// realized correction at the DAC, not the commanded RatePPM.
+	SamplesInjected uint64
+	SamplesDropped  uint64
 }
 
-// AppendTo appends the 87-byte STATUS payload to dst (offsets per §6.3).
+// AppendTo appends the 103-byte STATUS payload to dst (offsets per §6.3).
 func (s StatusPayload) AppendTo(dst []byte) []byte {
 	var b [StatusLen]byte
 	copy(b[0:16], s.NodeID[:])
@@ -234,10 +239,12 @@ func (s StatusPayload) AppendTo(dst []byte) []byte {
 	binary.BigEndian.PutUint64(b[63:71], s.Late)
 	binary.BigEndian.PutUint64(b[71:79], uint64(s.DeviceDelayNs))
 	binary.BigEndian.PutUint64(b[79:87], uint64(s.PhaseErrNs))
+	binary.BigEndian.PutUint64(b[87:95], s.SamplesInjected)
+	binary.BigEndian.PutUint64(b[95:103], s.SamplesDropped)
 	return append(dst, b[:]...)
 }
 
-// DecodeStatus parses an 87-byte STATUS payload.
+// DecodeStatus parses a 103-byte STATUS payload.
 func DecodeStatus(p []byte) (StatusPayload, error) {
 	if len(p) < StatusLen {
 		return StatusPayload{}, errBadControl
@@ -257,6 +264,8 @@ func DecodeStatus(p []byte) (StatusPayload, error) {
 	s.Late = binary.BigEndian.Uint64(p[63:71])
 	s.DeviceDelayNs = int64(binary.BigEndian.Uint64(p[71:79]))
 	s.PhaseErrNs = int64(binary.BigEndian.Uint64(p[79:87]))
+	s.SamplesInjected = binary.BigEndian.Uint64(p[87:95])
+	s.SamplesDropped = binary.BigEndian.Uint64(p[95:103])
 	return s, nil
 }
 

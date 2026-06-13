@@ -27,6 +27,56 @@ func sampleLR(frame []byte, i int) (int16, int16) {
 	return l, r
 }
 
+// TestResamplerSampleCountsGrounded proves the injected/dropped counters reflect
+// REAL resample events: zero at nominal rate (no spurious counts), only drops when
+// the carry overflows (rate>1), only injects when it underflows (rate<1), and
+// drops happen in whole-frame units (the only place a frame is discarded).
+func TestResamplerSampleCountsGrounded(t *testing.T) {
+	feed := func(r *resampler, n int) {
+		for f := 0; f < n; f++ {
+			base := f * stream.FrameSamples
+			r.process(makeFrame(func(i int) (int16, int16) {
+				v := int16((base + i) % 1000)
+				return v, v
+			}))
+		}
+	}
+	// Nominal rate: nothing is added or removed — guards must never fire.
+	r := newResampler()
+	r.setRate(0)
+	feed(r, 400)
+	if inj, drop := r.sampleStats(); inj != 0 || drop != 0 {
+		t.Fatalf("rate=1.0: injected=%d dropped=%d, want 0/0 (no spurious counts)", inj, drop)
+	}
+	// Sustained rate > 1 (DAC slow → carry fills): only DROPS, in whole frames.
+	// +5000 ppm — well above the servo's ±300 clamp so the guard fires quickly in
+	// the test, but gentle enough that the carry never empties (the design range).
+	r = newResampler()
+	r.setRate(5000)
+	feed(r, 800)
+	inj, drop := r.sampleStats()
+	if drop == 0 || inj != 0 {
+		t.Fatalf("rate>1: injected=%d dropped=%d, want drop>0 inj=0", inj, drop)
+	}
+	if drop%stream.FrameSamples != 0 {
+		t.Fatalf("rate>1: dropped=%d not a whole-frame multiple of %d", drop, stream.FrameSamples)
+	}
+	// Sustained rate < 1 (DAC fast → carry drains): only INJECTS.
+	r = newResampler()
+	r.setRate(-5000)
+	feed(r, 800)
+	inj, drop = r.sampleStats()
+	if inj == 0 || drop != 0 {
+		t.Fatalf("rate<1: injected=%d dropped=%d, want inj>0 drop=0", inj, drop)
+	}
+	// Counters are cumulative across a reset (lifetime total for the API).
+	before, _ := r.sampleStats()
+	r.reset()
+	if inj2, _ := r.sampleStats(); inj2 != before {
+		t.Fatalf("reset zeroed the lifetime counter: %d -> %d", before, inj2)
+	}
+}
+
 func TestResamplerUnitRateDelayedIdentity(t *testing.T) {
 	// At rate 1 the resampler is a pure 1-frame delay: output frame f equals
 	// input frame f-1 (frame 0 is silence). The one-frame lookahead is what

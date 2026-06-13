@@ -40,6 +40,15 @@ type resampler struct {
 
 	out  []byte
 	work [stream.Channels][]int32 // reusable per-channel input scratch
+
+	// Grounded resample accounting (per-channel sample units, = time): every
+	// sample the rate correction actually adds to or removes from the stream is
+	// counted here, at the two sites where it really happens — the carry-overflow
+	// frame drop (rate>1) and the underflow duplicate (rate<1). NOT the commanded
+	// ppm: this is what reached the DAC. Cumulative for the resampler's life
+	// (survives reset/gen-change) so the API exposes a running total.
+	injected uint64 // samples duplicated into the output (sustained rate < 1)
+	dropped  uint64 // samples discarded without output (sustained rate > 1)
 }
 
 // leadPad is how many leading carry samples we always keep so p0 (cursor-1) and
@@ -165,6 +174,8 @@ func (r *resampler) process(in []byte) []byte {
 			copy(buf[leadPad:], buf[leadPad+stream.FrameSamples:])
 			r.carry[ch] = buf[:len(buf)-stream.FrameSamples]
 		}
+		// One whole frame of input discarded without ever being emitted.
+		r.dropped += stream.FrameSamples
 	}
 
 	// Carry UNDERFLOW guard. A sustained rate < 1 (outPPM < 0) consumes slightly
@@ -177,13 +188,25 @@ func (r *resampler) process(in []byte) []byte {
 	const heldFloor = leadPad + 8
 	for ch := 0; ch < stream.Channels; ch++ {
 		buf := r.carry[ch]
+		added := 0
 		for len(buf) < heldFloor {
 			buf = append(buf, buf[len(buf)-1])
+			added++
 		}
 		r.carry[ch] = buf
+		if ch == 0 {
+			// Samples duplicated to refill the held lookahead (per channel).
+			r.injected += uint64(added)
+		}
 	}
 
 	return r.out
+}
+
+// sampleStats returns the cumulative grounded resample counts (per-channel
+// sample units): samples duplicated into, and dropped from, the output stream.
+func (r *resampler) sampleStats() (injected, dropped uint64) {
+	return r.injected, r.dropped
 }
 
 // atIdx returns buf[i], clamping to the buffer ends (the cursor never strays

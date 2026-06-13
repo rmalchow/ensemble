@@ -365,7 +365,8 @@ func (p *Playout) Stats() contracts.SinkStats {
 	s := p.stats
 	s.Buffered = p.jb.len()
 	s.RatePPM = p.servo.ratePPM()
-	s.Calibrated = p.servo.setpointNs() > 0 // D65: setpoint frozen → stable device-queue depth
+	s.SamplesInjected, s.SamplesDropped = p.rs.sampleStats() // grounded resample counts
+	s.Calibrated = p.servo.setpointNs() > 0                  // D65: setpoint frozen → stable device-queue depth
 	_, ok := p.clock.MasterNow()
 	s.Synced = ok
 	return s

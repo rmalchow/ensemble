@@ -173,5 +173,10 @@ type PlaybackStat struct {
 	Silence       uint64  `json:"silence"`
 	Late          uint64  `json:"late"`
 	Calibrated    bool    `json:"calibrated"`
-	AgeMs         int64   `json:"ageMs"` // ms since last STATUS (staleness)
+	// Grounded resample accounting: cumulative samples the rate-servo actually
+	// duplicated into / dropped from the output (per-channel sample units) — the
+	// realized DAC correction, not the commanded RatePPM.
+	SamplesInjected uint64 `json:"samplesInjected"`
+	SamplesDropped  uint64 `json:"samplesDropped"`
+	AgeMs           int64  `json:"ageMs"` // ms since last STATUS (staleness)
 }
