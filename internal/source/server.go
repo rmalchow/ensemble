@@ -1,6 +1,7 @@
 package source
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -392,6 +393,12 @@ func (s *Server) handleControlUDP(pkt []byte, from netip.AddrPort) {
 			if s.onStatus != nil {
 				s.onStatus(nid) // refresh liveness (D60): STATUS keeps a driven node alive
 			}
+		} else if s.log != nil && s.log.Enabled(context.Background(), slog.LevelDebug) {
+			// Only under -v: a STATUS that won't decode is almost always a
+			// version/wire-format mismatch (a playback node on stale firmware) —
+			// telemetry silently vanishes otherwise. payloadLen pins the cause.
+			s.log.Warn("STATUS decode failed (version/wire mismatch?)",
+				"payloadLen", len(payload), "from", from.String(), "err", err)
 		}
 	}
 }

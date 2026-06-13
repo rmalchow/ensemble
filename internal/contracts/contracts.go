@@ -188,6 +188,7 @@ type NodeView struct {
 	LastSeenUnix  int64              `json:"lastSeen"`
 	Stale         bool               `json:"stale"` // not updated recently (UI hint)
 	UpdatedAt     int64              `json:"updatedAt"`
+	AppVersion    string             `json:"appVersion,omitempty"` // build version (mDNS "ver=" / self-reported); UI shows it + flags skew
 	Version       uint64             `json:"version"`
 
 	SpotifyEndpoints []SpotifyEndpoint `json:"spotifyEndpoints,omitempty"` // extra Spotify Connect presets (D57); default endpoint is implicit

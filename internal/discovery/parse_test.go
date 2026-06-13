@@ -153,11 +153,12 @@ func TestGossipAddrPort(t *testing.T) {
 
 func TestTXTRecords(t *testing.T) {
 	// A master (incl. the default/legacy zero-role Config) advertises its name + ports.
-	cfg := Config{ID: peerID, Master: true, Name: "living-room", GossipPort: 7946, HTTPPort: 8080, StreamPort: 9090, SourcePort: 9200}
+	cfg := Config{ID: peerID, Master: true, Name: "living-room", Version: "v9.9.9", GossipPort: 7946, HTTPPort: 8080, StreamPort: 9090, SourcePort: 9200}
 	txt := txtRecords(cfg)
 	want := []string{
 		"id=" + peerID.String(),
 		"role=master",
+		"ver=v9.9.9",
 		"name=living-room",
 		"gossip=7946", "http=8080", "stream=9090", "source=9200",
 	}
@@ -173,12 +174,13 @@ func TestTXTRecords(t *testing.T) {
 
 func TestTXTRecordsPlaybackOnly(t *testing.T) {
 	cfg := Config{
-		ID: peerID, Playback: true, ControlPort: 9300, Name: "kitchen",
+		ID: peerID, Playback: true, ControlPort: 9300, Name: "kitchen", Version: "v9.9.9",
 		Caps: Caps{Codecs: []string{"opus", "pcm"}, MaxRate: 48000, HWVolume: true, FixedDelayMs: 30, CanReportQueue: true, Input: false},
 	}
 	want := []string{
 		"id=" + peerID.String(),
 		"role=playback",
+		"ver=v9.9.9",
 		"control=9300", "name=kitchen", "codecs=opus,pcm", "rate=48000", "hwvol=1", "delayms=30", "queue=1", "input=0",
 	}
 	got := txtRecords(cfg)
@@ -209,7 +211,7 @@ func TestTXTRecordsCombinedAdvertisesMaster(t *testing.T) {
 func TestParseEntryPlaybackOnly(t *testing.T) {
 	txt := []string{
 		"id=" + peerID.String(),
-		"role=playback",
+		"role=playback", "ver=v0.12.1",
 		"control=9300", "codecs=opus,pcm", "rate=48000", "hwvol=1", "delayms=30", "queue=1", "input=0",
 	}
 	e := entry(txt, []net.IP{net.ParseIP("192.168.1.17")}, nil)
@@ -219,6 +221,9 @@ func TestParseEntryPlaybackOnly(t *testing.T) {
 	}
 	if p.Master || !p.Playback || !p.PlaybackOnly() {
 		t.Fatalf("roles: master=%v playback=%v only=%v", p.Master, p.Playback, p.PlaybackOnly())
+	}
+	if p.AppVersion != "v0.12.1" {
+		t.Fatalf("AppVersion = %q, want v0.12.1", p.AppVersion)
 	}
 	if p.ControlPort != 9300 || p.GossipPort != 0 {
 		t.Fatalf("ports: control=%d gossip=%d", p.ControlPort, p.GossipPort)

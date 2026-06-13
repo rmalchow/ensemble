@@ -85,6 +85,7 @@ func nodeView(nid id.ID, r *NodeRecord, alive map[id.ID]bool, seen map[id.ID]int
 		LastSeenUnix:     lastSeen,
 		Stale:            lastSeen != 0 && nowUnix-lastSeen > int64(staleAfter.Seconds()),
 		UpdatedAt:        r.UpdatedAt,
+		AppVersion:       r.AppVersion,
 		Version:          r.Version,
 	}
 }

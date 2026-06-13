@@ -148,6 +148,9 @@
       />
       {#if isSelf}<span class="chip">this node</span>{/if}
       <span class="node-id small" title={node.id}>{shortId(node.id)}</span>
+      {#if node.appVersion}
+        <span class="chip plain ver" title="build version (from mDNS advert)">{node.appVersion}</span>
+      {/if}
     </div>
     <span class="row small">
       <span class="muted">

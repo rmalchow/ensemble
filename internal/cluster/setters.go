@@ -354,6 +354,7 @@ func (c *Cluster) UpsertPlaybackNode(p discovery.Peer) {
 		Addrs:        []string{cidr},
 		Name:         p.Name, // advertised name (the node's node.json) — first-discovery default
 		Caps:         contracts.Capabilities{Playback: true, Codecs: append([]string(nil), p.Caps.Codecs...)},
+		AppVersion:   p.AppVersion, // build version from mDNS advert (UI / version-skew check)
 	}
 	if cur != nil {
 		rec.Following = cur.Following // preserve operator assignment (D59)
@@ -457,6 +458,7 @@ func (c *Cluster) PatchPlaybackNode(node id.ID, name *string, volume *float64, d
 // proxy bookkeeping, not advertised identity, so they are excluded.
 func playbackIdentityChanged(a, b *NodeRecord) bool {
 	return a.ControlPort != b.ControlPort ||
+		a.AppVersion != b.AppVersion || // an upgraded node re-advertises a new ver= → propagate
 		!equalStrings(a.Addrs, b.Addrs) ||
 		!equalStrings(a.Caps.Codecs, b.Caps.Codecs)
 }

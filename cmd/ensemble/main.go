@@ -317,6 +317,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 			HTTPPort:   httpPort,
 			StreamPort: streamPort,
 			SourcePort: sourcePort,
+			Version:    version,
 			Log:        base,
 		})
 	}
@@ -327,6 +328,7 @@ func run(ctx context.Context, opt options) (rerr error) {
 	cl, err := cluster.New(cluster.Config{
 		Self:             cfg.NodeID,
 		Name:             cfg.NodeName,
+		Version:          version,
 		Volume:           cfg.Volume,
 		OutputDelayMs:    cfg.OutputDelayMs,
 		OutputDevice:     cfg.OutputDevice,
@@ -707,6 +709,7 @@ func runPlayback(ctx context.Context, opt options, cfg *config.Config, base *slo
 			Master:      false,
 			Playback:    true,
 			Name:        cfg.NodeName,
+			Version:     version,
 			ControlPort: controlPort,
 			Caps: discovery.Caps{
 				Codecs:         caps.Codecs,

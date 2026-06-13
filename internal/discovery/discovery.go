@@ -57,6 +57,11 @@ type Peer struct {
 	Playback bool   // role=playback: wire-driven, non-gossiping (D50)
 	Name     string // advertised room/speaker name (masters + playback nodes, from TXT)
 
+	// AppVersion is the peer's build version (TXT "ver="), e.g. "v0.12.1" or "dev".
+	// Advertised by every role so the master/UI can spot a node running stale
+	// firmware — the cheap answer to "is this Pi actually on the new wire format?".
+	AppVersion string
+
 	// Master fields (zero when !Master).
 	GossipPort int // from TXT "gossip="
 	HTTPPort   int // from TXT "http="
@@ -103,6 +108,7 @@ type Config struct {
 	Master   bool   // advertise role=master + its ports
 	Playback bool   // (when !Master) advertise role=playback + control + caps
 	Name     string // advertised room/speaker name (playback-only advert)
+	Version  string // build version advertised in TXT "ver=" (main.version)
 
 	GossipPort int // actually-bound ports (§2 bind-or-increment result)
 	HTTPPort   int
@@ -216,6 +222,7 @@ func txtRecords(cfg Config) []string {
 	recs := []string{
 		"id=" + cfg.ID.String(),
 		"role=" + advertRole(cfg),
+		"ver=" + cfg.Version, // build version (every role) so the UI can flag stale nodes
 	}
 	if playbackOnly(cfg) {
 		// Playback-only advert (D50/D51): control + capabilities, no gossip.

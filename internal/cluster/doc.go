@@ -52,10 +52,11 @@ type NodeRecord struct {
 	StreamPort    int                      `json:"streamPort"`
 	SourcePort    int                      `json:"sourcePort"`
 	GossipPort    int                      `json:"gossipPort"`
-	Caps          contracts.Capabilities   `json:"caps"`      // PROBED caps (host reality); effective = caps − disabled (D40)
-	Disabled      []string                 `json:"disabled"`  // operator-disabled features (D40); subset of {playback,opus,input}
-	Following     id.ID                    `json:"following"` // id.Zero == solo
-	Observed      map[id.ID]obsEntry       `json:"observed"`  // peerID -> {ip,lastSeen}
+	Caps          contracts.Capabilities   `json:"caps"`                 // PROBED caps (host reality); effective = caps − disabled (D40)
+	Disabled      []string                 `json:"disabled"`             // operator-disabled features (D40); subset of {playback,opus,input}
+	Following     id.ID                    `json:"following"`            // id.Zero == solo
+	Observed      map[id.ID]obsEntry       `json:"observed"`             // peerID -> {ip,lastSeen}
+	AppVersion    string                   `json:"appVersion,omitempty"` // build version: self-reported, or a playback node's mDNS "ver="
 	Version       uint64                   `json:"version"`
 	UpdatedAt     int64                    `json:"updatedAt"` // unix seconds, LWW timestamp
 

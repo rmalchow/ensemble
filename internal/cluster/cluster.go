@@ -75,6 +75,7 @@ type obsThrottle struct {
 type Config struct {
 	Self             id.ID
 	Name             string
+	Version          string // build version (main.version); stored in this node's own record + advertised
 	Volume           float64
 	OutputDelayMs    int
 	OutputDevice     string                      // selected ALSA device id (D37)
@@ -171,6 +172,7 @@ func New(cfg Config) (*Cluster, error) {
 		Following:        cfg.InitialFollowing,
 		SpotifyEndpoints: cloneEndpoints(cfg.SpotifyEndpoints),
 		Observed:         map[id.ID]obsEntry{},
+		AppVersion:       cfg.Version,
 		Version:          1,
 		UpdatedAt:        nowUnix,
 	}

@@ -1,6 +1,8 @@
 package playback
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -136,6 +138,19 @@ func (l *Listener) readLoop() {
 	}
 }
 
+// warnDecode logs a control-packet decode failure at WARN, but ONLY when verbose
+// (-v / debug) logging is enabled. A wrong payload length here is the fingerprint
+// of a version / wire-format mismatch between this node and its master (e.g. a Pi
+// left on stale firmware) — otherwise these are dropped silently.
+func (l *Listener) warnDecode(typ byte, payload []byte, from netip.AddrPort, err error) {
+	if l.log == nil || !l.log.Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	l.log.Warn("control decode failed (version/wire mismatch?)",
+		"type", fmt.Sprintf("0x%02x", typ), "payloadLen", len(payload),
+		"from", from.String(), "err", err)
+}
+
 // handle dispatches one decoded control packet. Pure w.r.t. sockets (unit-tested
 // directly). Unknown types are ignored (forward-compat, PLAYER §2).
 func (l *Listener) handle(typ byte, payload []byte, from netip.AddrPort) {
@@ -143,6 +158,7 @@ func (l *Listener) handle(typ byte, payload []byte, from netip.AddrPort) {
 	case stream.TypeAttach:
 		a, err := stream.DecodeAttach(payload)
 		if err != nil {
+			l.warnDecode(typ, payload, from, err)
 			return
 		}
 		l.onAttach(a)
@@ -151,24 +167,28 @@ func (l *Listener) handle(typ byte, payload []byte, from netip.AddrPort) {
 	case stream.TypeSetVol:
 		v, err := stream.DecodeSetVol(payload)
 		if err != nil {
+			l.warnDecode(typ, payload, from, err)
 			return
 		}
 		l.onSetVol(v)
 	case stream.TypeSetDelay:
 		d, err := stream.DecodeSetDelay(payload)
 		if err != nil {
+			l.warnDecode(typ, payload, from, err)
 			return
 		}
 		l.onSetDelay(d)
 	case stream.TypeSetEq:
 		e, err := stream.DecodeSetEqualize(payload)
 		if err != nil {
+			l.warnDecode(typ, payload, from, err)
 			return
 		}
 		l.onSetEqualize(e)
 	case stream.TypeSetCap:
 		c, err := stream.DecodeSetCap(payload)
 		if err != nil {
+			l.warnDecode(typ, payload, from, err)
 			return
 		}
 		// Caps are rare toggles; forward without dedup (the Player is idempotent).

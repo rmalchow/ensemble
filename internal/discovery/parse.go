@@ -68,6 +68,8 @@ func parseEntry(e *zeroconfServiceEntry, self id.ID) (Peer, bool) {
 		return Peer{}, false // no usable role (parseRoles defaults to master)
 	}
 
+	p.AppVersion = txt["ver"] // build version (every role); "" for legacy adverts
+
 	addr, ok := chooseAddr(e.AddrIPv4, e.AddrIPv6)
 	if !ok {
 		return Peer{}, false
