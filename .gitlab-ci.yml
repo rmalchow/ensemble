@@ -133,14 +133,17 @@ build-release:
   stage: build
   image: espressif/idf:release-v5.4
   needs: []
+  # ESP32 firmware is bring-up, not shipped yet: never block the pipeline or the
+  # release on it. Remove allow_failure once the firmware is release-ready.
+  allow_failure: true
   parallel:
     matrix:
       - { BOARD: esp32s3, CHIP: ESP32S3 }
-  variables:
-    IDF_TOOLS_PATH: "$CI_PROJECT_DIR/.espressif"
-  cache:
-    key: idf-tools
-    paths: [.espressif]
+  # Use the IDF + tools PRE-INSTALLED in the espressif/idf image. (This previously
+  # overrode IDF_TOOLS_PATH to a project-local .espressif and cached it — but on a
+  # cache miss that dir is empty, so export.sh cannot find the Python venv and the
+  # build fails with "virtual environment ... not found". The image already has
+  # everything under $IDF_PATH/$IDF_TOOLS_PATH; just source export.sh.)
   script:
     - . "$IDF_PATH/export.sh"
     - cd esp32
@@ -354,10 +357,13 @@ changelog:
 release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
-  needs: [build-release, firmware-release, changelog, test]
+  # Firmware is NOT a release dependency yet (allow_failure, bring-up): the release
+  # ships the linux binaries only, so a failing esp32 build never blocks shipping.
+  # Re-add firmware-release to needs + an asset link when the firmware is ready.
+  needs: [build-release, changelog, test]
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
-  script: [ 'echo "Releasing $CI_COMMIT_TAG (amd64 $BUILD_JOB_ID_AMD64, arm64 $BUILD_JOB_ID_ARM64; fw-s3 $FW_JOB_ID_ESP32S3)"' ]
+  script: [ 'echo "Releasing $CI_COMMIT_TAG (amd64 $BUILD_JOB_ID_AMD64, arm64 $BUILD_JOB_ID_ARM64)"' ]
   release:
     tag_name: "$CI_COMMIT_TAG"
     name: "Ensemble $CI_COMMIT_TAG"
@@ -368,8 +374,6 @@ release:
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_AMD64/artifacts/raw/bin/ensemble-linux-amd64"
         - name: "ensemble-linux-arm64 ($CI_COMMIT_TAG)"
           url: "$CI_PROJECT_URL/-/jobs/$BUILD_JOB_ID_ARM64/artifacts/raw/bin/ensemble-linux-arm64"
-        - name: "ensemble-fw-esp32s3 — ESP32-S3 player firmware ($CI_COMMIT_TAG)"
-          url: "$CI_PROJECT_URL/-/jobs/$FW_JOB_ID_ESP32S3/artifacts/raw/fw/ensemble-fw-esp32s3.bin"
   tags:
     - shared
 
